@@ -676,6 +676,21 @@ void MainWindow::createDocks()
                 Q_UNUSED(name)
                 onPaletteColor(color);
             });
+    connect(m_palette, &ColorPalette::outlineColorPicked, this,
+            [this](const QColor &color, const QString &name) {
+                Q_UNUSED(name)
+                m_view->setStrokeColor(color);
+                m_toolPalette->setStrokeColor(color);
+                const QList<VectorItem *> selected = m_view->selectedVectorItems();
+                if (selected.isEmpty())
+                    return;
+                beginEdit();
+                for (VectorItem *item : selected)
+                    item->setStrokeColor(color);
+                endEdit();
+                statusBar()->showMessage(
+                    QStringLiteral("Цвет обводки: %1").arg(color.name().toUpper()), 4000);
+            });
 
     connect(m_toolPalette, &ToolPalette::fillColorClicked, this, [this]() {
         const QColor color = QColorDialog::getColor(m_view->fillColor(), this,
@@ -1231,6 +1246,7 @@ Document MainWindow::currentDocument() const
     if (!m_view)
         return document;
     document.pageSize = m_view->pageSize();
+    document.layers = m_view->layers();
     document.objects = m_view->objects();
     return document;
 }
@@ -1791,6 +1807,7 @@ void MainWindow::pasteClipboard()
     m_view->scene()->clearSelection();
     for (VectorObject object : m_clipboard) {
         object.pos += QPointF(18.0, 18.0);
+        object.layer = m_view->activeLayer();
         VectorItem *item = m_view->addVectorObject(object, false, false);
         item->setSelected(true);
     }
@@ -1869,10 +1886,10 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("О программе"),
         QStringLiteral(
-            "<h3>Vectora 0.3</h3>"
+            "<h3>Vectora 0.4</h3>"
             "<p>Кроссплатформенный векторный редактор на C++ и Qt 6.</p>"
             "<p>Работают: документы .vct, экспорт PNG/SVG/PDF, печать, "
             "рисование фигур и кривых, Bezier с типами узлов, докеры "
-            "свойств, цвета, выравнивания, эффектов и текста, Undo/Redo.</p>"
+            "свойств, цвета, выравнивания, эффектов и текста, слои, Undo/Redo.</p>"
             "<p style='color:#666'>Linux · Windows · macOS</p>"));
 }

@@ -8,6 +8,8 @@
 
 class QCheckBox;
 class QComboBox;
+class QEvent;
+class QTimer;
 class QDockWidget;
 class QDoubleSpinBox;
 class QFontComboBox;
@@ -50,6 +52,7 @@ private:
     void buildTextDocker();
 
     QList<VectorItem *> selection() const;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
     void refreshTree();
     void refreshProperties();
@@ -71,6 +74,7 @@ private:
     QDockWidget *m_propertiesDock = nullptr;
 
     QTreeWidget *m_tree = nullptr;
+    QComboBox *m_layerTarget = nullptr;
     QLabel *m_selectionLabel = nullptr;
     QWidget *m_propertiesContent = nullptr;
 
@@ -119,4 +123,6 @@ private:
     int m_textAlign = 0;
 
     bool m_updating = false;
+    QTimer *m_colorTimer = nullptr;
+    bool m_colorEditActive = false;
 };

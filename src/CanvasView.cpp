@@ -530,7 +530,16 @@ VectorItem *CanvasView::addVectorObject(const VectorObject &object, bool record,
     if (record)
         emit beginEdit();
 
-    auto *item = new VectorItem(object);
+    if (m_layers.isEmpty()) {
+        m_layers.append(QStringLiteral("Слой 1"));
+        m_activeLayer = 0;
+    }
+
+    VectorObject copy = object;
+    if (copy.layer < 0 || copy.layer >= m_layers.size())
+        copy.layer = m_activeLayer;
+
+    auto *item = new VectorItem(copy);
     scene()->addItem(item);
     item->setZValue(m_nextZ++);
     connect(item, &VectorItem::editStarted, this, &CanvasView::beginEdit);
@@ -541,6 +550,8 @@ VectorItem *CanvasView::addVectorObject(const VectorObject &object, bool record,
         scene()->clearSelection();
         item->setSelected(true);
     }
+
+    normalizeZOrder();
 
     if (record)
         emit endEdit();
@@ -555,9 +566,16 @@ void CanvasView::setDocument(const Document &document)
     m_nextZ = 1.0;
     m_bezierActive = false;
     m_bezierNodes.clear();
+
+    m_layers = document.layers;
+    if (m_layers.isEmpty())
+        m_layers.append(QStringLiteral("Слой 1"));
+    m_activeLayer = qBound(0, m_activeLayer, m_layers.size() - 1);
+
     setPageSize(document.pageSize);
     for (const VectorObject &object : document.objects)
         addVectorObject(object, false, false);
+    normalizeZOrder();
     emit selectionChanged(0);
     viewport()->update();
 }
@@ -584,6 +602,7 @@ void CanvasView::deleteSelectedObjects()
         scene()->removeItem(item);
         delete item;
     }
+    normalizeZOrder();
     emit endEdit();
     emit selectionChanged(0);
     viewport()->update();
@@ -599,38 +618,238 @@ void CanvasView::selectAllObjects()
 
 void CanvasView::raiseSelection()
 {
-    QList<VectorItem *> items = vectorItems();
-    if (items.isEmpty())
+    if (vectorItems().isEmpty())
         return;
 
     emit beginEdit();
-    for (int i = items.size() - 2; i >= 0; --i) {
-        if (items.at(i)->isSelected() && !items.at(i + 1)->isSelected())
-            items.swapItemsAt(i, i + 1);
+    QVector<QList<VectorItem *>> perLayer(m_layers.size());
+    for (int layer = 0; layer < m_layers.size(); ++layer)
+        perLayer[layer] = itemsInLayer(layer);
+
+    for (int layer = 0; layer < perLayer.size(); ++layer) {
+        QList<VectorItem *> &items = perLayer[layer];
+        for (int i = items.size() - 2; i >= 0; --i) {
+            if (items.at(i)->isSelected() && !items.at(i + 1)->isSelected())
+                items.swapItemsAt(i, i + 1);
+        }
     }
-    for (int i = 0; i < items.size(); ++i)
-        items.at(i)->setZValue(i + 1);
-    m_nextZ = items.size() + 1.0;
+    applyLayerLayout(perLayer);
     emit endEdit();
-    viewport()->update();
 }
 
 void CanvasView::lowerSelection()
 {
-    QList<VectorItem *> items = vectorItems();
-    if (items.isEmpty())
+    if (vectorItems().isEmpty())
         return;
 
     emit beginEdit();
-    for (int i = 1; i < items.size(); ++i) {
-        if (items.at(i)->isSelected() && !items.at(i - 1)->isSelected())
-            items.swapItemsAt(i, i - 1);
+    QVector<QList<VectorItem *>> perLayer(m_layers.size());
+    for (int layer = 0; layer < m_layers.size(); ++layer)
+        perLayer[layer] = itemsInLayer(layer);
+
+    for (int layer = 0; layer < perLayer.size(); ++layer) {
+        QList<VectorItem *> &items = perLayer[layer];
+        for (int i = 1; i < items.size(); ++i) {
+            if (items.at(i)->isSelected() && !items.at(i - 1)->isSelected())
+                items.swapItemsAt(i, i - 1);
+        }
     }
-    for (int i = 0; i < items.size(); ++i)
-        items.at(i)->setZValue(i + 1);
-    m_nextZ = items.size() + 1.0;
+    applyLayerLayout(perLayer);
     emit endEdit();
+}
+
+QList<VectorItem *> CanvasView::itemsInLayer(int layer) const
+{
+    QList<VectorItem *> result;
+    for (VectorItem *item : vectorItems()) {
+        if (item->object().layer == layer)
+            result.append(item);
+    }
+    return result;
+}
+
+int CanvasView::layerOf(VectorItem *item) const
+{
+    return item ? item->object().layer : 0;
+}
+
+void CanvasView::setActiveLayer(int index)
+{
+    m_activeLayer = qBound(0, index, qMax(0, m_layers.size() - 1));
+}
+
+int CanvasView::addLayer(const QString &name)
+{
+    emit beginEdit();
+
+    QString layerName = name.trimmed();
+    if (layerName.isEmpty()) {
+        int number = m_layers.size() + 1;
+        layerName = QStringLiteral("Слой %1").arg(number);
+        while (m_layers.contains(layerName)) {
+            ++number;
+            layerName = QStringLiteral("Слой %1").arg(number);
+        }
+    }
+
+    m_layers.append(layerName);
+    m_activeLayer = m_layers.size() - 1;
+    normalizeZOrder();
+
+    emit endEdit();
+    emit selectionChanged(selectedVectorItems().size());
+    return m_activeLayer;
+}
+
+void CanvasView::removeLayer(int index)
+{
+    if (index < 0 || index >= m_layers.size())
+        return;
+    if (m_layers.size() <= 1) {
+        emit statusHint(QStringLiteral("Нельзя удалить единственный слой."));
+        return;
+    }
+
+    emit beginEdit();
+
+    const QList<VectorItem *> doomed = itemsInLayer(index);
+    for (VectorItem *item : doomed) {
+        scene()->removeItem(item);
+        delete item;
+    }
+
+    m_layers.removeAt(index);
+    for (VectorItem *item : vectorItems()) {
+        const int layer = item->object().layer;
+        if (layer > index)
+            item->setLayerIndex(layer - 1);
+    }
+    m_activeLayer = qBound(0, m_activeLayer > index ? m_activeLayer - 1 : m_activeLayer,
+                           m_layers.size() - 1);
+    normalizeZOrder();
+
+    emit endEdit();
+    emit statusHint(QStringLiteral("Слой удалён. Удалено объектов: %1").arg(doomed.size()));
+}
+
+void CanvasView::renameLayer(int index, const QString &name)
+{
+    if (index < 0 || index >= m_layers.size())
+        return;
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty())
+        return;
+
+    emit beginEdit();
+    m_layers[index] = trimmed;
+    emit endEdit();
+}
+
+void CanvasView::moveLayer(int from, int to)
+{
+    if (from < 0 || from >= m_layers.size() || to < 0 || to >= m_layers.size()
+        || from == to) {
+        return;
+    }
+
+    emit beginEdit();
+
+    QVector<int> order;
+    for (int i = 0; i < m_layers.size(); ++i)
+        order.append(i);
+    order.move(from, to);
+
+    QStringList newNames;
+    newNames.reserve(order.size());
+    for (int oldIndex : order)
+        newNames.append(m_layers.at(oldIndex));
+
+    QVector<QList<VectorItem *>> perLayer(order.size());
+    for (VectorItem *item : vectorItems()) {
+        const int newIndex = order.indexOf(item->object().layer);
+        perLayer[newIndex].append(item);
+    }
+
+    m_layers = newNames;
+    m_activeLayer = qMax(0, order.indexOf(m_activeLayer));
+    applyLayerLayout(perLayer);
+
+    emit endEdit();
+}
+
+void CanvasView::moveItemToLayer(VectorItem *item, int layer, int positionFromTop)
+{
+    if (!item || layer < 0 || layer >= m_layers.size())
+        return;
+
+    emit beginEdit();
+
+    QVector<QList<VectorItem *>> perLayer(m_layers.size());
+    for (int i = 0; i < m_layers.size(); ++i)
+        perLayer[i] = itemsInLayer(i);
+
+    const int oldLayer = qBound(0, item->object().layer, m_layers.size() - 1);
+    perLayer[oldLayer].removeAll(item);
+
+    QList<VectorItem *> &target = perLayer[layer];
+    const int position = qBound(0, positionFromTop, target.size());
+    target.insert(target.size() - position, item);
+    item->setLayerIndex(layer);
+
+    applyLayerLayout(perLayer);
+    emit endEdit();
+}
+
+void CanvasView::moveItemsToLayer(const QList<VectorItem *> &items, int layer)
+{
+    if (items.isEmpty() || layer < 0 || layer >= m_layers.size())
+        return;
+
+    emit beginEdit();
+
+    QVector<QList<VectorItem *>> perLayer(m_layers.size());
+    for (int i = 0; i < m_layers.size(); ++i)
+        perLayer[i] = itemsInLayer(i);
+
+    QList<VectorItem *> ordered = items;
+    std::sort(ordered.begin(), ordered.end(), [](VectorItem *a, VectorItem *b) {
+        return a->zValue() < b->zValue();
+    });
+
+    for (VectorItem *item : ordered) {
+        const int oldLayer = qBound(0, item->object().layer, m_layers.size() - 1);
+        perLayer[oldLayer].removeAll(item);
+        perLayer[layer].append(item);
+        item->setLayerIndex(layer);
+    }
+
+    applyLayerLayout(perLayer);
+    emit endEdit();
+}
+
+void CanvasView::applyLayerLayout(const QVector<QList<VectorItem *>> &perLayer)
+{
+    int z = 1;
+    for (int layer = 0; layer < perLayer.size(); ++layer) {
+        for (VectorItem *item : perLayer.at(layer)) {
+            item->setLayerIndex(layer);
+            item->setZValue(z++);
+        }
+    }
+    m_nextZ = z;
     viewport()->update();
+}
+
+void CanvasView::normalizeZOrder()
+{
+    QVector<QList<VectorItem *>> perLayer(m_layers.size());
+    for (VectorItem *item : vectorItems()) {
+        int layer = item->object().layer;
+        if (layer < 0 || layer >= m_layers.size())
+            layer = 0;
+        perLayer[layer].append(item);
+    }
+    applyLayerLayout(perLayer);
 }
 
 void CanvasView::startDrawing(DrawMode mode, const QPointF &scenePos)

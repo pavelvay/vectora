@@ -4,6 +4,8 @@
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QDropEvent>
+#include <QInputDialog>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFontComboBox>
@@ -20,10 +22,13 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QTabWidget>
+#include <QTimer>
+#include <QMouseEvent>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QAbstractItemView>
+#include <QMessageBox>
 
 #include <algorithm>
 
@@ -101,6 +106,65 @@ QString vectorName(const VectorObject &object)
     return QStringLiteral("Объект");
 }
 
+constexpr int kLayerRole = Qt::UserRole + 1;
+constexpr int kItemRole = Qt::UserRole + 2;
+
+class ObjectsTree : public QTreeWidget
+{
+public:
+    explicit ObjectsTree(QWidget *parent = nullptr)
+        : QTreeWidget(parent)
+    {
+    }
+
+    std::function<void(VectorItem *, int, int)> dropObject;
+    std::function<void(int, int)> dropLayer;
+
+protected:
+    void dropEvent(QDropEvent *event) override
+    {
+        QTreeWidgetItem *source = selectedItems().value(0);
+        if (!source) {
+            event->ignore();
+            return;
+        }
+
+        QTreeWidgetItem *target = itemAt(event->position().toPoint());
+        const bool sourceIsLayer = !source->data(0, kItemRole).isValid();
+
+        if (sourceIsLayer) {
+            const int from = source->data(0, kLayerRole).toInt();
+            int to = from;
+            if (target) {
+                QTreeWidgetItem *layerItem =
+                    target->data(0, kItemRole).isValid() ? target->parent() : target;
+                if (layerItem)
+                    to = layerItem->data(0, kLayerRole).toInt();
+            }
+            if (dropLayer && to != from)
+                dropLayer(from, to);
+        } else {
+            auto *item = reinterpret_cast<VectorItem *>(
+                source->data(0, kItemRole).value<quintptr>());
+            int layer = -1;
+            int position = 0;
+            if (target) {
+                if (target->data(0, kItemRole).isValid()) {
+                    layer = target->parent()->data(0, kLayerRole).toInt();
+                    position = target->parent()->indexOfChild(target);
+                    if (dropIndicatorPosition() == QAbstractItemView::BelowItem)
+                        ++position;
+                } else {
+                    layer = target->data(0, kLayerRole).toInt();
+                }
+            }
+            if (dropObject)
+                dropObject(item, layer, position);
+        }
+        event->accept();
+    }
+};
+
 } // namespace
 
 DockPanels::DockPanels(QMainWindow *host, CanvasView *view, QObject *parent)
@@ -154,55 +218,148 @@ void DockPanels::buildObjectsDocker()
     layout->setContentsMargins(8, 6, 8, 8);
     layout->setSpacing(6);
 
-    auto *tools = new QWidget(content);
-    auto *toolsLayout = new QHBoxLayout(tools);
-    toolsLayout->setContentsMargins(0, 0, 0, 0);
-    toolsLayout->setSpacing(2);
+    auto *layerTools = new QWidget(content);
+    auto *layerToolsLayout = new QHBoxLayout(layerTools);
+    layerToolsLayout->setContentsMargins(0, 0, 0, 0);
+    layerToolsLayout->setSpacing(2);
 
-    auto *up = new QToolButton(tools);
+    auto *addLayerButton = new QToolButton(layerTools);
+    addLayerButton->setText(QStringLiteral("+ Слой"));
+    addLayerButton->setToolTip(QStringLiteral("Создать новый слой"));
+    auto *removeLayerButton = new QToolButton(layerTools);
+    removeLayerButton->setText(QStringLiteral("− Слой"));
+    removeLayerButton->setToolTip(QStringLiteral("Удалить слой и его объекты"));
+    auto *duplicate = iconButton(layerTools, QStringLiteral("copy"),
+                                 QStringLiteral("Дублировать объект"));
+    auto *remove = iconButton(layerTools, QStringLiteral("delete"),
+                              QStringLiteral("Удалить объект"));
+    layerToolsLayout->addWidget(addLayerButton);
+    layerToolsLayout->addWidget(removeLayerButton);
+    layerToolsLayout->addStretch(1);
+    layerToolsLayout->addWidget(duplicate);
+    layerToolsLayout->addWidget(remove);
+
+    auto *orderTools = new QWidget(content);
+    auto *orderToolsLayout = new QHBoxLayout(orderTools);
+    orderToolsLayout->setContentsMargins(0, 0, 0, 0);
+    orderToolsLayout->setSpacing(2);
+
+    auto *up = new QToolButton(orderTools);
     up->setText(QStringLiteral("Выше"));
-    up->setToolTip(QStringLiteral("Поднять объект на уровень выше"));
+    up->setToolTip(QStringLiteral("Выше внутри слоя или слой наверх"));
     up->setAutoRaise(true);
-    auto *down = new QToolButton(tools);
+    auto *down = new QToolButton(orderTools);
     down->setText(QStringLiteral("Ниже"));
-    down->setToolTip(QStringLiteral("Опустить объект на уровень ниже"));
+    down->setToolTip(QStringLiteral("Ниже внутри слоя или слой вниз"));
     down->setAutoRaise(true);
 
-    auto *duplicate = iconButton(tools, QStringLiteral("copy"),
-                                 QStringLiteral("Дублировать объект"));
-    auto *remove = iconButton(tools, QStringLiteral("delete"),
-                              QStringLiteral("Удалить объект"));
+    m_layerTarget = new QComboBox(orderTools);
+    m_layerTarget->setMinimumWidth(110);
+    m_layerTarget->setToolTip(QStringLiteral("Слой назначения"));
+    auto *move = new QToolButton(orderTools);
+    move->setText(QStringLiteral("Перенести"));
+    move->setToolTip(QStringLiteral("Перенести выделенные объекты в выбранный слой"));
 
-    toolsLayout->addWidget(up);
-    toolsLayout->addWidget(down);
-    toolsLayout->addWidget(duplicate);
-    toolsLayout->addWidget(remove);
-    toolsLayout->addStretch(1);
+    orderToolsLayout->addWidget(up);
+    orderToolsLayout->addWidget(down);
+    orderToolsLayout->addSpacing(4);
+    orderToolsLayout->addWidget(m_layerTarget, 1);
+    orderToolsLayout->addWidget(move);
 
-    m_tree = new QTreeWidget(content);
+    auto *tree = new ObjectsTree(content);
+    m_tree = tree;
     m_tree->setHeaderHidden(true);
     m_tree->setIndentation(14);
     m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_tree->setDragEnabled(true);
+    m_tree->setAcceptDrops(true);
+    m_tree->setDropIndicatorShown(true);
+    m_tree->setDragDropMode(QAbstractItemView::InternalMove);
 
-    layout->addWidget(tools);
+    layout->addWidget(layerTools);
+    layout->addWidget(orderTools);
     layout->addWidget(m_tree, 1);
 
-    connect(up, &QToolButton::clicked, this, [this]() {
-        if (m_view->selectedVectorItems().isEmpty()) {
-            emit status(QStringLiteral("Выберите объект, чтобы изменить порядок."));
+    const auto selectedLayer = [this]() -> int {
+        QTreeWidgetItem *item = m_tree->currentItem();
+        if (!item)
+            return -1;
+        if (item->data(0, kItemRole).isValid() && item->parent())
+            return item->parent()->data(0, kLayerRole).toInt();
+        return item->data(0, kLayerRole).toInt();
+    };
+
+    connect(addLayerButton, &QToolButton::clicked, this, [this]() {
+        m_view->addLayer();
+        refresh();
+        emit status(QStringLiteral("Создан новый слой."));
+    });
+
+    connect(removeLayerButton, &QToolButton::clicked, this, [this, selectedLayer]() {
+        const int layer = selectedLayer();
+        if (layer < 0) {
+            emit status(QStringLiteral("Выберите слой в списке."));
             return;
         }
-        m_view->raiseSelection();
-        refresh();
-    });
-    connect(down, &QToolButton::clicked, this, [this]() {
-        if (m_view->selectedVectorItems().isEmpty()) {
-            emit status(QStringLiteral("Выберите объект, чтобы изменить порядок."));
+        if (m_view->layers().size() <= 1) {
+            emit status(QStringLiteral("Нельзя удалить единственный слой."));
             return;
         }
-        m_view->lowerSelection();
+        const int count = m_view->itemsInLayer(layer).size();
+        if (count > 0) {
+            const auto answer = QMessageBox::question(
+                m_host, QStringLiteral("Удалить слой"),
+                QStringLiteral("В слое «%1» объектов: %2. Удалить слой вместе с ними?")
+                    .arg(m_view->layers().at(layer))
+                    .arg(count));
+            if (answer != QMessageBox::Yes)
+                return;
+        }
+        m_view->removeLayer(layer);
         refresh();
     });
+
+    connect(up, &QToolButton::clicked, this, [this, selectedLayer]() {
+        const int layer = selectedLayer();
+        QTreeWidgetItem *item = m_tree->currentItem();
+        const bool layerSelected = item && !item->data(0, kItemRole).isValid();
+        if (layerSelected) {
+            if (layer + 1 < m_view->layers().size())
+                m_view->moveLayer(layer, layer + 1);
+        } else if (!m_view->selectedVectorItems().isEmpty()) {
+            m_view->raiseSelection();
+        }
+        refresh();
+    });
+
+    connect(down, &QToolButton::clicked, this, [this, selectedLayer]() {
+        const int layer = selectedLayer();
+        QTreeWidgetItem *item = m_tree->currentItem();
+        const bool layerSelected = item && !item->data(0, kItemRole).isValid();
+        if (layerSelected) {
+            if (layer > 0)
+                m_view->moveLayer(layer, layer - 1);
+        } else if (!m_view->selectedVectorItems().isEmpty()) {
+            m_view->lowerSelection();
+        }
+        refresh();
+    });
+
+    connect(move, &QToolButton::clicked, this, [this]() {
+        const QList<VectorItem *> selected = selection();
+        if (selected.isEmpty()) {
+            emit status(QStringLiteral("Выберите объекты для переноса."));
+            return;
+        }
+        if (m_layerTarget->currentIndex() < 0)
+            return;
+        const int layer = m_layerTarget->currentData().toInt();
+        m_view->moveItemsToLayer(selected, layer);
+        refresh();
+        emit status(QStringLiteral("Объекты перенесены в слой «%1».")
+                        .arg(m_view->layers().at(layer)));
+    });
+
     connect(duplicate, &QToolButton::clicked, this, [this]() {
         const QList<VectorItem *> selected = selection();
         if (selected.isEmpty()) {
@@ -221,6 +378,7 @@ void DockPanels::buildObjectsDocker()
         refresh();
         emit status(QStringLiteral("Скопировано объектов: %1").arg(selected.size()));
     });
+
     connect(remove, &QToolButton::clicked, this, [this]() {
         m_view->deleteSelectedObjects();
         refresh();
@@ -229,21 +387,65 @@ void DockPanels::buildObjectsDocker()
     connect(m_tree, &QTreeWidget::itemSelectionChanged, this, [this]() {
         if (m_updating)
             return;
-        const QList<QTreeWidgetItem *> selected = m_tree->selectedItems();
-        if (selected.isEmpty())
+        QTreeWidgetItem *item = m_tree->currentItem();
+        if (!item)
             return;
-        const int index = selected.first()->data(0, Qt::UserRole).toInt();
-        const QList<VectorItem *> items = m_view->vectorItems();
-        if (index < 0 || index >= items.size())
+
+        if (!item->data(0, kItemRole).isValid()) {
+            const int layer = item->data(0, kLayerRole).toInt();
+            m_view->setActiveLayer(layer);
+            refreshTree();
             return;
-        m_updating = true;
-        m_view->scene()->clearSelection();
-        items.at(index)->setSelected(true);
-        m_updating = false;
-        refreshProperties();
-        refreshEffects();
-        refreshText();
+        }
+
+        if (item->parent())
+            m_view->setActiveLayer(item->parent()->data(0, kLayerRole).toInt());
+        auto *vectorItem = reinterpret_cast<VectorItem *>(
+            item->data(0, kItemRole).value<quintptr>());
+        if (vectorItem) {
+            m_updating = true;
+            m_view->scene()->clearSelection();
+            vectorItem->setSelected(true);
+            m_updating = false;
+            refreshProperties();
+            refreshEffects();
+            refreshText();
+            refreshTree();
+        }
     });
+
+    connect(m_tree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *item,
+                                                                  int) {
+        if (!item || item->data(0, kItemRole).isValid())
+            return;
+        const int layer = item->data(0, kLayerRole).toInt();
+        bool ok = false;
+        const QString name = QInputDialog::getText(
+            m_host, QStringLiteral("Имя слоя"), QStringLiteral("Название:"),
+            QLineEdit::Normal, m_view->layers().at(layer), &ok);
+        if (ok && !name.trimmed().isEmpty()) {
+            m_view->renameLayer(layer, name);
+            refresh();
+        }
+    });
+
+    auto *objectsTree = static_cast<ObjectsTree *>(m_tree);
+    objectsTree->dropObject = [this](VectorItem *item, int layer, int position) {
+        if (!item)
+            return;
+        if (layer < 0)
+            layer = m_view->layers().size() - 1;
+        m_view->setActiveLayer(layer);
+        m_view->moveItemToLayer(item, layer, position);
+        refresh();
+        emit status(QStringLiteral("Объект перемещён в слой «%1».")
+                        .arg(m_view->layers().at(layer)));
+    };
+    objectsTree->dropLayer = [this](int from, int to) {
+        m_view->moveLayer(from, to);
+        refresh();
+        emit status(QStringLiteral("Порядок слоёв изменён."));
+    };
 
     createDock(QStringLiteral("Объекты"), content);
 }
@@ -254,23 +456,52 @@ void DockPanels::refreshTree()
         return;
 
     const QList<VectorItem *> items = m_view->vectorItems();
+    const QStringList layers = m_view->layers();
     const int scrollPosition = m_tree->verticalScrollBar()->value();
+
     m_updating = true;
     const QSignalBlocker blocker(m_tree);
     m_tree->clear();
 
-    auto *layer = new QTreeWidgetItem(m_tree, {QStringLiteral("Слой 1")});
-    QFont layerFont = m_tree->font();
-    layerFont.setBold(true);
-    layer->setFont(0, layerFont);
-    layer->setExpanded(true);
+    for (int layer = layers.size() - 1; layer >= 0; --layer) {
+        const bool active = layer == m_view->activeLayer();
+        auto *layerItem = new QTreeWidgetItem(
+            m_tree, {QStringLiteral("%1%2")
+                         .arg(active ? QStringLiteral("● ") : QString())
+                         .arg(layers.at(layer))});
+        layerItem->setData(0, kLayerRole, layer);
+        QFont layerFont = m_tree->font();
+        layerFont.setBold(true);
+        layerItem->setFont(0, layerFont);
+        layerItem->setFlags(layerItem->flags() | Qt::ItemIsDragEnabled
+                            | Qt::ItemIsDropEnabled);
 
-    for (int i = items.size() - 1; i >= 0; --i) {
-        auto *entry = new QTreeWidgetItem(layer, {vectorName(items.at(i)->object())});
-        entry->setData(0, Qt::UserRole, i);
-        if (items.at(i)->isSelected())
-            entry->setSelected(true);
+        const QList<VectorItem *> layerItems = m_view->itemsInLayer(layer);
+        for (int i = layerItems.size() - 1; i >= 0; --i) {
+            VectorItem *vectorItem = layerItems.at(i);
+            auto *entry = new QTreeWidgetItem(layerItem,
+                                              {vectorName(vectorItem->object())});
+            entry->setData(0, kItemRole,
+                           QVariant::fromValue<quintptr>(
+                               reinterpret_cast<quintptr>(vectorItem)));
+            entry->setFlags(entry->flags() | Qt::ItemIsDragEnabled
+                            | Qt::ItemIsSelectable | Qt::ItemIsEnabled);
+            if (vectorItem->isSelected())
+                entry->setSelected(true);
+        }
+        layerItem->setExpanded(true);
     }
+
+    if (m_layerTarget) {
+        const QSignalBlocker comboBlocker(m_layerTarget);
+        m_layerTarget->clear();
+        for (int layer = layers.size() - 1; layer >= 0; --layer)
+            m_layerTarget->addItem(layers.at(layer), layer);
+        const int index = m_layerTarget->findData(m_view->activeLayer());
+        if (index >= 0)
+            m_layerTarget->setCurrentIndex(index);
+    }
+
     m_tree->verticalScrollBar()->setValue(scrollPosition);
     m_updating = false;
 }
@@ -536,25 +767,70 @@ void DockPanels::buildColorDocker()
 
     layout->addWidget(separator(content));
 
-    auto *fill = new QToolButton(content);
-    fill->setText(QStringLiteral("Залить выделение"));
-    fill->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    auto *stroke = new QToolButton(content);
-    stroke->setText(QStringLiteral("Обвести выделение"));
-    stroke->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    layout->addWidget(fill);
-    layout->addWidget(stroke);
+    auto *hint = new QLabel(QStringLiteral("ЛКМ по образцу — заливка\n"
+                                           "ПКМ по образцу — обводка"),
+                            content);
+    hint->setStyleSheet(QStringLiteral("color:#8b929d; font-size:11px;"));
+    layout->addWidget(hint);
     layout->addStretch(1);
 
+    m_colorPreview->installEventFilter(this);
+    m_colorPreview->setCursor(Qt::PointingHandCursor);
+
+    m_colorTimer = new QTimer(this);
+    m_colorTimer->setSingleShot(true);
+    m_colorTimer->setInterval(650);
+    connect(m_colorTimer, &QTimer::timeout, this, [this]() {
+        if (m_colorEditActive) {
+            m_colorEditActive = false;
+            emit endEdit();
+        }
+    });
+
     const auto refreshColor = [this]() {
+        if (m_updating)
+            return;
         m_color = QColor::fromHsv(m_hue->value(), m_saturation->value(),
                                   m_value->value(), m_alpha->value());
         updateColorPreview();
+
+        m_view->setFillColor(m_color);
+        updateColorButtons();
+
+        const QList<VectorItem *> selected = selection();
+        if (selected.isEmpty())
+            return;
+
+        if (!m_colorEditActive) {
+            m_colorEditActive = true;
+            emit beginEdit();
+        }
+        for (VectorItem *item : selected)
+            item->setFillColor(m_color);
+        m_colorTimer->start();
     };
     connect(m_hue, &QSlider::valueChanged, this, refreshColor);
     connect(m_saturation, &QSlider::valueChanged, this, refreshColor);
     connect(m_value, &QSlider::valueChanged, this, refreshColor);
     connect(m_alpha, &QSlider::valueChanged, this, refreshColor);
+
+    const auto beginColorEdit = [this]() {
+        if (!m_colorEditActive) {
+            m_colorEditActive = true;
+            emit beginEdit();
+        }
+        m_colorTimer->stop();
+    };
+    for (QSlider *slider : {m_hue, m_saturation, m_value, m_alpha}) {
+        connect(slider, &QSlider::sliderPressed, this, beginColorEdit);
+        connect(slider, &QSlider::sliderReleased, this, [this]() {
+            m_colorTimer->stop();
+            if (m_colorEditActive) {
+                m_colorEditActive = false;
+                emit endEdit();
+            }
+        });
+    }
 
     connect(m_hex, &QLineEdit::editingFinished, this, [this]() {
         QColor color(m_hex->text().trimmed());
@@ -570,19 +846,29 @@ void DockPanels::buildColorDocker()
         m_value->setValue(color.value());
         m_alpha->setValue(color.alpha());
         updateColorPreview();
-    });
-
-    connect(fill, &QToolButton::clicked, this, [this]() {
         applyColor(m_color, true);
-    });
-    connect(stroke, &QToolButton::clicked, this, [this]() {
-        applyColor(m_color, false);
     });
 
     m_color = QColor::fromHsv(m_hue->value(), m_saturation->value(),
                               m_value->value(), m_alpha->value());
     updateColorPreview();
     createDock(QStringLiteral("Цвет"), content);
+}
+
+bool DockPanels::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_colorPreview && event->type() == QEvent::MouseButtonPress) {
+        auto *mouseEvent = static_cast<QMouseEvent *>(event);
+        if (mouseEvent->button() == Qt::LeftButton) {
+            applyColor(m_color, true);
+            return true;
+        }
+        if (mouseEvent->button() == Qt::RightButton) {
+            applyColor(m_color, false);
+            return true;
+        }
+    }
+    return QObject::eventFilter(watched, event);
 }
 
 void DockPanels::updateColorPreview()

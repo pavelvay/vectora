@@ -8,6 +8,8 @@
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QKeyEvent>
+#include <QSlider>
+#include <QToolButton>
 #include <QMouseEvent>
 #include <QPageSize>
 #include <QPainter>
@@ -17,6 +19,7 @@
 #include <QWidget>
 
 #include "CanvasView.h"
+#include "ColorPalette.h"
 #include "Document.h"
 #include "MainWindow.h"
 #include "VectorItem.h"
@@ -79,6 +82,8 @@ int SelfTest::run(const QString &directory)
     check(loaded.load(filePath, &error), QStringLiteral("load .vct: %1").arg(error));
     check(loaded.objects.size() == sampleCount,
           QStringLiteral("object count preserved (%1)").arg(sampleCount));
+    check(loaded.layers == document.layers,
+          QStringLiteral("layers preserved (%1)").arg(document.layers.size()));
     check(qFuzzyCompare(loaded.pageSize.width(), document.pageSize.width()),
           QStringLiteral("page width preserved"));
 
@@ -91,6 +96,26 @@ int SelfTest::run(const QString &directory)
             pathPreserved = false;
     }
     check(pathPreserved, QStringLiteral("shape types and paths preserved"));
+
+    {
+        Document layered;
+        layered.layers = {QStringLiteral("Нижний"), QStringLiteral("Верхний")};
+        VectorObject circle;
+        circle.type = ShapeType::Ellipse;
+        circle.layer = 1;
+        circle.path.addEllipse(QRectF(0, 0, 40, 40));
+        layered.objects.append(circle);
+        const QString layeredPath = dir.filePath(QStringLiteral("layers.vct"));
+        check(layered.save(layeredPath, &error), QStringLiteral("save layered document"));
+        Document layeredLoaded;
+        check(layeredLoaded.load(layeredPath, &error),
+              QStringLiteral("load layered document"));
+        check(layeredLoaded.layers == layered.layers,
+              QStringLiteral("layer names preserved"));
+        check(!layeredLoaded.objects.isEmpty()
+                  && layeredLoaded.objects.first().layer == 1,
+              QStringLiteral("object layer preserved"));
+    }
 
     // --- Exports -------------------------------------------------------------
     out << "\nExports\n";
@@ -390,8 +415,126 @@ int SelfTest::run(const QString &directory)
                               QStringLiteral("properties X applied"));
                     }
                 }
+
+                QDockWidget *colorDock = nullptr;
+                for (QDockWidget *dock : window.findChildren<QDockWidget *>()) {
+                    if (dock->windowTitle() == QStringLiteral("Цвет"))
+                        colorDock = dock;
+                }
+                check(colorDock != nullptr, QStringLiteral("colour docker found"));
+                if (colorDock) {
+                    bool hasFillButton = false;
+                    for (QToolButton *button : colorDock->findChildren<QToolButton *>()) {
+                        if (button->text().contains(QStringLiteral("Залить"))
+                            || button->text().contains(QStringLiteral("Обвести")))
+                            hasFillButton = true;
+                    }
+                    check(!hasFillButton,
+                          QStringLiteral("colour docker has no fill/outline buttons"));
+
+                    const QList<QSlider *> sliders =
+                        colorDock->findChildren<QSlider *>();
+                    check(!sliders.isEmpty(), QStringLiteral("colour sliders found"));
+                    if (!sliders.isEmpty()) {
+                        const QColor before = item->object().fill;
+                        const int oldHue = sliders.first()->value();
+                        sliders.first()->setValue((oldHue + 40) % 360);
+                        QApplication::processEvents();
+                        check(item->object().fill != before,
+                              QStringLiteral("colour docker applies fill automatically"));
+                        sliders.first()->sliderReleased();
+                    }
+                }
+
+                QDockWidget *objectsDock = nullptr;
+                for (QDockWidget *dock : window.findChildren<QDockWidget *>()) {
+                    if (dock->windowTitle() == QStringLiteral("Объекты"))
+                        objectsDock = dock;
+                }
+                check(objectsDock != nullptr, QStringLiteral("objects docker found"));
+                if (objectsDock) {
+                    QToolButton *addLayer = nullptr;
+                    for (QToolButton *button :
+                         objectsDock->findChildren<QToolButton *>()) {
+                        if (button->text().contains(QStringLiteral("+ Слой")))
+                            addLayer = button;
+                    }
+                    check(addLayer != nullptr, QStringLiteral("add layer button found"));
+                    if (addLayer) {
+                        const int layersBefore = canvas->layers().size();
+                        addLayer->click();
+                        QApplication::processEvents();
+                        check(canvas->layers().size() == layersBefore + 1,
+                              QStringLiteral("add layer button creates a layer"));
+                    }
+                }
             }
         }
+    }
+
+    // --- Layers --------------------------------------------------------------
+    out << "\nLayers\n";
+    {
+        view.setDocument(Document());
+        check(view.layers().size() == 1, QStringLiteral("default layer exists"));
+
+        const int topLayer = view.addLayer(QStringLiteral("Верхний"));
+        check(view.layers().size() == 2, QStringLiteral("layer created"));
+        check(view.activeLayer() == topLayer, QStringLiteral("new layer is active"));
+
+        VectorObject rectangle;
+        rectangle.type = ShapeType::Rectangle;
+        rectangle.path.addRect(QRectF(0, 0, 50, 50));
+        VectorItem *item = view.addVectorObject(rectangle, false, false);
+        check(item->object().layer == topLayer,
+              QStringLiteral("new object lands in active layer"));
+
+        view.moveItemsToLayer({item}, 0);
+        check(view.layerOf(item) == 0, QStringLiteral("object moved to another layer"));
+
+        view.moveLayer(0, 1);
+        check(view.layerOf(item) == 1,
+              QStringLiteral("object follows its layer when layers are reordered"));
+        check(view.layers().first() == QStringLiteral("Верхний"),
+              QStringLiteral("layer order changed"));
+
+        view.removeLayer(1);
+        check(view.layers().size() == 1, QStringLiteral("layer removed"));
+        check(view.vectorItems().isEmpty(),
+              QStringLiteral("layer contents removed with the layer"));
+
+        // Ordering inside one layer.
+        view.setDocument(Document());
+        VectorObject first;
+        first.type = ShapeType::Rectangle;
+        first.path.addRect(QRectF(0, 0, 40, 40));
+        VectorObject second;
+        second.type = ShapeType::Ellipse;
+        second.path.addEllipse(QRectF(0, 0, 40, 40));
+        VectorItem *bottom = view.addVectorObject(first, false, false);
+        VectorItem *top = view.addVectorObject(second, false, false);
+        check(view.itemsInLayer(0).last() == top,
+              QStringLiteral("new object is on top of the layer"));
+        view.moveItemToLayer(bottom, 0, 0);
+        check(view.itemsInLayer(0).last() == bottom,
+              QStringLiteral("object moved to the top of its layer"));
+        view.moveItemToLayer(top, 0, 0);
+        check(view.itemsInLayer(0).last() == top,
+              QStringLiteral("object reordered inside the layer"));
+    }
+
+    // Colour palette: right button means outline.
+    {
+        ColorPalette palette;
+        palette.resize(600, 34);
+        bool outline = false;
+        QObject::connect(&palette, &ColorPalette::outlineColorPicked,
+                         [&outline](const QColor &, const QString &) { outline = true; });
+        QMouseEvent rightPress(QEvent::MouseButtonPress, QPointF(8, 17),
+                               palette.mapToGlobal(QPoint(8, 17)),
+                               Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+        QApplication::sendEvent(&palette, &rightPress);
+        check(outline, QStringLiteral("right click on palette picks outline colour"));
     }
 
     // Visual snapshot of the drawn scene with a selection frame.

@@ -8,6 +8,7 @@
 #include <QPainterPath>
 #include <QSizeF>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 enum class ShapeType {
@@ -29,6 +30,7 @@ ShapeType shapeTypeFromId(const QString &id);
 
 struct VectorObject {
     ShapeType type = ShapeType::Rectangle;
+    int layer = -1;              // -1 = active layer when added to the canvas
     QPainterPath path;          // geometry in local coordinates
     QPointF pos;                // placement on the page
     qreal rotation = 0.0;       // degrees, around the local bounds centre
@@ -57,6 +59,7 @@ class Document
 {
 public:
     QSizeF pageSize = QSizeF(794.0, 1123.0); // A4 at 96 dpi
+    QStringList layers = {QStringLiteral("Слой 1")};
     QVector<VectorObject> objects;
 
     void clear();

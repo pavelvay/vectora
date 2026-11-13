@@ -39,6 +39,7 @@ public:
 
     QVector<QPainterPath::Element> pathElements() const;
     void setPathElements(const QVector<QPainterPath::Element> &elements);
+    void setLayerIndex(int layer) { m_object.layer = layer; }
     QRectF localBounds() const { return m_object.localBounds(); }
     bool hasPath() const { return !m_object.path.isEmpty(); }
 

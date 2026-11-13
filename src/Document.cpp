@@ -374,10 +374,16 @@ QJsonObject Document::toJson() const
     page.insert(QStringLiteral("height"), pageSize.height());
     root.insert(QStringLiteral("page"), page);
 
+    QJsonArray layerArray;
+    for (const QString &layer : layers)
+        layerArray.append(layer);
+    root.insert(QStringLiteral("layers"), layerArray);
+
     QJsonArray objectArray;
     for (const VectorObject &object : objects) {
         QJsonObject entry;
         entry.insert(QStringLiteral("type"), shapeTypeId(object.type));
+        entry.insert(QStringLiteral("layer"), object.layer);
         entry.insert(QStringLiteral("pos"), pointArray(object.pos));
         entry.insert(QStringLiteral("rotation"), object.rotation);
         entry.insert(QStringLiteral("path"), encodePath(object.path));
@@ -429,11 +435,21 @@ Document Document::fromJson(const QJsonObject &json, QString *error)
     if (width > 0.0 && height > 0.0)
         document.pageSize = QSizeF(width, height);
 
+    const QJsonArray layerArray = json.value(QStringLiteral("layers")).toArray();
+    if (!layerArray.isEmpty()) {
+        document.layers.clear();
+        for (const QJsonValue &value : layerArray) {
+            const QString name = value.toString().trimmed();
+            document.layers.append(name.isEmpty() ? QStringLiteral("Слой") : name);
+        }
+    }
+
     const QJsonArray array = json.value(QStringLiteral("objects")).toArray();
     for (const QJsonValue &value : array) {
         const QJsonObject entry = value.toObject();
         VectorObject object;
         object.type = shapeTypeFromId(entry.value(QStringLiteral("type")).toString());
+        object.layer = entry.value(QStringLiteral("layer")).toInt(0);
         object.pos = pointFromArray(entry.value(QStringLiteral("pos")).toArray());
         object.rotation = entry.value(QStringLiteral("rotation")).toDouble(0.0);
         object.path = decodePath(entry.value(QStringLiteral("path")).toArray());
@@ -471,6 +487,9 @@ Document Document::fromJson(const QJsonObject &json, QString *error)
                                         box.at(2).toDouble(), box.at(3).toDouble());
             object.image = imageFromJson(entry.value(QStringLiteral("image")));
         }
+
+        if (object.layer < 0 || object.layer >= document.layers.size())
+            object.layer = 0;
 
         if (!object.path.isEmpty()
             || object.type == ShapeType::Text
@@ -532,6 +551,7 @@ bool Document::load(const QString &path, QString *error)
         return false;
 
     pageSize = loaded.pageSize;
+    layers = loaded.layers;
     objects = loaded.objects;
     return true;
 }
@@ -710,6 +730,9 @@ Document Document::sample()
                                      QRectF(102, 990, 320, 26), 15, QColor("#8b929d"), 0, false));
     document.objects.append(makeText(QStringLiteral("A4 · 210 × 297 мм"),
                                      QRectF(586, 1064, 180, 26), 15, QColor("#9aa1ac"), 2, false));
+
+    for (VectorObject &object : document.objects)
+        object.layer = 0;
 
     return document;
 }

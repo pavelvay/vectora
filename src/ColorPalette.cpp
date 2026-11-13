@@ -127,7 +127,12 @@ void ColorPalette::mousePressEvent(QMouseEvent *event)
     if (index >= 0 && event->button() == Qt::LeftButton) {
         const PaletteEntry &entry = m_entries.at(index);
         emit colorPicked(entry.color, entry.name);
-        emit statusHint(QStringLiteral("Выбран цвет %1 (%2)")
+        emit statusHint(QStringLiteral("Заливка: %1 (%2)")
+                            .arg(entry.name, entry.color.name().toUpper()));
+    } else if (index >= 0 && event->button() == Qt::RightButton) {
+        const PaletteEntry &entry = m_entries.at(index);
+        emit outlineColorPicked(entry.color, entry.name);
+        emit statusHint(QStringLiteral("Обводка: %1 (%2)")
                             .arg(entry.name, entry.color.name().toUpper()));
     }
     QWidget::mousePressEvent(event);

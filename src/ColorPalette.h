@@ -20,6 +20,7 @@ public:
 
 signals:
     void colorPicked(const QColor &color, const QString &name);
+    void outlineColorPicked(const QColor &color, const QString &name);
     void statusHint(const QString &text);
 
 protected:

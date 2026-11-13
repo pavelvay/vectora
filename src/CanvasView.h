@@ -57,6 +57,18 @@ public:
     void raiseSelection();
     void lowerSelection();
 
+    QStringList layers() const { return m_layers; }
+    int activeLayer() const { return m_activeLayer; }
+    void setActiveLayer(int index);
+    int addLayer(const QString &name = QString());
+    void removeLayer(int index);
+    void renameLayer(int index, const QString &name);
+    void moveLayer(int from, int to);
+    void moveItemToLayer(VectorItem *item, int layer, int positionFromTop);
+    void moveItemsToLayer(const QList<VectorItem *> &items, int layer);
+    QList<VectorItem *> itemsInLayer(int layer) const;
+    int layerOf(VectorItem *item) const;
+
     void finishBezier();
     void closeBezier();
     void deleteLastBezierNode();
@@ -110,6 +122,8 @@ private:
     };
 
     void updateCursor();
+    void normalizeZOrder();
+    void applyLayerLayout(const QVector<QList<VectorItem *>> &perLayer);
     VectorItem *itemAtScene(const QPointF &scenePos) const;
     void finishDrawing(const QPointF &scenePos);
     void startDrawing(DrawMode mode, const QPointF &scenePos);
@@ -167,4 +181,6 @@ private:
     qreal m_transparencyStartX = 0.0;
 
     qreal m_nextZ = 1.0;
+    QStringList m_layers = {QStringLiteral("Слой 1")};
+    int m_activeLayer = 0;
 };
