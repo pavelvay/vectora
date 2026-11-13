@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Vectora
+GenericName=Vector Graphics Editor
+Comment=Кроссплатформенный векторный редактор
+Exec=vectora %F
+TryExec=vectora
+Icon=vectora
+Terminal=false
+StartupNotify=true
+Categories=Graphics;VectorGraphics;2DGraphics;
+Keywords=vector;svg;design;draw;graphics;
