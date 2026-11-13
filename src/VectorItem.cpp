@@ -187,6 +187,75 @@ void VectorItem::setShadowEnabled(bool on)
     update();
 }
 
+void VectorItem::setShadowOffset(const QPointF &offset)
+{
+    m_object.shadowOffset = offset;
+    update();
+}
+
+void VectorItem::setShadowOpacity(qreal opacity)
+{
+    m_object.shadowOpacity = qBound(0.0, opacity, 1.0);
+    update();
+}
+
+void VectorItem::setShadowColor(const QColor &color)
+{
+    if (color.isValid()) {
+        m_object.shadowColor = color;
+        update();
+    }
+}
+
+void VectorItem::setFrameSize(const QSizeF &size)
+{
+    const QRectF bounds = m_object.localBounds();
+    if (size.width() < 1.0 || size.height() < 1.0)
+        return;
+    if (bounds.width() < 0.01 || bounds.height() < 0.01)
+        return;
+
+    prepareGeometryChange();
+    if (m_object.type == ShapeType::Text) {
+        const qreal factor = size.height() / bounds.height();
+        QFont font = m_object.font;
+        const int base = font.pixelSize() > 0 ? font.pixelSize() : 24;
+        font.setPixelSize(qMax(4, qRound(base * factor)));
+        m_object.font = font;
+        m_object.textBox.setSize(size);
+    } else if (m_object.type == ShapeType::Image) {
+        m_object.textBox.setSize(size);
+    } else {
+        QTransform transform;
+        transform.translate(bounds.left(), bounds.top());
+        transform.scale(size.width() / bounds.width(), size.height() / bounds.height());
+        transform.translate(-bounds.left(), -bounds.top());
+        m_object.path = transform.map(m_object.path);
+    }
+    updateOrigin();
+    update();
+}
+
+void VectorItem::setTextFont(const QFont &font)
+{
+    m_object.font = font;
+    QFontMetricsF metrics(m_object.font);
+    const qreal width = m_object.textBox.width() > 0 ? m_object.textBox.width() : 300.0;
+    const QRectF needed = metrics.boundingRect(QRectF(0, 0, width, 10000),
+                                               Qt::TextWordWrap | Qt::AlignLeft,
+                                               m_object.text);
+    prepareGeometryChange();
+    m_object.textBox.setHeight(qMax(metrics.height(), needed.height() + 4.0));
+    updateOrigin();
+    update();
+}
+
+void VectorItem::setTextAlignment(int align)
+{
+    m_object.textAlign = qBound(0, align, 2);
+    update();
+}
+
 void VectorItem::setRotationAngle(qreal degrees)
 {
     setRotation(degrees);

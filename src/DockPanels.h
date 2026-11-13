@@ -1,0 +1,122 @@
+#pragma once
+
+#include <QColor>
+
+#include "Document.h"
+#include <QList>
+#include <QObject>
+
+class QCheckBox;
+class QComboBox;
+class QDockWidget;
+class QDoubleSpinBox;
+class QFontComboBox;
+class QLabel;
+class QLineEdit;
+class QMainWindow;
+class QSlider;
+class QSpinBox;
+class QToolButton;
+class QTreeWidget;
+class QWidget;
+
+class CanvasView;
+class VectorItem;
+
+class DockPanels : public QObject
+{
+    Q_OBJECT
+
+public:
+    DockPanels(QMainWindow *host, CanvasView *view, QObject *parent = nullptr);
+
+    QList<QDockWidget *> docks() const { return m_docks; }
+    QDockWidget *propertiesDock() const { return m_propertiesDock; }
+    void refresh();
+
+signals:
+    void beginEdit();
+    void endEdit();
+    void status(const QString &text);
+
+private:
+    QDockWidget *createDock(const QString &title, QWidget *content);
+    void buildObjectsDocker();
+    void buildPropertiesDocker();
+    void buildColorDocker();
+    void buildAlignDocker();
+    void buildEffectsDocker();
+    void buildOutlineDocker();
+    void buildTextDocker();
+
+    QList<VectorItem *> selection() const;
+
+    void refreshTree();
+    void refreshProperties();
+    void refreshEffects();
+    void refreshText();
+    void updateColorButtons();
+    void updateColorPreview();
+
+    void applyTransform();
+    void applyColor(const QColor &color, bool forFill);
+    void applyAlign(int mode);
+    void distribute(bool horizontal);
+    void applyShadow();
+    void applyText();
+
+    QMainWindow *m_host = nullptr;
+    CanvasView *m_view = nullptr;
+    QList<QDockWidget *> m_docks;
+    QDockWidget *m_propertiesDock = nullptr;
+
+    QTreeWidget *m_tree = nullptr;
+    QLabel *m_selectionLabel = nullptr;
+    QWidget *m_propertiesContent = nullptr;
+
+    QDoubleSpinBox *m_x = nullptr;
+    QDoubleSpinBox *m_y = nullptr;
+    QDoubleSpinBox *m_w = nullptr;
+    QDoubleSpinBox *m_h = nullptr;
+    QDoubleSpinBox *m_angle = nullptr;
+    QSlider *m_opacitySlider = nullptr;
+    QLabel *m_opacityValue = nullptr;
+    QToolButton *m_fillButton = nullptr;
+    QToolButton *m_strokeButton = nullptr;
+    QDoubleSpinBox *m_strokeWidth = nullptr;
+
+    QLabel *m_colorPreview = nullptr;
+    QSlider *m_hue = nullptr;
+    QSlider *m_saturation = nullptr;
+    QSlider *m_value = nullptr;
+    QSlider *m_alpha = nullptr;
+    QLineEdit *m_hex = nullptr;
+    QColor m_color = QColor(0x4f, 0x7c, 0xc0);
+
+    QComboBox *m_alignTarget = nullptr;
+
+    QCheckBox *m_shadowEnabled = nullptr;
+    QDoubleSpinBox *m_shadowX = nullptr;
+    QDoubleSpinBox *m_shadowY = nullptr;
+    QDoubleSpinBox *m_shadowOpacity = nullptr;
+    QToolButton *m_shadowColorButton = nullptr;
+    QColor m_shadowColor = QColor(0, 0, 0, 180);
+    QSlider *m_effectOpacity = nullptr;
+    QLabel *m_effectOpacityValue = nullptr;
+    QSpinBox *m_blendSteps = nullptr;
+
+    QToolButton *m_outlineColorButton = nullptr;
+    QDoubleSpinBox *m_outlineWidth = nullptr;
+    QColor m_outlineColor = QColor(0x1d, 0x21, 0x27);
+
+    QWidget *m_textContent = nullptr;
+    QFontComboBox *m_fontCombo = nullptr;
+    QDoubleSpinBox *m_fontSize = nullptr;
+    QToolButton *m_boldButton = nullptr;
+    QToolButton *m_italicButton = nullptr;
+    QToolButton *m_underlineButton = nullptr;
+    QToolButton *m_alignButtons[3] = {nullptr, nullptr, nullptr};
+    int m_textAlign = 0;
+
+    bool m_updating = false;
+};

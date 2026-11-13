@@ -28,6 +28,12 @@ public:
     void setStrokeWidth(qreal width);
     void setObjectOpacity(qreal opacity);
     void setShadowEnabled(bool on);
+    void setShadowOffset(const QPointF &offset);
+    void setShadowOpacity(qreal opacity);
+    void setShadowColor(const QColor &color);
+    void setFrameSize(const QSizeF &size);
+    void setTextFont(const QFont &font);
+    void setTextAlignment(int align);
     void setRotationAngle(qreal degrees);
     void setPath(const QPainterPath &path);
 

@@ -284,11 +284,12 @@ void Document::paintObject(QPainter *painter, const VectorObject &object)
     painter->save();
     painter->setOpacity(object.opacity);
 
-    const bool shadow = object.shadow;
-    if (shadow) {
+    if (object.shadow) {
         painter->save();
-        painter->translate(8.0, 8.0);
-        QColor shadowColor(0, 0, 0, 70);
+        painter->translate(object.shadowOffset);
+        QColor shadowColor = object.shadowColor;
+        shadowColor.setAlphaF(qBound(0.0, object.shadowOpacity, 1.0)
+                              * shadowColor.alphaF());
         if (!object.path.isEmpty() && object.hasFill) {
             painter->setPen(Qt::NoPen);
             painter->setBrush(shadowColor);
@@ -385,6 +386,11 @@ QJsonObject Document::toJson() const
         entry.insert(QStringLiteral("strokeWidth"), object.strokeWidth);
         entry.insert(QStringLiteral("opacity"), object.opacity);
         entry.insert(QStringLiteral("shadow"), object.shadow);
+        entry.insert(QStringLiteral("shadowOffset"),
+                     pointArray(object.shadowOffset));
+        entry.insert(QStringLiteral("shadowOpacity"), object.shadowOpacity);
+        entry.insert(QStringLiteral("shadowColor"),
+                     object.shadowColor.name(QColor::HexArgb));
 
         if (object.type == ShapeType::Text) {
             entry.insert(QStringLiteral("text"), object.text);
@@ -438,6 +444,16 @@ Document Document::fromJson(const QJsonObject &json, QString *error)
         object.strokeWidth = entry.value(QStringLiteral("strokeWidth")).toDouble(2.0);
         object.opacity = entry.value(QStringLiteral("opacity")).toDouble(1.0);
         object.shadow = entry.value(QStringLiteral("shadow")).toBool(false);
+        const QJsonArray shadowOffset = entry.value(QStringLiteral("shadowOffset")).toArray();
+        if (shadowOffset.size() >= 2) {
+            object.shadowOffset = QPointF(shadowOffset.at(0).toDouble(),
+                                          shadowOffset.at(1).toDouble());
+        }
+        object.shadowOpacity = entry.value(QStringLiteral("shadowOpacity")).toDouble(0.28);
+        const QColor shadowColor(entry.value(QStringLiteral("shadowColor"))
+                                     .toString(QStringLiteral("#ff000000")));
+        if (shadowColor.isValid())
+            object.shadowColor = shadowColor;
 
         if (object.type == ShapeType::Text) {
             object.text = entry.value(QStringLiteral("text")).toString();
@@ -536,6 +552,15 @@ QString Document::toSvg() const
                    .arg(num(object.pos.x()), num(object.pos.y()), num(object.rotation),
                         num(bounds.center().x()), num(bounds.center().y()),
                         num(object.opacity));
+
+        if (object.shadow && !object.path.isEmpty() && object.hasFill) {
+            const QColor shadow = object.shadowColor;
+            svg += QStringLiteral("    <path d=\"%1\" fill=\"%2\" fill-opacity=\"%3\" "
+                                  "transform=\"translate(%4,%5)\"/>\n")
+                       .arg(svgPathData(object.path), shadow.name(QColor::HexRgb),
+                            num(object.shadowOpacity * shadow.alphaF()),
+                            num(object.shadowOffset.x()), num(object.shadowOffset.y()));
+        }
 
         if (!object.path.isEmpty()) {
             const QString fill = object.hasFill

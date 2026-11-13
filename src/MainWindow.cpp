@@ -6,6 +6,8 @@
 #include <QBrush>
 #include <QCloseEvent>
 #include <QColorDialog>
+#include <QButtonGroup>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
 #include <QDir>
@@ -46,6 +48,7 @@
 #include <QSlider>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QTabWidget>
 #include <QTextBrowser>
 #include <QTextDocument>
 #include <QTextOption>
@@ -60,6 +63,7 @@
 
 #include "CanvasView.h"
 #include "ColorPalette.h"
+#include "DockPanels.h"
 #include "Icons.h"
 #include "Ruler.h"
 #include "Theme.h"
@@ -140,6 +144,7 @@ MainWindow::MainWindow(QWidget *parent)
     resize(1560, 980);
     setMinimumSize(1120, 720);
     setDockOptions(QMainWindow::AnimatedDocks | QMainWindow::AllowNestedDocks);
+    setTabPosition(Qt::RightDockWidgetArea, QTabWidget::South);
 
     createActions();
     createCanvas();
@@ -536,9 +541,12 @@ void MainWindow::createMenus()
 
     auto *windowMenu = menuBar()->addMenu(QStringLiteral("Окно"));
     windowMenu->addAction(m_toolsDock->toggleViewAction());
-    windowMenu->addAction(m_objectsDock->toggleViewAction());
-    windowMenu->addAction(m_propertiesDock->toggleViewAction());
     windowMenu->addAction(m_paletteDock->toggleViewAction());
+    auto *dockersMenu = windowMenu->addMenu(QStringLiteral("Докеры"));
+    if (m_dockPanels) {
+        for (QDockWidget *dock : m_dockPanels->docks())
+            dockersMenu->addAction(dock->toggleViewAction());
+    }
     windowMenu->addSeparator();
     windowMenu->addAction(action(QStringLiteral("preferences")));
 
@@ -567,9 +575,8 @@ void MainWindow::createCanvas()
 
     m_hRuler = new Ruler(Qt::Horizontal, central);
     m_vRuler = new Ruler(Qt::Vertical, central);
-    m_scene = new QGraphicsScene(this);
     m_view = new CanvasView(central);
-    m_view->setScene(m_scene);
+    m_scene = m_view->scene();
 
     m_hRuler->setView(m_view);
     m_vRuler->setView(m_view);
@@ -620,127 +627,36 @@ void MainWindow::createDocks()
     addDockWidget(Qt::LeftDockWidgetArea, m_toolsDock);
     connect(m_toolPalette, &ToolPalette::toolSelected, this, &MainWindow::applyTool);
 
-    // Right: objects tree
-    m_objectsDock = new QDockWidget(QStringLiteral("Объекты и слои"), this);
-    m_objectsDock->setObjectName(QStringLiteral("ObjectsDock"));
-    m_objectsDock->setMinimumWidth(250);
+    // Right dockers, tabbed like CorelDRAW's docker group.
+    m_dockPanels = new DockPanels(this, m_view, this);
+    const QList<QDockWidget *> dockers = m_dockPanels->docks();
+    if (dockers.size() >= 7) {
+        QDockWidget *objects = dockers.at(0);
+        QDockWidget *properties = dockers.at(1);
+        addDockWidget(Qt::RightDockWidgetArea, objects);
+        addDockWidget(Qt::RightDockWidgetArea, properties);
+        splitDockWidget(objects, properties, Qt::Vertical);
 
-    auto *objectsHost = new QWidget(m_objectsDock);
-    auto *objectsLayout = new QVBoxLayout(objectsHost);
-    objectsLayout->setContentsMargins(6, 6, 6, 6);
-    objectsLayout->setSpacing(4);
-
-    auto *layerBar = new QWidget(objectsHost);
-    auto *layerBarLayout = new QHBoxLayout(layerBar);
-    layerBarLayout->setContentsMargins(0, 0, 0, 0);
-    layerBarLayout->setSpacing(2);
-
-    const struct {
-        const char *icon;
-        const char *tip;
-        const char *message;
-    } layerTools[] = {
-        {"layer-add", "Новый слой", "Новый слой"},
-        {"copy", "Дублировать объект", "Дублирование объекта"},
-        {"delete", "Удалить объект", "Удаление объекта"},
-    };
-
-    for (const auto &tool : layerTools) {
-        auto *button = new QToolButton(layerBar);
-        button->setIcon(Icons::icon(QString::fromLatin1(tool.icon)));
-        button->setIconSize(QSize(18, 18));
-        button->setAutoRaise(true);
-        button->setToolTip(QString::fromUtf8(tool.tip));
-        connect(button, &QToolButton::clicked, this,
-                [this, message = QString::fromUtf8(tool.message)]() { showStub(message); });
-        layerBarLayout->addWidget(button);
-    }
-    layerBarLayout->addStretch(1);
-
-    m_objectsTree = new QTreeWidget(objectsHost);
-    m_objectsTree->setHeaderHidden(true);
-    m_objectsTree->setIndentation(14);
-    m_objectsTree->setSelectionMode(QAbstractItemView::SingleSelection);
-
-    connect(m_objectsTree, &QTreeWidget::itemSelectionChanged, this, [this]() {
-        const QList<QTreeWidgetItem *> selected = m_objectsTree->selectedItems();
-        if (selected.isEmpty())
-            return;
-        const int index = selected.first()->data(0, Qt::UserRole).toInt();
-        const QList<VectorItem *> items = m_view->vectorItems();
-        if (index >= 0 && index < items.size()) {
-            if (m_restoring)
-                return;
-            m_view->scene()->clearSelection();
-            items.at(index)->setSelected(true);
+        for (QDockWidget *dock : {dockers.at(3), dockers.at(4)}) {
+            addDockWidget(Qt::RightDockWidgetArea, dock);
+            tabifyDockWidget(objects, dock);
         }
+        for (QDockWidget *dock : {dockers.at(2), dockers.at(5), dockers.at(6)}) {
+            addDockWidget(Qt::RightDockWidgetArea, dock);
+            tabifyDockWidget(properties, dock);
+        }
+
+        objects->raise();
+        properties->raise();
+        resizeDocks({objects, properties}, {280, 460}, Qt::Vertical);
+        resizeDocks({objects}, {380}, Qt::Horizontal);
+    }
+
+    connect(m_dockPanels, &DockPanels::beginEdit, this, &MainWindow::beginEdit);
+    connect(m_dockPanels, &DockPanels::endEdit, this, &MainWindow::endEdit);
+    connect(m_dockPanels, &DockPanels::status, this, [this](const QString &text) {
+        statusBar()->showMessage(text, 5000);
     });
-
-    objectsLayout->addWidget(layerBar);
-    objectsLayout->addWidget(m_objectsTree, 1);
-
-    m_objectsDock->setWidget(objectsHost);
-    addDockWidget(Qt::RightDockWidgetArea, m_objectsDock);
-
-    // Right: properties
-    m_propertiesDock = new QDockWidget(QStringLiteral("Свойства"), this);
-    m_propertiesDock->setObjectName(QStringLiteral("PropertiesDock"));
-    m_propertiesDock->setMinimumWidth(250);
-
-    auto *propsHost = new QWidget(m_propertiesDock);
-    auto *propsLayout = new QVBoxLayout(propsHost);
-    propsLayout->setContentsMargins(10, 8, 10, 10);
-    propsLayout->setSpacing(8);
-
-    auto *form = new QFormLayout;
-    form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    form->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
-    form->setHorizontalSpacing(10);
-    form->setVerticalSpacing(6);
-    form->addRow(fieldLabel(QStringLiteral("X")), numberField(propsHost, -10000, 10000, 100.0, QStringLiteral(" px"), 110, 0));
-    form->addRow(fieldLabel(QStringLiteral("Y")), numberField(propsHost, -10000, 10000, 320.0, QStringLiteral(" px"), 110, 0));
-    form->addRow(fieldLabel(QStringLiteral("Ширина")), numberField(propsHost, 0, 10000, 250.0, QStringLiteral(" px"), 110, 0));
-    form->addRow(fieldLabel(QStringLiteral("Высота")), numberField(propsHost, 0, 10000, 250.0, QStringLiteral(" px"), 110, 0));
-    form->addRow(fieldLabel(QStringLiteral("Угол")), numberField(propsHost, -360, 360, 0.0, QStringLiteral(" °")));
-    propsLayout->addLayout(form);
-
-    auto *fillButton = new QToolButton(propsHost);
-    fillButton->setIcon(Icons::icon(QStringLiteral("swatch"), QColor(0x4f, 0x7c, 0xc0)));
-    fillButton->setIconSize(QSize(18, 18));
-    fillButton->setText(QStringLiteral("  Заливка"));
-    fillButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    fillButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-
-    auto *outlineButton = new QToolButton(propsHost);
-    outlineButton->setIcon(Icons::icon(QStringLiteral("swatch"), QColor(0xe0, 0x46, 0x6b)));
-    outlineButton->setIconSize(QSize(18, 18));
-    outlineButton->setText(QStringLiteral("  Обводка"));
-    outlineButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    outlineButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-
-    propsLayout->addWidget(fillButton);
-    propsLayout->addWidget(outlineButton);
-
-    auto *opacityRow = new QHBoxLayout;
-    opacityRow->addWidget(fieldLabel(QStringLiteral("Прозрачность")));
-    auto *opacity = new QSlider(Qt::Horizontal, propsHost);
-    opacity->setRange(0, 100);
-    opacity->setValue(100);
-    opacityRow->addWidget(opacity, 1);
-    propsLayout->addLayout(opacityRow);
-
-    auto *hint = new QLabel(QStringLiteral(
-        "Панель показывает пример. Редактирование свойств — следующий этап."),
-        propsHost);
-    hint->setWordWrap(true);
-    hint->setStyleSheet(QStringLiteral("color:#757b85; font-size:11px;"));
-    propsLayout->addWidget(hint);
-    propsLayout->addStretch(1);
-
-    m_propertiesDock->setWidget(propsHost);
-    addDockWidget(Qt::RightDockWidgetArea, m_propertiesDock);
-    splitDockWidget(m_objectsDock, m_propertiesDock, Qt::Vertical);
-    resizeDocks({m_objectsDock, m_propertiesDock}, {430, 360}, Qt::Vertical);
 
     // Bottom: colour palette
     m_paletteDock = new QDockWidget(QStringLiteral("Палитра"), this);
@@ -902,12 +818,19 @@ void MainWindow::createPropertyBar()
     const auto addPair = [&](const QString &label, QDoubleSpinBox *spin) {
         transformLayout->addWidget(fieldLabel(label));
         transformLayout->addWidget(spin);
+        connect(spin, &QDoubleSpinBox::editingFinished, this,
+                &MainWindow::applyQuickTransform);
     };
-    addPair(QStringLiteral("X"), numberField(transformPage, -10000, 10000, 100.0, QStringLiteral(" px"), 84, 0));
-    addPair(QStringLiteral("Y"), numberField(transformPage, -10000, 10000, 320.0, QStringLiteral(" px"), 84, 0));
-    addPair(QStringLiteral("Ш"), numberField(transformPage, 0, 10000, 250.0, QStringLiteral(" px"), 84, 0));
-    addPair(QStringLiteral("В"), numberField(transformPage, 0, 10000, 250.0, QStringLiteral(" px"), 84, 0));
-    addPair(QStringLiteral("∠"), numberField(transformPage, -360, 360, 0.0, QStringLiteral(" °"), 70));
+    m_quickX = numberField(transformPage, -10000, 10000, 0.0, QStringLiteral(" px"), 84, 0);
+    m_quickY = numberField(transformPage, -10000, 10000, 0.0, QStringLiteral(" px"), 84, 0);
+    m_quickW = numberField(transformPage, 1, 10000, 100.0, QStringLiteral(" px"), 84, 0);
+    m_quickH = numberField(transformPage, 1, 10000, 100.0, QStringLiteral(" px"), 84, 0);
+    m_quickAngle = numberField(transformPage, -360, 360, 0.0, QStringLiteral(" °"), 70);
+    addPair(QStringLiteral("X"), m_quickX);
+    addPair(QStringLiteral("Y"), m_quickY);
+    addPair(QStringLiteral("Ш"), m_quickW);
+    addPair(QStringLiteral("В"), m_quickH);
+    addPair(QStringLiteral("∠"), m_quickAngle);
     transformLayout->addWidget(verticalRule(transformPage));
     addPair(QStringLiteral("Скругление"),
             numberField(transformPage, 0, 500, 0.0, QStringLiteral(" px"), 80, 0));
@@ -1020,10 +943,90 @@ void MainWindow::createPropertyBar()
 
     paintLayout->addStretch(1);
 
+    // 4 — Bézier
+    auto *bezierPage = new QWidget(m_propertyStack);
+    auto *bezierLayout = new QHBoxLayout(bezierPage);
+    bezierLayout->setContentsMargins(2, 0, 2, 0);
+    bezierLayout->setSpacing(6);
+
+    bezierLayout->addWidget(fieldLabel(QStringLiteral("Узел")));
+    auto *modeGroup = new QButtonGroup(bezierPage);
+    modeGroup->setExclusive(true);
+    const QString modeNames[] = {QStringLiteral("Тупой"),
+                                 QStringLiteral("Сглаженный"),
+                                 QStringLiteral("Симметричный")};
+    const QString modeTips[] = {
+        QStringLiteral("Излом: направляющие независимы"),
+        QStringLiteral("Сглаженный: направляющие на одной линии"),
+        QStringLiteral("Симметричный: направляющие равной длины"),
+    };
+    for (int i = 0; i < 3; ++i) {
+        auto *button = new QToolButton(bezierPage);
+        button->setText(modeNames[i]);
+        button->setCheckable(true);
+        button->setAutoRaise(true);
+        button->setToolTip(modeTips[i]);
+        modeGroup->addButton(button, i);
+        bezierLayout->addWidget(button);
+    }
+    modeGroup->button(2)->setChecked(true);
+    connect(modeGroup, &QButtonGroup::idClicked, this, [this](int id) {
+        m_view->setBezierNodeMode(static_cast<CanvasView::BezierNodeMode>(id));
+        statusBar()->showMessage(
+            QStringLiteral("Тип нового узла: %1")
+                .arg(id == 0 ? QStringLiteral("тупой")
+                             : (id == 1 ? QStringLiteral("сглаженный")
+                                        : QStringLiteral("симметричный"))),
+            3000);
+    });
+
+    auto *autoClose = new QCheckBox(QStringLiteral("Автозамыкание"), bezierPage);
+    connect(autoClose, &QCheckBox::toggled, this, [this](bool on) {
+        m_view->setBezierAutoClose(on);
+        statusBar()->showMessage(on ? QStringLiteral("Кривая будет замыкаться "
+                                                     "автоматически")
+                                    : QStringLiteral("Автозамыкание выключено"),
+                                 3000);
+    });
+    bezierLayout->addWidget(autoClose);
+
+    bezierLayout->addWidget(verticalRule(bezierPage));
+
+    auto *closeButton = new QToolButton(bezierPage);
+    closeButton->setText(QStringLiteral("Замкнуть"));
+    closeButton->setToolTip(QStringLiteral("Замкнуть кривую по первому узлу"));
+    connect(closeButton, &QToolButton::clicked, this,
+            [this]() { m_view->closeBezier(); });
+    bezierLayout->addWidget(closeButton);
+
+    auto *deleteNodeButton = new QToolButton(bezierPage);
+    deleteNodeButton->setText(QStringLiteral("Удалить узел"));
+    deleteNodeButton->setToolTip(QStringLiteral("Убрать последний узел (Backspace)"));
+    connect(deleteNodeButton, &QToolButton::clicked, this,
+            [this]() { m_view->deleteLastBezierNode(); });
+    bezierLayout->addWidget(deleteNodeButton);
+
+    auto *finishButton = new QToolButton(bezierPage);
+    finishButton->setText(QStringLiteral("Завершить"));
+    finishButton->setToolTip(QStringLiteral("Завершить кривую (Enter)"));
+    connect(finishButton, &QToolButton::clicked, this,
+            [this]() { m_view->finishBezier(); });
+    bezierLayout->addWidget(finishButton);
+
+    bezierLayout->addWidget(verticalRule(bezierPage));
+    auto *bezierHint = new QLabel(
+        QStringLiteral("Тяните от узла для кривизны · Alt — излом · "
+                       "Ctrl — шаг 15° · Backspace — удалить узел"),
+        bezierPage);
+    bezierHint->setStyleSheet(QStringLiteral("color:#757b85; font-size:11px;"));
+    bezierLayout->addWidget(bezierHint);
+    bezierLayout->addStretch(1);
+
     m_propertyStack->addWidget(zoomPage);      // 0
     m_propertyStack->addWidget(transformPage); // 1
     m_propertyStack->addWidget(textPage);      // 2
     m_propertyStack->addWidget(paintPage);     // 3
+    m_propertyStack->addWidget(bezierPage);    // 4
     m_propertyStack->setCurrentIndex(m_transformPageIndex);
 
     bar->addWidget(m_propertyStack);
@@ -1117,6 +1120,9 @@ void MainWindow::applyTool(Tool tool)
     case Tool::Zoom:
     case Tool::Pan:
         page = m_zoomPageIndex;
+        break;
+    case Tool::Bezier:
+        page = m_bezierPageIndex;
         break;
     case Tool::Text:
         page = m_textPageIndex;
@@ -1234,7 +1240,8 @@ void MainWindow::applyDocument(const Document &document)
     m_restoring = true;
     m_view->setDocument(document);
     m_restoring = false;
-    rebuildObjectsTree();
+    if (m_dockPanels)
+        m_dockPanels->refresh();
     updateHistoryActions();
 }
 
@@ -1583,7 +1590,9 @@ void MainWindow::endEdit()
 
     m_modified = true;
     updateTitle();
-    rebuildObjectsTree();
+    if (m_dockPanels)
+        m_dockPanels->refresh();
+    refreshQuickTransform();
     updateHistoryActions();
 }
 
@@ -1603,7 +1612,8 @@ void MainWindow::undo()
 
     m_modified = true;
     updateTitle();
-    rebuildObjectsTree();
+    if (m_dockPanels)
+        m_dockPanels->refresh();
     updateHistoryActions();
     statusBar()->showMessage(QStringLiteral("Действие отменено."), 2500);
 }
@@ -1624,7 +1634,8 @@ void MainWindow::redo()
 
     m_modified = true;
     updateTitle();
-    rebuildObjectsTree();
+    if (m_dockPanels)
+        m_dockPanels->refresh();
     updateHistoryActions();
     statusBar()->showMessage(QStringLiteral("Действие повторено."), 2500);
 }
@@ -1650,49 +1661,6 @@ void MainWindow::updateHistoryActions()
 // ---------------------------------------------------------------------------
 // Colour helpers
 // ---------------------------------------------------------------------------
-
-void MainWindow::rebuildObjectsTree()
-{
-    if (!m_objectsTree || !m_view)
-        return;
-
-    const QList<VectorItem *> items = m_view->vectorItems();
-    const QSignalBlocker blocker(m_objectsTree);
-    m_objectsTree->clear();
-
-    auto *layer = new QTreeWidgetItem(m_objectsTree, {QStringLiteral("Слой 1")});
-    QFont layerFont = m_objectsTree->font();
-    layerFont.setBold(true);
-    layer->setFont(0, layerFont);
-    layer->setExpanded(true);
-
-    for (int i = items.size() - 1; i >= 0; --i) {
-        const VectorObject object = items.at(i)->object();
-        QString name;
-        switch (object.type) {
-        case ShapeType::Rectangle: name = QStringLiteral("Прямоугольник"); break;
-        case ShapeType::Ellipse: name = QStringLiteral("Эллипс"); break;
-        case ShapeType::Polygon: name = QStringLiteral("Многоугольник"); break;
-        case ShapeType::Star: name = QStringLiteral("Звезда"); break;
-        case ShapeType::Spiral: name = QStringLiteral("Спираль"); break;
-        case ShapeType::Line: name = QStringLiteral("Линия"); break;
-        case ShapeType::Bezier: name = QStringLiteral("Кривая Безье"); break;
-        case ShapeType::Freehand: name = QStringLiteral("Свободная форма"); break;
-        case ShapeType::Artistic: name = QStringLiteral("Мазок"); break;
-        case ShapeType::Text: {
-            QString first = object.text.section(QLatin1Char('\n'), 0, 0).trimmed();
-            if (first.size() > 22)
-                first = first.left(22) + QStringLiteral("…");
-            name = QStringLiteral("Текст: %1").arg(first);
-            break;
-        }
-        case ShapeType::Image: name = QStringLiteral("Изображение"); break;
-        }
-
-        auto *entry = new QTreeWidgetItem(layer, {name});
-        entry->setData(0, Qt::UserRole, i);
-    }
-}
 
 void MainWindow::onPaletteColor(const QColor &color)
 {
@@ -1726,6 +1694,65 @@ void MainWindow::onSelectionChanged(int count)
 {
     if (m_selectionLabel)
         m_selectionLabel->setText(QStringLiteral("Выделено: %1").arg(count));
+    refreshQuickTransform();
+}
+
+void MainWindow::refreshQuickTransform()
+{
+    if (!m_quickX || !m_view)
+        return;
+
+    const QList<VectorItem *> selected = m_view->selectedVectorItems();
+    const QSignalBlocker blockX(m_quickX);
+    const QSignalBlocker blockY(m_quickY);
+    const QSignalBlocker blockW(m_quickW);
+    const QSignalBlocker blockH(m_quickH);
+    const QSignalBlocker blockAngle(m_quickAngle);
+
+    const bool enabled = !selected.isEmpty();
+    m_quickX->setEnabled(enabled);
+    m_quickY->setEnabled(enabled);
+    m_quickW->setEnabled(enabled);
+    m_quickH->setEnabled(enabled);
+    m_quickAngle->setEnabled(enabled);
+
+    if (!enabled)
+        return;
+
+    const VectorObject object = selected.first()->object();
+    const QRectF bounds = object.localBounds();
+    m_quickX->setValue(object.pos.x());
+    m_quickY->setValue(object.pos.y());
+    m_quickW->setValue(bounds.width());
+    m_quickH->setValue(bounds.height());
+    m_quickAngle->setValue(object.rotation);
+}
+
+void MainWindow::applyQuickTransform()
+{
+    if (!m_view || !m_quickX || !m_quickX->isEnabled())
+        return;
+
+    const QList<VectorItem *> selected = m_view->selectedVectorItems();
+    if (selected.isEmpty())
+        return;
+
+    const QPointF position(m_quickX->value(), m_quickY->value());
+    const QSizeF size(m_quickW->value(), m_quickH->value());
+    const qreal angle = m_quickAngle->value();
+
+    beginEdit();
+    if (selected.size() == 1) {
+        VectorItem *item = selected.first();
+        item->setFrameSize(size);
+        item->setRotationAngle(angle);
+        item->setPos(position);
+    } else {
+        const QPointF delta = position - selected.first()->pos();
+        for (VectorItem *item : selected)
+            item->setPos(item->pos() + delta);
+    }
+    endEdit();
 }
 
 void MainWindow::copySelection()
@@ -1804,6 +1831,17 @@ void MainWindow::showShortcuts()
         "<tr><td><b>Z</b></td><td>Масштаб</td><td><b>H</b></td><td>Панорама</td></tr>"
         "<tr><td><b>C</b></td><td>Обрезка</td><td><b>Пробел</b></td><td>Панорама (удерживать)</td></tr>"
         "</table>"
+        "<h3 style='color:#e3e7ee'>Кривая Безье</h3>"
+        "<table cellspacing='6'>"
+        "<tr><td><b>Клик</b></td><td>добавить узел</td>"
+        "<td><b>Протяжка</b></td><td>изогнуть сегмент</td></tr>"
+        "<tr><td><b>Alt</b></td><td>излом (независимые направляющие)</td>"
+        "<td><b>Ctrl</b></td><td>шаг направляющей 15°</td></tr>"
+        "<tr><td><b>Backspace</b></td><td>удалить последний узел</td>"
+        "<td><b>Клик по первому узлу</b></td><td>замкнуть кривую</td></tr>"
+        "<tr><td><b>Enter</b> / двойной клик</td><td>завершить</td>"
+        "<td><b>Esc</b></td><td>отменить кривую</td></tr>"
+        "</table>"
         "<h3 style='color:#e3e7ee'>Файл и правка</h3>"
         "<table cellspacing='6'>"
         "<tr><td><b>Ctrl+N</b></td><td>Создать</td><td><b>Ctrl+O</b></td><td>Открыть</td></tr>"
@@ -1831,10 +1869,10 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("О программе"),
         QStringLiteral(
-            "<h3>Vectora 0.2</h3>"
+            "<h3>Vectora 0.3</h3>"
             "<p>Кроссплатформенный векторный редактор на C++ и Qt 6.</p>"
             "<p>Работают: документы .vct, экспорт PNG/SVG/PDF, печать, "
-            "рисование фигур и кривых, текст, узлы, заливка, обводка, "
-            "тень, перетекание, обрезка, копирование и Undo/Redo.</p>"
+            "рисование фигур и кривых, Bezier с типами узлов, докеры "
+            "свойств, цвета, выравнивания, эффектов и текста, Undo/Redo.</p>"
             "<p style='color:#666'>Linux · Windows · macOS</p>"));
 }

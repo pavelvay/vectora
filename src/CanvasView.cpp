@@ -58,6 +58,12 @@ CanvasView::CanvasView(QWidget *parent)
     updateCursor();
 }
 
+CanvasView::~CanvasView()
+{
+    if (QGraphicsScene *current = scene())
+        disconnect(current, nullptr, this, nullptr);
+}
+
 QRectF CanvasView::pageRect() const
 {
     return QRectF(0.0, 0.0, m_pageSize.width(), m_pageSize.height());
@@ -252,24 +258,60 @@ void CanvasView::drawForeground(QPainter *painter, const QRectF &rect)
 
 void CanvasView::drawPreview(QPainter *painter)
 {
-    if (m_bezierActive && m_bezierNodes.size() >= 1) {
+    if (m_tool == Tool::Bezier && !m_bezierNodes.isEmpty()) {
         painter->save();
         painter->setRenderHint(QPainter::Antialiasing, true);
+
+        const qreal s = transform().m11() > 0 ? transform().m11() : 1.0;
+        const qreal size = 7.0 / s;
+        const qreal handleRadius = 3.0 / s;
+
         painter->setPen(previewPen());
         painter->setBrush(Qt::NoBrush);
         if (m_bezierNodes.size() >= 2)
             painter->drawPath(buildBezierPath());
 
-        const qreal s = transform().m11() > 0 ? transform().m11() : 1.0;
-        const qreal size = 7.0 / s;
-        for (const BezierNode &node : m_bezierNodes) {
+        // Rubber band to the cursor, like CorelDRAW's rubber-band preview.
+        if (m_bezierHasCursor && !m_bezierDragging) {
+            QPen rubber = previewPen();
+            rubber.setColor(QColor(0x7f, 0xae, 0xf7, 150));
+            painter->setPen(rubber);
+            painter->drawLine(m_bezierNodes.last().anchor, m_bezierCursor);
+        }
+
+        const BezierNode &last = m_bezierNodes.last();
+        if (last.in != last.anchor || last.out != last.anchor) {
+            painter->setPen(QPen(QColor(0x7f, 0xae, 0xf7, 170), 1.0));
+            painter->drawLine(last.anchor, last.in);
+            painter->drawLine(last.anchor, last.out);
+            painter->setBrush(QColor(0x9d, 0xc0, 0xf2));
+            painter->setPen(QPen(QColor(0x4f, 0x7c, 0xc0), 1.0));
+            painter->drawEllipse(last.in, handleRadius, handleRadius);
+            painter->drawEllipse(last.out, handleRadius, handleRadius);
+        }
+
+        const qreal closeDistance = 10.0 / s;
+        const bool nearFirst = m_bezierNodes.size() >= 2 && m_bezierHasCursor
+                               && QLineF(m_bezierCursor, m_bezierNodes.first().anchor)
+                                          .length()
+                                      <= closeDistance;
+
+        for (int i = 0; i < m_bezierNodes.size(); ++i) {
+            const BezierNode &node = m_bezierNodes.at(i);
             painter->setPen(QPen(QColor(0x7f, 0xae, 0xf7), 1.2));
-            painter->setBrush(QColor(0x1b, 0x1d, 0x21));
+            painter->setBrush(i == 0 ? QColor(0x4f, 0x7c, 0xc0)
+                                     : QColor(0xffffff));
             painter->drawRect(QRectF(node.anchor - QPointF(size / 2, size / 2),
                                      QSizeF(size, size)));
-            painter->setBrush(QColor(0xf2, 0xf5, 0xfa));
-            painter->drawEllipse(node.out, size / 4.0, size / 4.0);
         }
+
+        if (nearFirst) {
+            painter->setPen(QPen(QColor(0xff, 0xb3, 0x47), 2.0));
+            painter->setBrush(Qt::NoBrush);
+            painter->drawEllipse(m_bezierNodes.first().anchor, closeDistance,
+                                 closeDistance);
+        }
+
         painter->restore();
         return;
     }
@@ -555,6 +597,42 @@ void CanvasView::selectAllObjects()
     emit selectionChanged(items.size());
 }
 
+void CanvasView::raiseSelection()
+{
+    QList<VectorItem *> items = vectorItems();
+    if (items.isEmpty())
+        return;
+
+    emit beginEdit();
+    for (int i = items.size() - 2; i >= 0; --i) {
+        if (items.at(i)->isSelected() && !items.at(i + 1)->isSelected())
+            items.swapItemsAt(i, i + 1);
+    }
+    for (int i = 0; i < items.size(); ++i)
+        items.at(i)->setZValue(i + 1);
+    m_nextZ = items.size() + 1.0;
+    emit endEdit();
+    viewport()->update();
+}
+
+void CanvasView::lowerSelection()
+{
+    QList<VectorItem *> items = vectorItems();
+    if (items.isEmpty())
+        return;
+
+    emit beginEdit();
+    for (int i = 1; i < items.size(); ++i) {
+        if (items.at(i)->isSelected() && !items.at(i - 1)->isSelected())
+            items.swapItemsAt(i, i - 1);
+    }
+    for (int i = 0; i < items.size(); ++i)
+        items.at(i)->setZValue(i + 1);
+    m_nextZ = items.size() + 1.0;
+    emit endEdit();
+    viewport()->update();
+}
+
 void CanvasView::startDrawing(DrawMode mode, const QPointF &scenePos)
 {
     m_drawMode = mode;
@@ -756,7 +834,17 @@ void CanvasView::addBezierNode(const QPointF &scenePos)
 {
     m_bezierActive = true;
     m_bezierDragging = true;
-    m_bezierNodes.append({scenePos, scenePos, scenePos});
+    m_bezierDragMoved = false;
+    m_bezierClosed = false;
+    m_bezierHasCursor = true;
+    m_bezierCursor = scenePos;
+
+    BezierNode node;
+    node.anchor = scenePos;
+    node.in = scenePos;
+    node.out = scenePos;
+    node.mode = m_bezierNodeMode;
+    m_bezierNodes.append(node);
     viewport()->update();
 }
 
@@ -765,29 +853,76 @@ void CanvasView::finishBezier()
     if (!m_bezierActive)
         return;
 
+    const bool closed = m_bezierClosed || m_bezierAutoClose;
+    const int nodeCount = m_bezierNodes.size();
+
     m_bezierActive = false;
     m_bezierDragging = false;
+    m_bezierHasCursor = false;
 
     if (m_bezierNodes.size() >= 2) {
         VectorObject object;
         object.type = ShapeType::Bezier;
         object.path = buildBezierPath();
+        if (closed && m_bezierNodes.size() >= 2) {
+            object.path.cubicTo(m_bezierNodes.last().out,
+                                m_bezierNodes.first().in,
+                                m_bezierNodes.first().anchor);
+            object.path.closeSubpath();
+        }
         object.pos = QPointF(0.0, 0.0);
-        object.hasFill = false;
+        object.fill = m_fill;
+        object.hasFill = closed && m_fill.alpha() > 0;
         object.stroke = m_stroke;
         object.strokeWidth = qMax<qreal>(m_strokeWidth, 1.0);
         object.hasStroke = true;
         addVectorObject(object);
+        emit statusHint(QStringLiteral("Кривая создана: %1 узлов%2")
+                            .arg(nodeCount)
+                            .arg(closed ? QStringLiteral(", замкнута") : QString()));
     }
 
+    m_bezierClosed = false;
     m_bezierNodes.clear();
     viewport()->update();
+}
+
+void CanvasView::closeBezier()
+{
+    if (!m_bezierActive || m_bezierNodes.size() < 2) {
+        emit statusHint(QStringLiteral("Для замыкания нужно минимум два узла."));
+        return;
+    }
+    m_bezierClosed = true;
+    finishBezier();
+}
+
+void CanvasView::deleteLastBezierNode()
+{
+    if (!m_bezierActive)
+        return;
+    if (!m_bezierNodes.isEmpty())
+        m_bezierNodes.removeLast();
+    if (m_bezierNodes.isEmpty()) {
+        m_bezierActive = false;
+        m_bezierDragging = false;
+    }
+    viewport()->update();
+    emit statusHint(QStringLiteral("Узел удалён. Осталось: %1").arg(m_bezierNodes.size()));
+}
+
+void CanvasView::setBezierNodeMode(BezierNodeMode mode)
+{
+    m_bezierNodeMode = mode;
+    if (!m_bezierNodes.isEmpty())
+        m_bezierNodes.last().mode = mode;
 }
 
 void CanvasView::cancelBezier()
 {
     m_bezierActive = false;
     m_bezierDragging = false;
+    m_bezierClosed = false;
     m_bezierNodes.clear();
     viewport()->update();
 }
@@ -895,8 +1030,9 @@ void CanvasView::toggleShadowAt(const QPointF &scenePos)
     emit statusHint(on ? QStringLiteral("Тень включена.") : QStringLiteral("Тень выключена."));
 }
 
-void CanvasView::blendSelected()
+void CanvasView::blendSelected(int steps)
 {
+    steps = qBound(1, steps, 80);
     const QList<VectorItem *> selected = selectedVectorItems();
     if (selected.size() != 2) {
         emit statusHint(QStringLiteral("Для перетекания выделите ровно два объекта."));
@@ -911,8 +1047,8 @@ void CanvasView::blendSelected()
     const QRectF toBounds = target.localBounds();
 
     emit beginEdit();
-    for (int i = 1; i < 8; ++i) {
-        const qreal t = i / 8.0;
+    for (int i = 1; i <= steps; ++i) {
+        const qreal t = qreal(i) / qreal(steps + 1);
         VectorObject object = base;
         object.pos = base.pos + (target.pos - base.pos) * t;
         object.rotation = base.rotation + (target.rotation - base.rotation) * t;
@@ -934,7 +1070,7 @@ void CanvasView::blendSelected()
         addVectorObject(object, false, false);
     }
     emit endEdit();
-    emit statusHint(QStringLiteral("Создано 7 промежуточных объектов."));
+    emit statusHint(QStringLiteral("Создано %1 промежуточных объектов.").arg(steps));
 }
 
 void CanvasView::cropTo(const QRectF &rect)
@@ -1067,9 +1203,19 @@ void CanvasView::mousePressEvent(QMouseEvent *event)
     case Tool::Artistic:
         startDrawing(DrawMode::Artistic, scenePos);
         break;
-    case Tool::Bezier:
+    case Tool::Bezier: {
+        if (m_bezierActive && m_bezierNodes.size() >= 2) {
+            const qreal closeDistance = 10.0 / (m_zoom > 0.0 ? m_zoom : 1.0);
+            if (QLineF(scenePos, m_bezierNodes.first().anchor).length()
+                <= closeDistance) {
+                m_bezierClosed = true;
+                finishBezier();
+                break;
+            }
+        }
         addBezierNode(scenePos);
         break;
+    }
     case Tool::Text:
         createTextAt(scenePos);
         break;
@@ -1149,11 +1295,51 @@ void CanvasView::mouseMoveEvent(QMouseEvent *event)
         return;
     }
 
-    if (m_bezierDragging && !m_bezierNodes.isEmpty()) {
-        BezierNode &node = m_bezierNodes.last();
-        node.out = scenePos;
-        node.in = node.anchor * 2.0 - scenePos;
-        viewport()->update();
+    if (m_tool == Tool::Bezier) {
+        m_bezierCursor = scenePos;
+        m_bezierHasCursor = true;
+
+        if (m_bezierDragging && !m_bezierNodes.isEmpty()) {
+            BezierNode &node = m_bezierNodes.last();
+            QPointF outPoint = scenePos;
+
+            if (QGuiApplication::keyboardModifiers() & Qt::ControlModifier) {
+                const QLineF line(node.anchor, scenePos);
+                const qreal step = kPi / 12.0;
+                const qreal length = line.length();
+                const qreal angle = std::atan2(-line.dy(), line.dx());
+                const qreal snapped = qRound(angle / step) * step;
+                outPoint = node.anchor + QPointF(std::cos(snapped) * length,
+                                                 -std::sin(snapped) * length);
+            }
+
+            if (QLineF(node.anchor, outPoint).length() > 0.5)
+                m_bezierDragMoved = true;
+
+            if (QGuiApplication::keyboardModifiers() & Qt::AltModifier)
+                node.mode = BezierNodeMode::Cusp;
+
+            node.out = outPoint;
+            switch (node.mode) {
+            case BezierNodeMode::Symmetric:
+                node.in = node.anchor * 2.0 - outPoint;
+                break;
+            case BezierNodeMode::Smooth: {
+                const QPointF direction = outPoint - node.anchor;
+                const qreal length = std::hypot(direction.x(), direction.y());
+                if (length > 0.01) {
+                    qreal inLength = QLineF(node.anchor, node.in).length();
+                    if (inLength < 0.5)
+                        inLength = length;
+                    node.in = node.anchor - direction / length * inLength;
+                }
+                break;
+            }
+            case BezierNodeMode::Cusp:
+                break;
+            }
+            viewport()->update();
+        }
     }
 
     if (m_drawing) {
@@ -1198,7 +1384,15 @@ void CanvasView::mouseReleaseEvent(QMouseEvent *event)
     }
 
     if (m_bezierDragging) {
+        if (!m_bezierDragMoved && !m_bezierNodes.isEmpty()) {
+            BezierNode &node = m_bezierNodes.last();
+            node.in = node.anchor;
+            node.out = node.anchor;
+            node.mode = BezierNodeMode::Cusp;
+        }
         m_bezierDragging = false;
+        m_bezierDragMoved = false;
+        viewport()->update();
         event->accept();
         return;
     }
@@ -1233,6 +1427,12 @@ void CanvasView::keyPressEvent(QKeyEvent *event)
     if (event->key() == Qt::Key_Space && !m_spaceHeld) {
         m_spaceHeld = true;
         updateCursor();
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_Backspace && m_tool == Tool::Bezier
+        && m_bezierActive) {
+        deleteLastBezierNode();
         event->accept();
         return;
     }

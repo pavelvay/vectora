@@ -40,6 +40,9 @@ struct VectorObject {
     bool hasStroke = true;
     qreal opacity = 1.0;
     bool shadow = false;
+    QPointF shadowOffset = QPointF(8.0, 8.0);
+    qreal shadowOpacity = 0.28;
+    QColor shadowColor = QColor(0, 0, 0);
 
     QString text;
     QFont font;

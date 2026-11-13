@@ -14,7 +14,10 @@ class CanvasView : public QGraphicsView
     Q_OBJECT
 
 public:
+    enum class BezierNodeMode { Cusp, Smooth, Symmetric };
+
     explicit CanvasView(QWidget *parent = nullptr);
+    ~CanvasView() override;
 
     qreal zoom() const { return m_zoom; }
     QRectF pageRect() const;
@@ -49,6 +52,20 @@ public:
     void deleteSelectedObjects();
     void selectAllObjects();
     void editTextItem(VectorItem *item);
+
+    void blendSelected(int steps = 7);
+    void raiseSelection();
+    void lowerSelection();
+
+    void finishBezier();
+    void closeBezier();
+    void deleteLastBezierNode();
+    void setBezierNodeMode(BezierNodeMode mode);
+    BezierNodeMode bezierNodeMode() const { return m_bezierNodeMode; }
+    void setBezierAutoClose(bool on) { m_bezierAutoClose = on; }
+    bool bezierAutoClose() const { return m_bezierAutoClose; }
+
+signals:
 
 signals:
     void scenePosChanged(const QPointF &pos);
@@ -89,6 +106,7 @@ private:
         QPointF anchor;
         QPointF in;
         QPointF out;
+        BezierNodeMode mode = BezierNodeMode::Symmetric;
     };
 
     void updateCursor();
@@ -100,11 +118,9 @@ private:
     void applyFillAt(const QPointF &scenePos);
     void applyOutlineAt(const QPointF &scenePos);
     void toggleShadowAt(const QPointF &scenePos);
-    void blendSelected();
     void cropTo(const QRectF &rect);
 
     void addBezierNode(const QPointF &scenePos);
-    void finishBezier();
     void cancelBezier();
     QPainterPath buildBezierPath() const;
     QPainterPath buildFreehandPath(const QVector<QPointF> &points) const;
@@ -133,6 +149,12 @@ private:
 
     bool m_bezierActive = false;
     bool m_bezierDragging = false;
+    bool m_bezierDragMoved = false;
+    bool m_bezierClosed = false;
+    bool m_bezierAutoClose = false;
+    bool m_bezierHasCursor = false;
+    BezierNodeMode m_bezierNodeMode = BezierNodeMode::Symmetric;
+    QPointF m_bezierCursor;
     QVector<BezierNode> m_bezierNodes;
 
     bool m_nodeDragging = false;

@@ -5,6 +5,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
+#include <QDockWidget>
+#include <QDoubleSpinBox>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPageSize>
@@ -247,6 +249,67 @@ int SelfTest::run(const QString &directory)
               QStringLiteral("blend created 7 objects"));
     }
 
+    // Bezier tool: smooth drag, cusp click, closing on the first node.
+    out << "\nBezier\n";
+    view.setActiveTool(Tool::Bezier);
+    const int beforeBezier = view.vectorItems().size();
+
+    const QPoint b1 = view.mapFromScene(QPointF(400, 900));
+    const QPoint b2 = view.mapFromScene(QPointF(520, 850));
+    const QPoint b3 = view.mapFromScene(QPointF(600, 940));
+
+    sendMouse(view.viewport(), QEvent::MouseButtonPress, b1, Qt::LeftButton,
+              Qt::LeftButton);
+    sendMouse(view.viewport(), QEvent::MouseMove, b1 + QPoint(-36, -36), Qt::NoButton,
+              Qt::LeftButton);
+    sendMouse(view.viewport(), QEvent::MouseButtonRelease, b1 + QPoint(-36, -36),
+              Qt::LeftButton, Qt::NoButton);
+
+    sendMouse(view.viewport(), QEvent::MouseButtonPress, b2, Qt::LeftButton,
+              Qt::LeftButton);
+    sendMouse(view.viewport(), QEvent::MouseButtonRelease, b2, Qt::LeftButton,
+              Qt::NoButton);
+
+    sendMouse(view.viewport(), QEvent::MouseButtonPress, b3, Qt::LeftButton,
+              Qt::LeftButton);
+    sendMouse(view.viewport(), QEvent::MouseMove, b3 + QPoint(30, 18), Qt::NoButton,
+              Qt::LeftButton);
+    sendMouse(view.viewport(), QEvent::MouseButtonRelease, b3 + QPoint(30, 18),
+              Qt::LeftButton, Qt::NoButton);
+
+    // Clicking the first node closes the curve.
+    sendMouse(view.viewport(), QEvent::MouseButtonPress, b1, Qt::LeftButton,
+              Qt::LeftButton);
+    sendMouse(view.viewport(), QEvent::MouseButtonRelease, b1, Qt::LeftButton,
+              Qt::NoButton);
+
+    check(view.vectorItems().size() == beforeBezier + 1,
+          QStringLiteral("closed bezier created"));
+    if (view.vectorItems().size() == beforeBezier + 1) {
+        const VectorObject bezier = view.vectorItems().last()->object();
+        check(bezier.type == ShapeType::Bezier, QStringLiteral("type is bezier"));
+        check(bezier.hasFill, QStringLiteral("closed curve is filled"));
+    }
+
+    // Enter finishes an open curve.
+    view.setActiveTool(Tool::Bezier);
+    const QPoint d1 = view.mapFromScene(QPointF(400, 1000));
+    const QPoint d2 = view.mapFromScene(QPointF(540, 1030));
+    sendMouse(view.viewport(), QEvent::MouseButtonPress, d1, Qt::LeftButton,
+              Qt::LeftButton);
+    sendMouse(view.viewport(), QEvent::MouseButtonRelease, d1, Qt::LeftButton,
+              Qt::NoButton);
+    sendMouse(view.viewport(), QEvent::MouseButtonPress, d2, Qt::LeftButton,
+              Qt::LeftButton);
+    sendMouse(view.viewport(), QEvent::MouseButtonRelease, d2, Qt::LeftButton,
+              Qt::NoButton);
+    view.setFocus();
+    QKeyEvent enterEvent(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+    QApplication::sendEvent(&view, &enterEvent);
+    QApplication::processEvents();
+    check(view.vectorItems().size() == beforeBezier + 2,
+          QStringLiteral("Enter finished the open bezier"));
+
     // Round trip of the drawn document
     Document drawn;
     drawn.pageSize = view.pageSize();
@@ -288,6 +351,11 @@ int SelfTest::run(const QString &directory)
             }
             check(undoAction && undoAction->isEnabled(),
                   QStringLiteral("undo is enabled after drawing"));
+            if (!canvas->vectorItems().isEmpty()) {
+                canvas->vectorItems().last()->setSelected(true);
+                QApplication::processEvents();
+                window.grab().save(dir.filePath(QStringLiteral("window-selected.png")));
+            }
             if (undoAction)
                 undoAction->trigger();
             check(canvas->vectorItems().size() == baseCount,
@@ -296,6 +364,33 @@ int SelfTest::run(const QString &directory)
                 redoAction->trigger();
             check(canvas->vectorItems().size() == baseCount + 1,
                   QStringLiteral("redo restored the rectangle"));
+
+            // Properties docker applies geometry to the selected object.
+            if (!canvas->vectorItems().isEmpty()) {
+                VectorItem *item = canvas->vectorItems().last();
+                canvas->scene()->clearSelection();
+                item->setSelected(true);
+                QApplication::processEvents();
+
+                QDockWidget *propertiesDock = nullptr;
+                for (QDockWidget *dock : window.findChildren<QDockWidget *>()) {
+                    if (dock->windowTitle() == QStringLiteral("Свойства"))
+                        propertiesDock = dock;
+                }
+                check(propertiesDock != nullptr, QStringLiteral("properties docker found"));
+                if (propertiesDock) {
+                    const QList<QDoubleSpinBox *> fields =
+                        propertiesDock->findChildren<QDoubleSpinBox *>();
+                    check(!fields.isEmpty(), QStringLiteral("properties fields found"));
+                    if (!fields.isEmpty()) {
+                        fields.first()->setValue(210.0);
+                        fields.first()->editingFinished();
+                        QApplication::processEvents();
+                        check(qAbs(item->pos().x() - 210.0) < 0.5,
+                              QStringLiteral("properties X applied"));
+                    }
+                }
+            }
         }
     }
 

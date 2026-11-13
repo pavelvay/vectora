@@ -11,6 +11,7 @@
 
 class QAction;
 class QComboBox;
+class QDoubleSpinBox;
 class QDockWidget;
 class QGraphicsScene;
 class QLabel;
@@ -20,6 +21,7 @@ class QTreeWidgetItem;
 
 class CanvasView;
 class ColorPalette;
+class DockPanels;
 class Ruler;
 class ToolPalette;
 
@@ -68,7 +70,8 @@ private:
     void onPaletteColor(const QColor &color);
     void applyFillToSelection(const QColor &color);
     void onSelectionChanged(int count);
-    void rebuildObjectsTree();
+    void refreshQuickTransform();
+    void applyQuickTransform();
     void copySelection();
     void cutSelection();
     void pasteClipboard();
@@ -98,12 +101,10 @@ private:
     ColorPalette *m_palette = nullptr;
 
     QDockWidget *m_toolsDock = nullptr;
-    QDockWidget *m_objectsDock = nullptr;
-    QDockWidget *m_propertiesDock = nullptr;
     QDockWidget *m_paletteDock = nullptr;
+    DockPanels *m_dockPanels = nullptr;
 
     QStackedWidget *m_propertyStack = nullptr;
-    QTreeWidget *m_objectsTree = nullptr;
     QComboBox *m_zoomCombo = nullptr;
     QComboBox *m_toolbarZoomCombo = nullptr;
     QComboBox *m_unitsCombo = nullptr;
@@ -111,12 +112,18 @@ private:
     QLabel *m_hintLabel = nullptr;
     QLabel *m_pageLabel = nullptr;
     QLabel *m_selectionLabel = nullptr;
+    QDoubleSpinBox *m_quickX = nullptr;
+    QDoubleSpinBox *m_quickY = nullptr;
+    QDoubleSpinBox *m_quickW = nullptr;
+    QDoubleSpinBox *m_quickH = nullptr;
+    QDoubleSpinBox *m_quickAngle = nullptr;
 
     QPointF m_cursorScenePos;
     int m_zoomPageIndex = 0;
     int m_transformPageIndex = 1;
     int m_textPageIndex = 2;
     int m_paintPageIndex = 3;
+    int m_bezierPageIndex = 4;
 
     QString m_filePath;
     bool m_modified = false;
