@@ -46,6 +46,13 @@ struct VectorObject {
     qreal shadowOpacity = 0.28;
     QColor shadowColor = QColor(0, 0, 0);
 
+    // Shape parameters, kept so the property bar can rebuild the geometry.
+    qreal cornerRadius = 0.0;
+    int sides = 6;
+    int starPoints = 5;
+    qreal starRatio = 0.45;
+    qreal spiralTurns = 3.0;
+
     QString text;
     QFont font;
     QRectF textBox;             // text / image frame in local coordinates
@@ -60,6 +67,8 @@ class Document
 public:
     QSizeF pageSize = QSizeF(794.0, 1123.0); // A4 at 96 dpi
     QStringList layers = {QStringLiteral("Слой 1")};
+    QVector<bool> layerVisible = {true};
+    QVector<bool> layerLocked = {false};
     QVector<VectorObject> objects;
 
     void clear();
@@ -78,3 +87,8 @@ public:
 };
 
 QColor interpolateColor(const QColor &from, const QColor &to, qreal t);
+
+QPainterPath buildRectanglePath(const QRectF &bounds, qreal cornerRadius);
+QPainterPath buildPolygonPath(const QRectF &bounds, int sides);
+QPainterPath buildStarPath(const QRectF &bounds, int points, qreal ratio);
+QPainterPath buildSpiralPath(const QRectF &bounds, qreal turns);

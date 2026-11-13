@@ -309,13 +309,13 @@ void MainWindow::createActions()
     makeAction(QStringLiteral("ungroup"), QStringLiteral("Разгруппировать"),
                QKeySequence(QStringLiteral("Ctrl+U")), QStringLiteral("Разгруппировать выделение"));
     makeAction(QStringLiteral("order-front"), QStringLiteral("На передний план"),
-               QKeySequence(QStringLiteral("Ctrl+Home")), QStringLiteral("Поднять объект на передний план"));
+               QKeySequence(QStringLiteral("Ctrl+Home")), QStringLiteral("Поднять объект на передний план"), false);
     makeAction(QStringLiteral("order-forward"), QStringLiteral("На уровень выше"),
-               QKeySequence(QStringLiteral("Ctrl+Up")), QStringLiteral("Поднять объект на уровень выше"));
+               QKeySequence(QStringLiteral("Ctrl+Up")), QStringLiteral("Поднять объект на уровень выше"), false);
     makeAction(QStringLiteral("order-backward"), QStringLiteral("На уровень ниже"),
-               QKeySequence(QStringLiteral("Ctrl+Down")), QStringLiteral("Опустить объект на уровень ниже"));
+               QKeySequence(QStringLiteral("Ctrl+Down")), QStringLiteral("Опустить объект на уровень ниже"), false);
     makeAction(QStringLiteral("order-back"), QStringLiteral("На задний план"),
-               QKeySequence(QStringLiteral("Ctrl+End")), QStringLiteral("Опустить объект на задний план"));
+               QKeySequence(QStringLiteral("Ctrl+End")), QStringLiteral("Опустить объект на задний план"), false);
     makeAction(QStringLiteral("align-left"), QStringLiteral("Выровнять по левому краю"),
                QKeySequence(), QStringLiteral("Выровнять объекты по левому краю"));
     makeAction(QStringLiteral("align-hcenter"), QStringLiteral("Выровнять по центру"),
@@ -329,11 +329,11 @@ void MainWindow::createActions()
     makeAction(QStringLiteral("align-bottom"), QStringLiteral("Выровнять по низу"),
                QKeySequence(), QStringLiteral("Выровнять объекты по нижнему краю"));
     makeAction(QStringLiteral("flip-h"), QStringLiteral("Отразить по горизонтали"),
-               QKeySequence(), QStringLiteral("Отразить объект слева направо"));
+               QKeySequence(), QStringLiteral("Отразить объект слева направо"), false);
     makeAction(QStringLiteral("flip-v"), QStringLiteral("Отразить по вертикали"),
-               QKeySequence(), QStringLiteral("Отразить объект сверху вниз"));
+               QKeySequence(), QStringLiteral("Отразить объект сверху вниз"), false);
     makeAction(QStringLiteral("rotate"), QStringLiteral("Повернуть на 90°"),
-               QKeySequence(), QStringLiteral("Повернуть объект на 90 градусов"));
+               QKeySequence(), QStringLiteral("Повернуть объект на 90 градусов"), false);
     makeAction(QStringLiteral("convert-curves"), QStringLiteral("Преобразовать в кривые"),
                QKeySequence(QStringLiteral("Ctrl+Q")), QStringLiteral("Преобразовать объект в редактируемые кривые"));
     makeAction(QStringLiteral("lock"), QStringLiteral("Заблокировать"),
@@ -341,11 +341,11 @@ void MainWindow::createActions()
 
     // Effects
     makeAction(QStringLiteral("fx-shadow"), QStringLiteral("Тень…"),
-               QKeySequence(), QStringLiteral("Добавить отбрасываемую тень"));
+               QKeySequence(), QStringLiteral("Добавить отбрасываемую тень"), false);
     makeAction(QStringLiteral("fx-transparency"), QStringLiteral("Прозрачность…"),
-               QKeySequence(), QStringLiteral("Настроить прозрачность"));
+               QKeySequence(), QStringLiteral("Настроить прозрачность"), false);
     makeAction(QStringLiteral("fx-blend"), QStringLiteral("Перетекание…"),
-               QKeySequence(), QStringLiteral("Создать перетекание между объектами"));
+               QKeySequence(), QStringLiteral("Создать перетекание между объектами"), false);
     makeAction(QStringLiteral("fx-envelope"), QStringLiteral("Оболочка…"),
                QKeySequence(), QStringLiteral("Деформировать объект оболочкой"));
     makeAction(QStringLiteral("fx-extrude"), QStringLiteral("Экструзия…"),
@@ -396,6 +396,26 @@ void MainWindow::createActions()
             &MainWindow::deleteSelection);
     connect(action(QStringLiteral("zoom-selection")), &QAction::triggered, this,
             [this]() { m_view->zoomToSelection(); });
+    connect(action(QStringLiteral("order-front")), &QAction::triggered, this,
+            [this]() { m_view->bringToFront(); refreshQuickTransform(); });
+    connect(action(QStringLiteral("order-forward")), &QAction::triggered, this,
+            [this]() { m_view->bringForward(); refreshQuickTransform(); });
+    connect(action(QStringLiteral("order-backward")), &QAction::triggered, this,
+            [this]() { m_view->sendBackward(); refreshQuickTransform(); });
+    connect(action(QStringLiteral("order-back")), &QAction::triggered, this,
+            [this]() { m_view->sendToBack(); refreshQuickTransform(); });
+    connect(action(QStringLiteral("flip-h")), &QAction::triggered, this,
+            [this]() { m_view->flipSelection(true); });
+    connect(action(QStringLiteral("flip-v")), &QAction::triggered, this,
+            [this]() { m_view->flipSelection(false); });
+    connect(action(QStringLiteral("rotate")), &QAction::triggered, this,
+            [this]() { m_view->rotateSelection(90.0); refreshQuickTransform(); });
+    connect(action(QStringLiteral("fx-shadow")), &QAction::triggered, this,
+            [this]() { showDockerTab(QStringLiteral("Эффекты"), 0); });
+    connect(action(QStringLiteral("fx-transparency")), &QAction::triggered, this,
+            [this]() { showDockerTab(QStringLiteral("Эффекты"), 1); });
+    connect(action(QStringLiteral("fx-blend")), &QAction::triggered, this,
+            [this]() { showDockerTab(QStringLiteral("Эффекты"), 2); });
     connect(action(QStringLiteral("copy")), &QAction::triggered, this,
             &MainWindow::copySelection);
     connect(action(QStringLiteral("cut")), &QAction::triggered, this,
@@ -1072,11 +1092,93 @@ void MainWindow::createPropertyBar()
     bezierLayout->addWidget(bezierHint);
     bezierLayout->addStretch(1);
 
+    // 5 — rectangle options
+    auto *rectPage = new QWidget(m_propertyStack);
+    auto *rectLayout = new QHBoxLayout(rectPage);
+    rectLayout->setContentsMargins(2, 0, 2, 0);
+    rectLayout->setSpacing(8);
+    rectLayout->addWidget(fieldLabel(QStringLiteral("Скругление углов")));
+    m_rectRadius = numberField(rectPage, 0, 500, 0, QStringLiteral(" px"), 84, 0);
+    rectLayout->addWidget(m_rectRadius);
+    rectLayout->addWidget(verticalRule(rectPage));
+    auto *rectHint = new QLabel(
+        QStringLiteral("Применяется к выделенным прямоугольникам и к новым фигурам."),
+        rectPage);
+    rectHint->setStyleSheet(QStringLiteral("color:#757b85; font-size:11px;"));
+    rectLayout->addWidget(rectHint);
+    rectLayout->addStretch(1);
+    connect(m_rectRadius, &QDoubleSpinBox::editingFinished, this,
+            &MainWindow::applyShapeOptions);
+
+    // 6 — polygon options
+    auto *polygonPage = new QWidget(m_propertyStack);
+    auto *polygonLayout = new QHBoxLayout(polygonPage);
+    polygonLayout->setContentsMargins(2, 0, 2, 0);
+    polygonLayout->setSpacing(8);
+    polygonLayout->addWidget(fieldLabel(QStringLiteral("Стороны")));
+    m_polygonSides = numberField(polygonPage, 3, 64, 6, QString(), 70, 0);
+    polygonLayout->addWidget(m_polygonSides);
+    polygonLayout->addWidget(verticalRule(polygonPage));
+    auto *polygonHint = new QLabel(
+        QStringLiteral("От 3 до 64 сторон. Новые многоугольники используют это значение."),
+        polygonPage);
+    polygonHint->setStyleSheet(QStringLiteral("color:#757b85; font-size:11px;"));
+    polygonLayout->addWidget(polygonHint);
+    polygonLayout->addStretch(1);
+    connect(m_polygonSides, &QDoubleSpinBox::editingFinished, this,
+            &MainWindow::applyShapeOptions);
+
+    // 7 — star options
+    auto *starPage = new QWidget(m_propertyStack);
+    auto *starLayout = new QHBoxLayout(starPage);
+    starLayout->setContentsMargins(2, 0, 2, 0);
+    starLayout->setSpacing(8);
+    starLayout->addWidget(fieldLabel(QStringLiteral("Лучи")));
+    m_starPoints = numberField(starPage, 3, 50, 5, QString(), 64, 0);
+    starLayout->addWidget(m_starPoints);
+    starLayout->addWidget(fieldLabel(QStringLiteral("Острота")));
+    m_starRatio = numberField(starPage, 5, 95, 45, QStringLiteral(" %"), 70, 0);
+    starLayout->addWidget(m_starRatio);
+    starLayout->addWidget(verticalRule(starPage));
+    auto *starHint = new QLabel(
+        QStringLiteral("Острота — доля внутреннего радиуса звезды."),
+        starPage);
+    starHint->setStyleSheet(QStringLiteral("color:#757b85; font-size:11px;"));
+    starLayout->addWidget(starHint);
+    starLayout->addStretch(1);
+    connect(m_starPoints, &QDoubleSpinBox::editingFinished, this,
+            &MainWindow::applyShapeOptions);
+    connect(m_starRatio, &QDoubleSpinBox::editingFinished, this,
+            &MainWindow::applyShapeOptions);
+
+    // 8 — spiral options
+    auto *spiralPage = new QWidget(m_propertyStack);
+    auto *spiralLayout = new QHBoxLayout(spiralPage);
+    spiralLayout->setContentsMargins(2, 0, 2, 0);
+    spiralLayout->setSpacing(8);
+    spiralLayout->addWidget(fieldLabel(QStringLiteral("Витки")));
+    m_spiralTurns = numberField(spiralPage, 1, 20, 3, QString(), 70, 1);
+    m_spiralTurns->setSingleStep(0.5);
+    spiralLayout->addWidget(m_spiralTurns);
+    spiralLayout->addWidget(verticalRule(spiralPage));
+    auto *spiralHint = new QLabel(
+        QStringLiteral("Количество оборотов новой спирали."),
+        spiralPage);
+    spiralHint->setStyleSheet(QStringLiteral("color:#757b85; font-size:11px;"));
+    spiralLayout->addWidget(spiralHint);
+    spiralLayout->addStretch(1);
+    connect(m_spiralTurns, &QDoubleSpinBox::editingFinished, this,
+            &MainWindow::applyShapeOptions);
+
     m_propertyStack->addWidget(zoomPage);      // 0
     m_propertyStack->addWidget(transformPage); // 1
     m_propertyStack->addWidget(textPage);      // 2
     m_propertyStack->addWidget(paintPage);     // 3
     m_propertyStack->addWidget(bezierPage);    // 4
+    m_propertyStack->addWidget(rectPage);      // 5
+    m_propertyStack->addWidget(polygonPage);   // 6
+    m_propertyStack->addWidget(starPage);      // 7
+    m_propertyStack->addWidget(spiralPage);    // 8
     m_propertyStack->setCurrentIndex(m_transformPageIndex);
 
     bar->addWidget(m_propertyStack);
@@ -1189,6 +1291,27 @@ void MainWindow::showEditor()
     statusBar()->show();
 }
 
+void MainWindow::showDockerTab(const QString &title, int tab)
+{
+    if (!m_dockPanels)
+        return;
+    if (m_centralStack && m_editorPage
+        && m_centralStack->currentWidget() != m_editorPage)
+        showEditor();
+
+    for (QDockWidget *dock : m_dockPanels->docks()) {
+        if (dock->windowTitle() != title)
+            continue;
+        dock->show();
+        dock->raise();
+        if (auto *tabs = dock->findChild<QTabWidget *>()) {
+            if (tab >= 0 && tab < tabs->count())
+                tabs->setCurrentIndex(tab);
+        }
+        break;
+    }
+}
+
 void MainWindow::loadSampleDocument()
 {
     if (!maybeSave())
@@ -1243,6 +1366,7 @@ void MainWindow::applyTool(Tool tool)
 
     m_toolPalette->setCurrentTool(tool);
     m_view->setActiveTool(tool);
+    m_currentTool = tool;
 
     int page = m_transformPageIndex;
     switch (tool) {
@@ -1255,6 +1379,18 @@ void MainWindow::applyTool(Tool tool)
         break;
     case Tool::Text:
         page = m_textPageIndex;
+        break;
+    case Tool::Rectangle:
+        page = m_rectPageIndex;
+        break;
+    case Tool::Polygon:
+        page = m_polygonPageIndex;
+        break;
+    case Tool::Star:
+        page = m_starPageIndex;
+        break;
+    case Tool::Spiral:
+        page = m_spiralPageIndex;
         break;
     case Tool::Eyedropper:
     case Tool::Fill:
@@ -1269,6 +1405,7 @@ void MainWindow::applyTool(Tool tool)
         break;
     }
     m_propertyStack->setCurrentIndex(page);
+    syncShapeOptions();
 
     m_hintLabel->setText(QStringLiteral("%1 · %2").arg(info->name, info->hint));
     statusBar()->showMessage(QStringLiteral("Инструмент: %1 (%2)")
@@ -1361,6 +1498,12 @@ Document MainWindow::currentDocument() const
         return document;
     document.pageSize = m_view->pageSize();
     document.layers = m_view->layers();
+    document.layerVisible.clear();
+    document.layerLocked.clear();
+    for (int i = 0; i < document.layers.size(); ++i) {
+        document.layerVisible.append(m_view->layerVisible(i));
+        document.layerLocked.append(m_view->layerLocked(i));
+    }
     document.objects = m_view->objects();
     return document;
 }
@@ -1830,6 +1973,91 @@ void MainWindow::onSelectionChanged(int count)
     if (m_selectionLabel)
         m_selectionLabel->setText(QStringLiteral("Выделено: %1").arg(count));
     refreshQuickTransform();
+    syncShapeOptions();
+}
+
+void MainWindow::syncShapeOptions()
+{
+    if (!m_view || !m_rectRadius)
+        return;
+
+    m_updatingShapeOptions = true;
+
+    m_rectRadius->setValue(m_view->cornerRadius());
+    m_polygonSides->setValue(m_view->polygonSides());
+    m_starPoints->setValue(m_view->starPoints());
+    m_starRatio->setValue(qRound(m_view->starRatio() * 100.0));
+    m_spiralTurns->setValue(m_view->spiralTurns());
+
+    for (VectorItem *item : m_view->selectedVectorItems()) {
+        const VectorObject object = item->object();
+        switch (object.type) {
+        case ShapeType::Rectangle:
+            m_rectRadius->setValue(object.cornerRadius);
+            break;
+        case ShapeType::Polygon:
+            m_polygonSides->setValue(object.sides);
+            break;
+        case ShapeType::Star:
+            m_starPoints->setValue(object.starPoints);
+            m_starRatio->setValue(qRound(object.starRatio * 100.0));
+            break;
+        case ShapeType::Spiral:
+            m_spiralTurns->setValue(object.spiralTurns);
+            break;
+        default:
+            break;
+        }
+    }
+
+    m_updatingShapeOptions = false;
+}
+
+void MainWindow::applyShapeOptions()
+{
+    if (m_updatingShapeOptions || !m_view)
+        return;
+
+    m_view->setCornerRadius(m_rectRadius->value());
+    m_view->setPolygonSides(qRound(m_polygonSides->value()));
+    m_view->setStarPoints(qRound(m_starPoints->value()));
+    m_view->setStarRatio(m_starRatio->value() / 100.0);
+    m_view->setSpiralTurns(m_spiralTurns->value());
+
+    const QList<VectorItem *> selected = m_view->selectedVectorItems();
+    if (selected.isEmpty())
+        return;
+
+    beginEdit();
+    int changed = 0;
+    for (VectorItem *item : selected) {
+        switch (item->object().type) {
+        case ShapeType::Rectangle:
+            item->setCornerRadius(m_rectRadius->value());
+            ++changed;
+            break;
+        case ShapeType::Polygon:
+            item->setSides(qRound(m_polygonSides->value()));
+            ++changed;
+            break;
+        case ShapeType::Star:
+            item->setStarPoints(qRound(m_starPoints->value()));
+            item->setStarRatio(m_starRatio->value() / 100.0);
+            ++changed;
+            break;
+        case ShapeType::Spiral:
+            item->setSpiralTurns(m_spiralTurns->value());
+            ++changed;
+            break;
+        default:
+            break;
+        }
+    }
+    endEdit();
+
+    if (changed > 0)
+        statusBar()->showMessage(
+            QStringLiteral("Параметры фигуры обновлены: %1").arg(changed), 3000);
 }
 
 void MainWindow::refreshQuickTransform()
@@ -2005,7 +2233,7 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("О программе"),
         QStringLiteral(
-            "<h3>Vectora 0.1.5</h3>"
+            "<h3>Vectora 0.1.6</h3>"
             "<p>Кроссплатформенный векторный редактор на C++ и Qt 6.</p>"
             "<p>Работают: документы .vct, экспорт PNG/SVG/PDF, печать, "
             "рисование фигур и кривых, Bezier с типами узлов, докеры "

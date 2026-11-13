@@ -11,6 +11,19 @@ constexpr qreal kHandleSize = 9.0;
 constexpr qreal kRotationOffset = 24.0;
 constexpr qreal kBoundsMargin = 30.0;
 constexpr qreal kPi = 3.14159265358979323846;
+
+QPainterPath fitToBounds(const QPainterPath &path, const QRectF &target)
+{
+    const QRectF bounds = path.boundingRect();
+    if (bounds.width() < 0.01 || bounds.height() < 0.01)
+        return path;
+    QTransform transform;
+    transform.translate(target.left(), target.top());
+    transform.scale(target.width() / bounds.width(),
+                    target.height() / bounds.height());
+    transform.translate(-bounds.left(), -bounds.top());
+    return transform.map(path);
+}
 } // namespace
 
 VectorItem::VectorItem(const VectorObject &object, QGraphicsItem *parent)
@@ -254,6 +267,108 @@ void VectorItem::setTextAlignment(int align)
 {
     m_object.textAlign = qBound(0, align, 2);
     update();
+}
+
+void VectorItem::setCornerRadius(qreal radius)
+{
+    m_object.cornerRadius = qBound(0.0, radius, 1000.0);
+    if (m_object.type != ShapeType::Rectangle)
+        return;
+    const QRectF bounds = m_object.localBounds();
+    if (bounds.width() < 1.0 || bounds.height() < 1.0)
+        return;
+    QPainterPath path = buildRectanglePath(QRectF(0, 0, bounds.width(), bounds.height()),
+                                           m_object.cornerRadius);
+    path = fitToBounds(path, bounds);
+    prepareGeometryChange();
+    m_object.path = path;
+    updateOrigin();
+    update();
+}
+
+void VectorItem::setSides(int sides)
+{
+    m_object.sides = qBound(3, sides, 64);
+    if (m_object.type != ShapeType::Polygon)
+        return;
+    const QRectF bounds = m_object.localBounds();
+    if (bounds.width() < 1.0 || bounds.height() < 1.0)
+        return;
+    QPainterPath path = buildPolygonPath(QRectF(0, 0, bounds.width(), bounds.height()),
+                                         m_object.sides);
+    path = fitToBounds(path, bounds);
+    prepareGeometryChange();
+    m_object.path = path;
+    updateOrigin();
+    update();
+}
+
+void VectorItem::setStarPoints(int points)
+{
+    m_object.starPoints = qBound(3, points, 50);
+    if (m_object.type != ShapeType::Star)
+        return;
+    const QRectF bounds = m_object.localBounds();
+    if (bounds.width() < 1.0 || bounds.height() < 1.0)
+        return;
+    QPainterPath path = buildStarPath(QRectF(0, 0, bounds.width(), bounds.height()),
+                                      m_object.starPoints, m_object.starRatio);
+    path = fitToBounds(path, bounds);
+    prepareGeometryChange();
+    m_object.path = path;
+    updateOrigin();
+    update();
+}
+
+void VectorItem::setStarRatio(qreal ratio)
+{
+    m_object.starRatio = qBound(0.05, ratio, 0.95);
+    if (m_object.type != ShapeType::Star)
+        return;
+    const QRectF bounds = m_object.localBounds();
+    if (bounds.width() < 1.0 || bounds.height() < 1.0)
+        return;
+    QPainterPath path = buildStarPath(QRectF(0, 0, bounds.width(), bounds.height()),
+                                      m_object.starPoints, m_object.starRatio);
+    path = fitToBounds(path, bounds);
+    prepareGeometryChange();
+    m_object.path = path;
+    updateOrigin();
+    update();
+}
+
+void VectorItem::setSpiralTurns(qreal turns)
+{
+    m_object.spiralTurns = qBound(0.5, turns, 20.0);
+    if (m_object.type != ShapeType::Spiral)
+        return;
+    const QRectF bounds = m_object.localBounds();
+    if (bounds.width() < 1.0 || bounds.height() < 1.0)
+        return;
+    QPainterPath path = buildSpiralPath(QRectF(0, 0, bounds.width(), bounds.height()),
+                                        m_object.spiralTurns);
+    path = fitToBounds(path, bounds);
+    prepareGeometryChange();
+    m_object.path = path;
+    updateOrigin();
+    update();
+}
+
+bool VectorItem::flip(bool horizontal)
+{
+    if (m_object.path.isEmpty() || m_object.type == ShapeType::Text)
+        return false;
+    const QRectF bounds = m_object.localBounds();
+    QTransform transform;
+    transform.translate(bounds.center().x(), bounds.center().y());
+    transform.scale(horizontal ? -1.0 : 1.0, horizontal ? 1.0 : -1.0);
+    transform.translate(-bounds.center().x(), -bounds.center().y());
+
+    prepareGeometryChange();
+    m_object.path = transform.map(m_object.path);
+    updateOrigin();
+    update();
+    return true;
 }
 
 void VectorItem::setRotationAngle(qreal degrees)

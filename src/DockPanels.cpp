@@ -5,6 +5,7 @@
 #include <QColorDialog>
 #include <QComboBox>
 #include <QDropEvent>
+#include <QHeaderView>
 #include <QInputDialog>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
@@ -119,8 +120,28 @@ public:
 
     std::function<void(VectorItem *, int, int)> dropObject;
     std::function<void(int, int)> dropLayer;
+    std::function<void(int)> toggleVisible;
+    std::function<void(int)> toggleLocked;
 
 protected:
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        QTreeWidgetItem *item = itemAt(event->pos());
+        if (item && !item->data(0, kItemRole).isValid()) {
+            const int column = columnAt(int(event->position().x()));
+            const int layer = item->data(0, kLayerRole).toInt();
+            if (column == 1 && toggleVisible) {
+                toggleVisible(layer);
+                return;
+            }
+            if (column == 2 && toggleLocked) {
+                toggleLocked(layer);
+                return;
+            }
+        }
+        QTreeWidget::mousePressEvent(event);
+    }
+
     void dropEvent(QDropEvent *event) override
     {
         QTreeWidgetItem *source = selectedItems().value(0);
@@ -276,7 +297,13 @@ void DockPanels::buildObjectsDocker()
     auto *tree = new ObjectsTree(content);
     m_tree = tree;
     m_tree->setHeaderHidden(true);
+    m_tree->setColumnCount(3);
+    m_tree->setIconSize(QSize(16, 16));
     m_tree->setIndentation(14);
+    m_tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_tree->header()->setStretchLastSection(false);
+    m_tree->setColumnWidth(1, 24);
+    m_tree->setColumnWidth(2, 24);
     m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_tree->setDragEnabled(true);
     m_tree->setAcceptDrops(true);
@@ -407,8 +434,16 @@ void DockPanels::buildObjectsDocker()
             return;
         }
 
-        if (item->parent())
-            m_view->setActiveLayer(item->parent()->data(0, kLayerRole).toInt());
+        const int parentLayer = item->parent()
+                                    ? item->parent()->data(0, kLayerRole).toInt()
+                                    : -1;
+        if (parentLayer >= 0)
+            m_view->setActiveLayer(parentLayer);
+        if (parentLayer >= 0 && !m_view->layerVisible(parentLayer)) {
+            emit status(QStringLiteral("Слой скрыт — объект нельзя выбрать."));
+            return;
+        }
+
         auto *vectorItem = reinterpret_cast<VectorItem *>(
             item->data(0, kItemRole).value<quintptr>());
         if (vectorItem) {
@@ -455,6 +490,20 @@ void DockPanels::buildObjectsDocker()
         refresh();
         emit status(QStringLiteral("Порядок слоёв изменён."));
     };
+    objectsTree->toggleVisible = [this](int layer) {
+        m_view->setLayerVisible(layer, !m_view->layerVisible(layer));
+        refresh();
+        emit status(m_view->layerVisible(layer)
+                        ? QStringLiteral("Слой «%1» показан.").arg(m_view->layers().at(layer))
+                        : QStringLiteral("Слой «%1» скрыт.").arg(m_view->layers().at(layer)));
+    };
+    objectsTree->toggleLocked = [this](int layer) {
+        m_view->setLayerLocked(layer, !m_view->layerLocked(layer));
+        refresh();
+        emit status(m_view->layerLocked(layer)
+                        ? QStringLiteral("Слой «%1» заблокирован.").arg(m_view->layers().at(layer))
+                        : QStringLiteral("Слой «%1» разблокирован.").arg(m_view->layers().at(layer)));
+    };
 
     createDock(QStringLiteral("Объекты"), content);
 }
@@ -489,6 +538,19 @@ void DockPanels::refreshTree()
         layerItem->setFlags(layerItem->flags() | Qt::ItemIsDragEnabled
                             | Qt::ItemIsDropEnabled);
 
+        const bool visible = m_view->layerVisible(layer);
+        const bool locked = m_view->layerLocked(layer);
+        layerItem->setIcon(1, Icons::icon(visible ? QStringLiteral("eye")
+                                                  : QStringLiteral("eye-off")));
+        layerItem->setIcon(2, Icons::icon(locked ? QStringLiteral("lock")
+                                                 : QStringLiteral("unlock")));
+        layerItem->setToolTip(1, visible ? QStringLiteral("Скрыть слой")
+                                         : QStringLiteral("Показать слой"));
+        layerItem->setToolTip(2, locked ? QStringLiteral("Разблокировать слой")
+                                        : QStringLiteral("Заблокировать слой"));
+        if (!visible)
+            layerItem->setForeground(0, QBrush(QColor(0x6f, 0x76, 0x81)));
+
         const QList<VectorItem *> layerItems = m_view->itemsInLayer(layer);
         for (int i = layerItems.size() - 1; i >= 0; --i) {
             VectorItem *vectorItem = layerItems.at(i);
@@ -499,6 +561,8 @@ void DockPanels::refreshTree()
                                reinterpret_cast<quintptr>(vectorItem)));
             entry->setFlags(entry->flags() | Qt::ItemIsDragEnabled
                             | Qt::ItemIsSelectable | Qt::ItemIsEnabled);
+            if (!m_view->layerVisible(layer))
+                entry->setForeground(0, QBrush(QColor(0x6f, 0x76, 0x81)));
             if (vectorItem->isSelected()) {
                 entry->setSelected(true);
                 m_tree->setCurrentItem(entry);

@@ -101,6 +101,8 @@ int SelfTest::run(const QString &directory)
     {
         Document layered;
         layered.layers = {QStringLiteral("Нижний"), QStringLiteral("Верхний")};
+        layered.layerVisible = {false, true};
+        layered.layerLocked = {true, false};
         VectorObject circle;
         circle.type = ShapeType::Ellipse;
         circle.layer = 1;
@@ -113,6 +115,10 @@ int SelfTest::run(const QString &directory)
               QStringLiteral("load layered document"));
         check(layeredLoaded.layers == layered.layers,
               QStringLiteral("layer names preserved"));
+        check(layeredLoaded.layerVisible == layered.layerVisible,
+              QStringLiteral("layer visibility preserved"));
+        check(layeredLoaded.layerLocked == layered.layerLocked,
+              QStringLiteral("layer lock preserved"));
         check(!layeredLoaded.objects.isEmpty()
                   && layeredLoaded.objects.first().layer == 1,
               QStringLiteral("object layer preserved"));
@@ -575,6 +581,117 @@ int SelfTest::run(const QString &directory)
         view.moveItemToLayer(top, 0, 0);
         check(view.itemsInLayer(0).last() == top,
               QStringLiteral("object reordered inside the layer"));
+
+        view.setLayerVisible(0, false);
+        check(!bottom->isVisible(), QStringLiteral("hidden layer hides objects"));
+        view.setLayerVisible(0, true);
+        check(bottom->isVisible(), QStringLiteral("shown layer shows objects"));
+
+        view.setLayerLocked(0, true);
+        check(!(bottom->flags() & QGraphicsItem::ItemIsSelectable),
+              QStringLiteral("locked layer disables selection"));
+        const int lockedCount = view.vectorItems().size();
+        VectorObject blocked;
+        blocked.type = ShapeType::Ellipse;
+        blocked.path.addEllipse(QRectF(0, 0, 30, 30));
+        check(view.addVectorObject(blocked, true, false) == nullptr,
+              QStringLiteral("locked layer refuses new objects"));
+        check(view.vectorItems().size() == lockedCount,
+              QStringLiteral("refused object was not added"));
+        view.setLayerLocked(0, false);
+        check(view.addVectorObject(blocked, true, false) != nullptr,
+              QStringLiteral("unlocked layer accepts objects again"));
+    }
+
+    // --- Shape parameters and object order ---------------------------------
+    out << "\nShapes\n";
+    {
+        view.setDocument(Document());
+
+        VectorObject rectangle;
+        rectangle.type = ShapeType::Rectangle;
+        rectangle.path = buildRectanglePath(QRectF(0, 0, 120, 80), 0);
+        VectorItem *rectItem = view.addVectorObject(rectangle, false, false);
+        const QSizeF rectSize = rectItem->object().localBounds().size();
+        rectItem->setCornerRadius(24);
+        check(qAbs(rectItem->object().cornerRadius - 24.0) < 0.01,
+              QStringLiteral("rectangle corner radius set"));
+        check(rectItem->object().path.elementCount() > 5,
+              QStringLiteral("rounded rectangle rebuilt"));
+        check(qAbs(rectItem->object().localBounds().width() - rectSize.width()) < 0.6,
+              QStringLiteral("corner radius keeps rectangle size"));
+
+        VectorObject polygon;
+        polygon.type = ShapeType::Polygon;
+        polygon.sides = 6;
+        polygon.path = buildPolygonPath(QRectF(0, 0, 100, 100), 6);
+        VectorItem *polygonItem = view.addVectorObject(polygon, false, false);
+        const QSizeF polygonSize = polygonItem->object().localBounds().size();
+        polygonItem->setSides(9);
+        check(polygonItem->object().sides == 9,
+              QStringLiteral("polygon side count changed"));
+        check(qAbs(polygonItem->object().localBounds().width() - polygonSize.width()) < 0.6
+                  && qAbs(polygonItem->object().localBounds().height()
+                          - polygonSize.height()) < 0.6,
+              QStringLiteral("polygon keeps its size"));
+
+        VectorObject star;
+        star.type = ShapeType::Star;
+        star.starPoints = 5;
+        star.starRatio = 0.45;
+        star.path = buildStarPath(QRectF(0, 0, 120, 120), 5, 0.45);
+        VectorItem *starItem = view.addVectorObject(star, false, false);
+        starItem->setStarPoints(9);
+        starItem->setStarRatio(0.3);
+        check(starItem->object().starPoints == 9,
+              QStringLiteral("star point count changed"));
+        check(qAbs(starItem->object().starRatio - 0.3) < 0.01,
+              QStringLiteral("star sharpness changed"));
+
+        VectorObject spiral;
+        spiral.type = ShapeType::Spiral;
+        spiral.spiralTurns = 3;
+        spiral.path = buildSpiralPath(QRectF(0, 0, 100, 100), 3);
+        VectorItem *spiralItem = view.addVectorObject(spiral, false, false);
+        spiralItem->setSpiralTurns(6);
+        check(qAbs(spiralItem->object().spiralTurns - 6.0) < 0.01,
+              QStringLiteral("spiral turns changed"));
+
+        // Order operations.
+        view.setDocument(Document());
+        QList<VectorItem *> created;
+        for (int i = 0; i < 3; ++i) {
+            VectorObject object;
+            object.type = ShapeType::Rectangle;
+            object.path.addRect(QRectF(0, 0, 40, 40));
+            object.pos = QPointF(i * 50, 0);
+            created.append(view.addVectorObject(object, false, false));
+        }
+        view.scene()->clearSelection();
+        created.first()->setSelected(true);
+        view.bringToFront();
+        check(view.itemsInLayer(0).last() == created.first(),
+              QStringLiteral("bring to front"));
+        view.sendToBack();
+        check(view.itemsInLayer(0).first() == created.first(),
+              QStringLiteral("send to back"));
+        view.bringToFront();
+        view.sendBackward();
+        check(view.itemsInLayer(0).indexOf(created.first()) == 1,
+              QStringLiteral("send backward one step"));
+        view.bringForward();
+        check(view.itemsInLayer(0).last() == created.first(),
+              QStringLiteral("bring forward one step"));
+
+        view.scene()->clearSelection();
+        created.first()->setSelected(true);
+        view.rotateSelection(90);
+        check(qAbs(created.first()->object().rotation - 90.0) < 0.01,
+              QStringLiteral("rotate 90 degrees"));
+        const QPointF center = created.first()->sceneBoundingRect().center();
+        view.flipSelection(true);
+        check(QLineF(center, created.first()->sceneBoundingRect().center()).length() < 1.0,
+              QStringLiteral("flip keeps the centre"));
     }
 
     // Colour palette: right button means outline.

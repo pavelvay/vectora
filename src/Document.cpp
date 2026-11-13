@@ -343,6 +343,9 @@ void Document::render(QPainter *painter) const
     painter->fillRect(QRectF(0.0, 0.0, pageSize.width(), pageSize.height()), Qt::white);
 
     for (const VectorObject &object : objects) {
+        if (object.layer >= 0 && object.layer < layerVisible.size()
+            && !layerVisible.at(object.layer))
+            continue;
         const QRectF bounds = object.localBounds();
         painter->save();
         painter->translate(object.pos);
@@ -353,6 +356,81 @@ void Document::render(QPainter *painter) const
         painter->restore();
     }
     painter->restore();
+}
+
+QPainterPath buildRectanglePath(const QRectF &bounds, qreal cornerRadius)
+{
+    QPainterPath path;
+    const qreal radius = qBound(0.0, cornerRadius,
+                                qMin(bounds.width(), bounds.height()) / 2.0);
+    if (radius > 0.01)
+        path.addRoundedRect(bounds, radius, radius);
+    else
+        path.addRect(bounds);
+    return path;
+}
+
+QPainterPath buildPolygonPath(const QRectF &bounds, int sides)
+{
+    const int count = qBound(3, sides, 64);
+    QPainterPath path;
+    const QPointF center = bounds.center();
+    const qreal rx = bounds.width() / 2.0;
+    const qreal ry = bounds.height() / 2.0;
+    for (int i = 0; i < count; ++i) {
+        const qreal angle = -kPi / 2.0 + i * 2.0 * kPi / count;
+        const QPointF point(center.x() + rx * std::cos(angle),
+                            center.y() + ry * std::sin(angle));
+        if (i == 0)
+            path.moveTo(point);
+        else
+            path.lineTo(point);
+    }
+    path.closeSubpath();
+    return path;
+}
+
+QPainterPath buildStarPath(const QRectF &bounds, int points, qreal ratio)
+{
+    const int count = qBound(3, points, 50);
+    const qreal innerRatio = qBound(0.05, ratio, 0.95);
+    QPainterPath path;
+    const QPointF center = bounds.center();
+    const qreal rx = bounds.width() / 2.0;
+    const qreal ry = bounds.height() / 2.0;
+    for (int i = 0; i < count * 2; ++i) {
+        const qreal factor = (i % 2 == 0) ? 1.0 : innerRatio;
+        const qreal angle = -kPi / 2.0 + i * kPi / count;
+        const QPointF point(center.x() + rx * factor * std::cos(angle),
+                            center.y() + ry * factor * std::sin(angle));
+        if (i == 0)
+            path.moveTo(point);
+        else
+            path.lineTo(point);
+    }
+    path.closeSubpath();
+    return path;
+}
+
+QPainterPath buildSpiralPath(const QRectF &bounds, qreal turns)
+{
+    const qreal count = qBound(0.5, turns, 30.0);
+    QPainterPath path;
+    const QPointF center = bounds.center();
+    const qreal rx = bounds.width() / 2.0;
+    const qreal ry = bounds.height() / 2.0;
+    const int steps = qMax(96, int(count * 120.0));
+    for (int i = 0; i <= steps; ++i) {
+        const qreal t = qreal(i) / steps;
+        const qreal angle = t * count * 2.0 * kPi;
+        const QPointF point(center.x() + rx * t * std::cos(angle),
+                            center.y() + ry * t * std::sin(angle));
+        if (i == 0)
+            path.moveTo(point);
+        else
+            path.lineTo(point);
+    }
+    return path;
 }
 
 QColor interpolateColor(const QColor &from, const QColor &to, qreal t)
@@ -379,11 +457,25 @@ QJsonObject Document::toJson() const
         layerArray.append(layer);
     root.insert(QStringLiteral("layers"), layerArray);
 
+    QJsonArray visibleArray;
+    QJsonArray lockedArray;
+    for (int i = 0; i < layers.size(); ++i) {
+        visibleArray.append(i < layerVisible.size() ? layerVisible.at(i) : true);
+        lockedArray.append(i < layerLocked.size() ? layerLocked.at(i) : false);
+    }
+    root.insert(QStringLiteral("layerVisible"), visibleArray);
+    root.insert(QStringLiteral("layerLocked"), lockedArray);
+
     QJsonArray objectArray;
     for (const VectorObject &object : objects) {
         QJsonObject entry;
         entry.insert(QStringLiteral("type"), shapeTypeId(object.type));
         entry.insert(QStringLiteral("layer"), object.layer);
+        entry.insert(QStringLiteral("cornerRadius"), object.cornerRadius);
+        entry.insert(QStringLiteral("sides"), object.sides);
+        entry.insert(QStringLiteral("starPoints"), object.starPoints);
+        entry.insert(QStringLiteral("starRatio"), object.starRatio);
+        entry.insert(QStringLiteral("spiralTurns"), object.spiralTurns);
         entry.insert(QStringLiteral("pos"), pointArray(object.pos));
         entry.insert(QStringLiteral("rotation"), object.rotation);
         entry.insert(QStringLiteral("path"), encodePath(object.path));
@@ -444,12 +536,28 @@ Document Document::fromJson(const QJsonObject &json, QString *error)
         }
     }
 
+    document.layerVisible.fill(true, document.layers.size());
+    document.layerLocked.fill(false, document.layers.size());
+    const QJsonArray visibleArray = json.value(QStringLiteral("layerVisible")).toArray();
+    const QJsonArray lockedArray = json.value(QStringLiteral("layerLocked")).toArray();
+    for (int i = 0; i < document.layers.size(); ++i) {
+        if (i < visibleArray.size())
+            document.layerVisible[i] = visibleArray.at(i).toBool(true);
+        if (i < lockedArray.size())
+            document.layerLocked[i] = lockedArray.at(i).toBool(false);
+    }
+
     const QJsonArray array = json.value(QStringLiteral("objects")).toArray();
     for (const QJsonValue &value : array) {
         const QJsonObject entry = value.toObject();
         VectorObject object;
         object.type = shapeTypeFromId(entry.value(QStringLiteral("type")).toString());
         object.layer = entry.value(QStringLiteral("layer")).toInt(0);
+        object.cornerRadius = entry.value(QStringLiteral("cornerRadius")).toDouble(0.0);
+        object.sides = entry.value(QStringLiteral("sides")).toInt(6);
+        object.starPoints = entry.value(QStringLiteral("starPoints")).toInt(5);
+        object.starRatio = entry.value(QStringLiteral("starRatio")).toDouble(0.45);
+        object.spiralTurns = entry.value(QStringLiteral("spiralTurns")).toDouble(3.0);
         object.pos = pointFromArray(entry.value(QStringLiteral("pos")).toArray());
         object.rotation = entry.value(QStringLiteral("rotation")).toDouble(0.0);
         object.path = decodePath(entry.value(QStringLiteral("path")).toArray());
@@ -552,6 +660,8 @@ bool Document::load(const QString &path, QString *error)
 
     pageSize = loaded.pageSize;
     layers = loaded.layers;
+    layerVisible = loaded.layerVisible;
+    layerLocked = loaded.layerLocked;
     objects = loaded.objects;
     return true;
 }
@@ -567,6 +677,9 @@ QString Document::toSvg() const
     svg += QStringLiteral("  <rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n");
 
     for (const VectorObject &object : objects) {
+        if (object.layer >= 0 && object.layer < layerVisible.size()
+            && !layerVisible.at(object.layer))
+            continue;
         const QRectF bounds = object.localBounds();
         svg += QStringLiteral("  <g transform=\"translate(%1,%2) rotate(%3 %4 %5)\" opacity=\"%6\">\n")
                    .arg(num(object.pos.x()), num(object.pos.y()), num(object.rotation),
@@ -702,6 +815,7 @@ Document Document::sample()
     VectorObject cardObject = makePath(ShapeType::Rectangle, card, QPointF(100, 320),
                                        QColor("#6b8cf0"), QColor(Qt::transparent), 0);
     cardObject.rotation = -6;
+    cardObject.cornerRadius = 28;
     document.objects.append(cardObject);
 
     QPainterPath circle;
@@ -710,8 +824,11 @@ Document Document::sample()
                                      QColor("#ff8a3d"), QColor(Qt::transparent), 0));
 
     QPainterPath star = starPath(78, 33, 5);
-    document.objects.append(makePath(ShapeType::Star, star, QPointF(660, 640),
-                                     QColor("#16a3a3"), QColor("#0f7f7f"), 3));
+    VectorObject starObject = makePath(ShapeType::Star, star, QPointF(660, 640),
+                                       QColor("#16a3a3"), QColor("#0f7f7f"), 3);
+    starObject.starPoints = 5;
+    starObject.starRatio = 33.0 / 78.0;
+    document.objects.append(starObject);
 
     QPainterPath dot;
     dot.addEllipse(QRectF(0, 0, 54, 54));
@@ -733,6 +850,8 @@ Document Document::sample()
 
     for (VectorObject &object : document.objects)
         object.layer = 0;
+    document.layerVisible = {true};
+    document.layerLocked = {false};
 
     return document;
 }

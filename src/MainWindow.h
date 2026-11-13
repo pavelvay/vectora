@@ -74,11 +74,14 @@ private:
     void onSelectionChanged(int count);
     void showWelcome();
     void showEditor();
+    void showDockerTab(const QString &title, int tab);
     void loadSampleDocument();
     QStringList recentFiles() const;
     void addRecentFile(const QString &path);
     void refreshQuickTransform();
     void applyQuickTransform();
+    void syncShapeOptions();
+    void applyShapeOptions();
     void copySelection();
     void cutSelection();
     void pasteClipboard();
@@ -136,6 +139,17 @@ private:
     int m_textPageIndex = 2;
     int m_paintPageIndex = 3;
     int m_bezierPageIndex = 4;
+    int m_rectPageIndex = 5;
+    int m_polygonPageIndex = 6;
+    int m_starPageIndex = 7;
+    int m_spiralPageIndex = 8;
+    Tool m_currentTool = Tool::Select;
+    bool m_updatingShapeOptions = false;
+    QDoubleSpinBox *m_rectRadius = nullptr;
+    QDoubleSpinBox *m_polygonSides = nullptr;
+    QDoubleSpinBox *m_starPoints = nullptr;
+    QDoubleSpinBox *m_starRatio = nullptr;
+    QDoubleSpinBox *m_spiralTurns = nullptr;
 
     QString m_filePath;
     bool m_modified = false;

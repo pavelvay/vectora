@@ -348,51 +348,17 @@ void CanvasView::drawPreview(QPainter *painter)
     case DrawMode::Spiral: {
         const qreal radius = QLineF(m_drawStart, m_drawCurrent).length();
         if (radius > 1.0) {
-            if (m_drawMode == DrawMode::Polygon) {
-                QPainterPath path;
-                for (int i = 0; i < 6; ++i) {
-                    const qreal angle = -kPi / 2.0 + i * 2.0 * kPi / 6.0;
-                    const QPointF p(m_drawStart.x() + radius * std::cos(angle),
-                                    m_drawStart.y() + radius * std::sin(angle));
-                    if (i == 0)
-                        path.moveTo(p);
-                    else
-                        path.lineTo(p);
-                }
-                path.closeSubpath();
-                painter->drawPath(path);
-            } else if (m_drawMode == DrawMode::Star) {
-                QPainterPath path;
-                const qreal inner = radius * 0.45;
-                for (int i = 0; i < 10; ++i) {
-                    const qreal r = (i % 2 == 0) ? radius : inner;
-                    const qreal angle = -kPi / 2.0 + i * kPi / 5.0;
-                    const QPointF p(m_drawStart.x() + r * std::cos(angle),
-                                    m_drawStart.y() + r * std::sin(angle));
-                    if (i == 0)
-                        path.moveTo(p);
-                    else
-                        path.lineTo(p);
-                }
-                path.closeSubpath();
-                painter->drawPath(path);
-            } else {
-                QPainterPath path;
-                const int steps = 500;
-                const qreal turns = 3.0;
-                for (int i = 0; i <= steps; ++i) {
-                    const qreal t = qreal(i) / steps;
-                    const qreal angle = t * turns * 2.0 * kPi;
-                    const qreal r = radius * t;
-                    const QPointF p(m_drawStart.x() + r * std::cos(angle),
-                                    m_drawStart.y() + r * std::sin(angle));
-                    if (i == 0)
-                        path.moveTo(p);
-                    else
-                        path.lineTo(p);
-                }
-                painter->drawPath(path);
-            }
+            const QRectF bounds(m_drawStart.x() - radius,
+                                m_drawStart.y() - radius,
+                                radius * 2.0, radius * 2.0);
+            QPainterPath path;
+            if (m_drawMode == DrawMode::Polygon)
+                path = buildPolygonPath(bounds, m_polygonSides);
+            else if (m_drawMode == DrawMode::Star)
+                path = buildStarPath(bounds, m_starPoints, m_starRatio);
+            else
+                path = buildSpiralPath(bounds, m_spiralTurns);
+            painter->drawPath(path);
         }
         break;
     }
@@ -527,9 +493,6 @@ VectorItem *CanvasView::itemAtScene(const QPointF &scenePos) const
 
 VectorItem *CanvasView::addVectorObject(const VectorObject &object, bool record, bool select)
 {
-    if (record)
-        emit beginEdit();
-
     if (m_layers.isEmpty()) {
         m_layers.append(QStringLiteral("Слой 1"));
         m_activeLayer = 0;
@@ -538,6 +501,17 @@ VectorItem *CanvasView::addVectorObject(const VectorObject &object, bool record,
     VectorObject copy = object;
     if (copy.layer < 0 || copy.layer >= m_layers.size())
         copy.layer = m_activeLayer;
+
+    if (record && copy.layer >= 0 && copy.layer < m_layers.size()
+        && (m_layerLocked.value(copy.layer, false)
+            || !m_layerVisible.value(copy.layer, true))) {
+        emit statusHint(QStringLiteral("Слой «%1» заблокирован или скрыт.")
+                            .arg(m_layers.at(copy.layer)));
+        return nullptr;
+    }
+
+    if (record)
+        emit beginEdit();
 
     auto *item = new VectorItem(copy);
     scene()->addItem(item);
@@ -552,6 +526,7 @@ VectorItem *CanvasView::addVectorObject(const VectorObject &object, bool record,
     }
 
     normalizeZOrder();
+    applyLayerState(copy.layer);
 
     if (record)
         emit endEdit();
@@ -570,12 +545,24 @@ void CanvasView::setDocument(const Document &document)
     m_layers = document.layers;
     if (m_layers.isEmpty())
         m_layers.append(QStringLiteral("Слой 1"));
+    m_layerVisible = document.layerVisible;
+    m_layerLocked = document.layerLocked;
+    m_layerVisible.resize(m_layers.size());
+    m_layerLocked.resize(m_layers.size());
+    for (int i = 0; i < m_layers.size(); ++i) {
+        if (document.layerVisible.size() > i)
+            m_layerVisible[i] = document.layerVisible.at(i);
+        if (document.layerLocked.size() > i)
+            m_layerLocked[i] = document.layerLocked.at(i);
+    }
     m_activeLayer = qBound(0, m_activeLayer, m_layers.size() - 1);
 
     setPageSize(document.pageSize);
     for (const VectorObject &object : document.objects)
         addVectorObject(object, false, false);
     normalizeZOrder();
+    for (int i = 0; i < m_layers.size(); ++i)
+        applyLayerState(i);
     emit selectionChanged(0);
     viewport()->update();
 }
@@ -611,9 +598,15 @@ void CanvasView::deleteSelectedObjects()
 void CanvasView::selectAllObjects()
 {
     const QList<VectorItem *> items = vectorItems();
-    for (VectorItem *item : items)
+    int selected = 0;
+    for (VectorItem *item : items) {
+        if (!item->isVisible()
+            || !(item->flags() & QGraphicsItem::ItemIsSelectable))
+            continue;
         item->setSelected(true);
-    emit selectionChanged(items.size());
+        ++selected;
+    }
+    emit selectionChanged(selected);
 }
 
 void CanvasView::raiseSelection()
@@ -693,6 +686,8 @@ int CanvasView::addLayer(const QString &name)
     }
 
     m_layers.append(layerName);
+    m_layerVisible.append(true);
+    m_layerLocked.append(false);
     m_activeLayer = m_layers.size() - 1;
     normalizeZOrder();
 
@@ -719,6 +714,10 @@ void CanvasView::removeLayer(int index)
     }
 
     m_layers.removeAt(index);
+    if (index < m_layerVisible.size())
+        m_layerVisible.removeAt(index);
+    if (index < m_layerLocked.size())
+        m_layerLocked.removeAt(index);
     for (VectorItem *item : vectorItems()) {
         const int layer = item->object().layer;
         if (layer > index)
@@ -771,6 +770,16 @@ void CanvasView::moveLayer(int from, int to)
     }
 
     m_layers = newNames;
+    QVector<bool> newVisible;
+    QVector<bool> newLocked;
+    newVisible.reserve(order.size());
+    newLocked.reserve(order.size());
+    for (int oldIndex : order) {
+        newVisible.append(m_layerVisible.value(oldIndex, true));
+        newLocked.append(m_layerLocked.value(oldIndex, false));
+    }
+    m_layerVisible = newVisible;
+    m_layerLocked = newLocked;
     m_activeLayer = qMax(0, order.indexOf(m_activeLayer));
     applyLayerLayout(perLayer);
 
@@ -781,6 +790,10 @@ void CanvasView::moveItemToLayer(VectorItem *item, int layer, int positionFromTo
 {
     if (!item || layer < 0 || layer >= m_layers.size())
         return;
+    if (m_layerLocked.value(layer, false)) {
+        emit statusHint(QStringLiteral("Целевой слой заблокирован."));
+        return;
+    }
 
     emit beginEdit();
 
@@ -804,6 +817,10 @@ void CanvasView::moveItemsToLayer(const QList<VectorItem *> &items, int layer)
 {
     if (items.isEmpty() || layer < 0 || layer >= m_layers.size())
         return;
+    if (m_layerLocked.value(layer, false)) {
+        emit statusHint(QStringLiteral("Целевой слой заблокирован."));
+        return;
+    }
 
     emit beginEdit();
 
@@ -827,13 +844,64 @@ void CanvasView::moveItemsToLayer(const QList<VectorItem *> &items, int layer)
     emit endEdit();
 }
 
+bool CanvasView::layerVisible(int index) const
+{
+    return m_layerVisible.value(index, true);
+}
+
+bool CanvasView::layerLocked(int index) const
+{
+    return m_layerLocked.value(index, false);
+}
+
+void CanvasView::setLayerVisible(int index, bool visible)
+{
+    if (index < 0 || index >= m_layers.size())
+        return;
+    emit beginEdit();
+    m_layerVisible[index] = visible;
+    applyLayerState(index);
+    emit endEdit();
+}
+
+void CanvasView::setLayerLocked(int index, bool locked)
+{
+    if (index < 0 || index >= m_layers.size())
+        return;
+    emit beginEdit();
+    m_layerLocked[index] = locked;
+    applyLayerState(index);
+    emit endEdit();
+}
+
+void CanvasView::applyLayerState(int layer)
+{
+    if (layer < 0 || layer >= m_layers.size())
+        return;
+
+    const bool visible = m_layerVisible.value(layer, true);
+    const bool locked = m_layerLocked.value(layer, false);
+    for (VectorItem *item : itemsInLayer(layer)) {
+        item->setVisible(visible);
+        item->setFlag(QGraphicsItem::ItemIsSelectable, !locked);
+        item->setFlag(QGraphicsItem::ItemIsMovable, !locked);
+        if (locked)
+            item->setSelected(false);
+    }
+}
+
 void CanvasView::applyLayerLayout(const QVector<QList<VectorItem *>> &perLayer)
 {
     int z = 1;
     for (int layer = 0; layer < perLayer.size(); ++layer) {
+        const bool visible = m_layerVisible.value(layer, true);
+        const bool locked = m_layerLocked.value(layer, false);
         for (VectorItem *item : perLayer.at(layer)) {
             item->setLayerIndex(layer);
             item->setZValue(z++);
+            item->setVisible(visible);
+            item->setFlag(QGraphicsItem::ItemIsSelectable, !locked);
+            item->setFlag(QGraphicsItem::ItemIsMovable, !locked);
         }
     }
     m_nextZ = z;
@@ -903,10 +971,14 @@ void CanvasView::finishDrawing(const QPointF &scenePos)
         VectorObject object = baseObject(m_drawMode == DrawMode::Rectangle
                                              ? ShapeType::Rectangle
                                              : ShapeType::Ellipse);
-        if (m_drawMode == DrawMode::Rectangle)
-            object.path.addRect(QRectF(0.0, 0.0, rect.width(), rect.height()));
-        else
+        if (m_drawMode == DrawMode::Rectangle) {
+            object.cornerRadius = m_cornerRadius;
+            object.path = buildRectanglePath(QRectF(0.0, 0.0, rect.width(),
+                                                    rect.height()),
+                                             m_cornerRadius);
+        } else {
             object.path.addEllipse(QRectF(0.0, 0.0, rect.width(), rect.height()));
+        }
         object.pos = rect.topLeft();
         addVectorObject(object);
         break;
@@ -918,53 +990,27 @@ void CanvasView::finishDrawing(const QPointF &scenePos)
         if (radius < 1.0)
             break;
 
+        const QRectF bounds(start.x() - radius, start.y() - radius,
+                            radius * 2.0, radius * 2.0);
+        VectorObject object;
         if (m_drawMode == DrawMode::Polygon) {
-            VectorObject object = baseObject(ShapeType::Polygon);
-            for (int i = 0; i < 6; ++i) {
-                const qreal angle = -kPi / 2.0 + i * 2.0 * kPi / 6.0;
-                const QPointF p(radius * std::cos(angle), radius * std::sin(angle));
-                if (i == 0)
-                    object.path.moveTo(p);
-                else
-                    object.path.lineTo(p);
-            }
-            object.path.closeSubpath();
-            object.pos = start;
-            addVectorObject(object);
+            object = baseObject(ShapeType::Polygon);
+            object.sides = m_polygonSides;
+            object.path = buildPolygonPath(bounds, m_polygonSides);
         } else if (m_drawMode == DrawMode::Star) {
-            VectorObject object = baseObject(ShapeType::Star);
-            const qreal inner = radius * 0.45;
-            for (int i = 0; i < 10; ++i) {
-                const qreal r = (i % 2 == 0) ? radius : inner;
-                const qreal angle = -kPi / 2.0 + i * kPi / 5.0;
-                const QPointF p(r * std::cos(angle), r * std::sin(angle));
-                if (i == 0)
-                    object.path.moveTo(p);
-                else
-                    object.path.lineTo(p);
-            }
-            object.path.closeSubpath();
-            object.pos = start;
-            addVectorObject(object);
+            object = baseObject(ShapeType::Star);
+            object.starPoints = m_starPoints;
+            object.starRatio = m_starRatio;
+            object.path = buildStarPath(bounds, m_starPoints, m_starRatio);
         } else {
-            VectorObject object = baseObject(ShapeType::Spiral);
+            object = baseObject(ShapeType::Spiral);
             object.hasFill = false;
-            const int steps = 720;
-            const qreal turns = 3.0;
-            for (int i = 0; i <= steps; ++i) {
-                const qreal t = qreal(i) / steps;
-                const qreal angle = t * turns * 2.0 * kPi;
-                const qreal r = radius * t;
-                const QPointF p(r * std::cos(angle), r * std::sin(angle));
-                if (i == 0)
-                    object.path.moveTo(p);
-                else
-                    object.path.lineTo(p);
-            }
-            object.pos = start;
+            object.spiralTurns = m_spiralTurns;
+            object.path = buildSpiralPath(bounds, m_spiralTurns);
             object.strokeWidth = qMax<qreal>(m_strokeWidth, 1.5);
-            addVectorObject(object);
         }
+        object.pos = bounds.topLeft();
+        addVectorObject(object);
         break;
     }
     case DrawMode::Line: {
@@ -1247,6 +1293,98 @@ void CanvasView::toggleShadowAt(const QPointF &scenePos)
     item->setShadowEnabled(on);
     emit endEdit();
     emit statusHint(on ? QStringLiteral("Тень включена.") : QStringLiteral("Тень выключена."));
+}
+
+void CanvasView::bringToFront()
+{
+    if (selectedVectorItems().isEmpty())
+        return;
+    emit beginEdit();
+    QVector<QList<VectorItem *>> perLayer(m_layers.size());
+    for (int layer = 0; layer < m_layers.size(); ++layer) {
+        QList<VectorItem *> &items = perLayer[layer];
+        items = itemsInLayer(layer);
+        QList<VectorItem *> selected;
+        for (VectorItem *item : items) {
+            if (item->isSelected())
+                selected.append(item);
+        }
+        for (VectorItem *item : selected)
+            items.removeAll(item);
+        for (VectorItem *item : selected)
+            items.append(item);
+    }
+    applyLayerLayout(perLayer);
+    emit endEdit();
+}
+
+void CanvasView::sendToBack()
+{
+    if (selectedVectorItems().isEmpty())
+        return;
+    emit beginEdit();
+    QVector<QList<VectorItem *>> perLayer(m_layers.size());
+    for (int layer = 0; layer < m_layers.size(); ++layer) {
+        QList<VectorItem *> items = itemsInLayer(layer);
+        QList<VectorItem *> selected;
+        for (VectorItem *item : items) {
+            if (item->isSelected())
+                selected.append(item);
+        }
+        for (VectorItem *item : selected)
+            items.removeAll(item);
+        for (VectorItem *item : selected)
+            items.prepend(item);
+        perLayer[layer] = items;
+    }
+    applyLayerLayout(perLayer);
+    emit endEdit();
+}
+
+void CanvasView::bringForward()
+{
+    raiseSelection();
+}
+
+void CanvasView::sendBackward()
+{
+    lowerSelection();
+}
+
+void CanvasView::flipSelection(bool horizontal)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty())
+        return;
+
+    emit beginEdit();
+    int flipped = 0;
+    for (VectorItem *item : selected) {
+        if (item->flip(horizontal))
+            ++flipped;
+    }
+    emit endEdit();
+    emit statusHint(flipped > 0
+                        ? QStringLiteral("Отражено объектов: %1").arg(flipped)
+                        : QStringLiteral("Текст не отражается на этом этапе."));
+}
+
+void CanvasView::rotateSelection(qreal degrees)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty())
+        return;
+
+    emit beginEdit();
+    for (VectorItem *item : selected) {
+        qreal angle = item->object().rotation + degrees;
+        while (angle > 360.0)
+            angle -= 360.0;
+        while (angle <= -360.0)
+            angle += 360.0;
+        item->setRotationAngle(angle);
+    }
+    emit endEdit();
 }
 
 void CanvasView::blendSelected(int steps)

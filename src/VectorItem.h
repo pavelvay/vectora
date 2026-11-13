@@ -35,6 +35,13 @@ public:
     void setTextFont(const QFont &font);
     void setTextAlignment(int align);
     void setRotationAngle(qreal degrees);
+    void setCornerRadius(qreal radius);
+    void setSides(int sides);
+    void setStarPoints(int points);
+    void setStarRatio(qreal ratio);
+    void setSpiralTurns(qreal turns);
+    bool flip(bool horizontal);
+    int shapeTypeValue() const { return int(m_object.type); }
     void setPath(const QPainterPath &path);
 
     QVector<QPainterPath::Element> pathElements() const;

@@ -68,6 +68,28 @@ public:
     void moveItemsToLayer(const QList<VectorItem *> &items, int layer);
     QList<VectorItem *> itemsInLayer(int layer) const;
     int layerOf(VectorItem *item) const;
+    bool layerVisible(int index) const;
+    bool layerLocked(int index) const;
+    void setLayerVisible(int index, bool visible);
+    void setLayerLocked(int index, bool locked);
+
+    qreal cornerRadius() const { return m_cornerRadius; }
+    void setCornerRadius(qreal radius) { m_cornerRadius = qBound(0.0, radius, 1000.0); }
+    int polygonSides() const { return m_polygonSides; }
+    void setPolygonSides(int sides) { m_polygonSides = qBound(3, sides, 64); }
+    int starPoints() const { return m_starPoints; }
+    void setStarPoints(int points) { m_starPoints = qBound(3, points, 50); }
+    qreal starRatio() const { return m_starRatio; }
+    void setStarRatio(qreal ratio) { m_starRatio = qBound(0.05, ratio, 0.95); }
+    qreal spiralTurns() const { return m_spiralTurns; }
+    void setSpiralTurns(qreal turns) { m_spiralTurns = qBound(0.5, turns, 20.0); }
+
+    void bringToFront();
+    void sendToBack();
+    void bringForward();
+    void sendBackward();
+    void flipSelection(bool horizontal);
+    void rotateSelection(qreal degrees);
 
     void finishBezier();
     void closeBezier();
@@ -123,6 +145,7 @@ private:
 
     void updateCursor();
     void normalizeZOrder();
+    void applyLayerState(int layer);
     void applyLayerLayout(const QVector<QList<VectorItem *>> &perLayer);
     VectorItem *itemAtScene(const QPointF &scenePos) const;
     void finishDrawing(const QPointF &scenePos);
@@ -182,5 +205,13 @@ private:
 
     qreal m_nextZ = 1.0;
     QStringList m_layers = {QStringLiteral("Слой 1")};
+    QVector<bool> m_layerVisible = {true};
+    QVector<bool> m_layerLocked = {false};
     int m_activeLayer = 0;
+
+    qreal m_cornerRadius = 0.0;
+    int m_polygonSides = 6;
+    int m_starPoints = 5;
+    qreal m_starRatio = 0.45;
+    qreal m_spiralTurns = 3.0;
 };

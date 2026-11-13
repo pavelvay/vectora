@@ -528,6 +528,31 @@ void paintAction(QPainter &p, const QString &id, const QColor &c)
         p.setFont(f);
         p.setPen(c);
         p.drawText(QRectF(3.0, 2.6, 18.0, 18.0), Qt::AlignCenter, QStringLiteral("?"));
+    } else if (id == QLatin1String("eye") || id == QLatin1String("eye-off")) {
+        QPainterPath eye;
+        eye.moveTo(3.2, 12.0);
+        eye.cubicTo(8.0, 5.0, 16.0, 5.0, 20.8, 12.0);
+        eye.cubicTo(16.0, 19.0, 8.0, 19.0, 3.2, 12.0);
+        eye.closeSubpath();
+        p.drawPath(eye);
+        p.setBrush(c);
+        p.drawEllipse(QPointF(12.0, 12.0), 2.6, 2.6);
+        p.setBrush(Qt::NoBrush);
+        if (id == QLatin1String("eye-off")) {
+            p.setPen(stroke(QColor(0xe0, 0x46, 0x6b), 2.0));
+            p.drawLine(QPointF(4.5, 19.5), QPointF(19.5, 4.5));
+        }
+    } else if (id == QLatin1String("lock") || id == QLatin1String("unlock")) {
+        p.setBrush(Qt::NoBrush);
+        p.drawRoundedRect(QRectF(5.0, 10.0, 14.0, 10.5), 2.0, 2.0);
+        if (id == QLatin1String("lock")) {
+            p.drawArc(QRectF(7.5, 3.0, 9.0, 14.0), 0, 180 * 16);
+        } else {
+            p.drawArc(QRectF(9.5, 2.0, 10.0, 12.0), 25 * 16, 130 * 16);
+            p.drawLine(QPointF(16.0, 7.0), QPointF(16.0, 10.0));
+        }
+        p.setBrush(c);
+        p.drawEllipse(QPointF(12.0, 15.0), 1.2, 1.2);
     } else if (id == QLatin1String("settings")) {
         p.drawEllipse(QRectF(8.4, 8.4, 7.2, 7.2));
         p.drawEllipse(QRectF(3.4, 3.4, 17.2, 17.2));

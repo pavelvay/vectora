@@ -163,7 +163,7 @@ WelcomeWidget::WelcomeWidget(QWidget *parent)
 
     left->addStretch(1);
     left->addWidget(mutedLabel(
-        QStringLiteral("Vectora 0.1.5 · Linux · Windows · macOS · .vct, SVG, PNG, PDF"),
+        QStringLiteral("Vectora 0.1.6 · Linux · Windows · macOS · .vct, SVG, PNG, PDF"),
         this));
 
     root->addLayout(left, 1);
