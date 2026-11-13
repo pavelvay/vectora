@@ -230,6 +230,32 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
 
 QSplitter::handle { background: #2c2f35; }
+
+QWidget#welcomePage { background: #17191d; }
+QFrame#startCard {
+    background: #20242b;
+    border: 1px solid #2f343c;
+    border-radius: 14px;
+}
+QFrame#startCard:hover {
+    background: #262c35;
+    border-color: #5d8fd6;
+}
+QFrame#recentPanel {
+    background: #1d2026;
+    border: 1px solid #2b2f36;
+    border-radius: 14px;
+}
+QListWidget#recentList {
+    background: transparent;
+    border: none;
+    outline: none;
+}
+QListWidget#recentList::item {
+    border-radius: 8px;
+}
+QListWidget#recentList::item:hover { background: #262b33; }
+QListWidget#recentList::item:selected { background: #2d4a78; }
 QToolTip {
     background: #2b2e34;
     color: #e3e7ee;

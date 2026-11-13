@@ -35,6 +35,7 @@
 #include <QMessageBox>
 #include <QPageLayout>
 #include <QPageSize>
+#include <QSettings>
 #include <QPainterPath>
 #include <QPdfWriter>
 #include <QPen>
@@ -69,6 +70,7 @@
 #include "Theme.h"
 #include "ToolPalette.h"
 #include "VectorItem.h"
+#include "WelcomeWidget.h"
 
 namespace {
 
@@ -153,10 +155,17 @@ MainWindow::MainWindow(QWidget *parent)
     createMenus();
     createMainToolBar();
     createPropertyBar();
-    populateSample();
+    applyDocument(Document());
+    m_modified = false;
+    resetHistory();
+    updateTitle();
     applyTool(Tool::Select);
+    showWelcome();
 
-    QTimer::singleShot(0, this, [this]() { m_view->fitPage(); });
+    QTimer::singleShot(0, this, [this]() {
+        if (m_centralStack && m_centralStack->currentWidget() == m_editorPage)
+            m_view->fitPage();
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +228,11 @@ void MainWindow::createActions()
     act = makeAction(QStringLiteral("save-as"), QStringLiteral("Сохранить как…"),
                      QKeySequence::SaveAs, QStringLiteral("Сохранить документ под новым именем"), false);
     connect(act, &QAction::triggered, this, &MainWindow::saveDocumentAs);
+
+    act = makeAction(QStringLiteral("home"), QStringLiteral("Главная страница"),
+                     QKeySequence(QStringLiteral("Ctrl+Shift+H")),
+                     QStringLiteral("Открыть стартовую страницу"), false);
+    connect(act, &QAction::triggered, this, &MainWindow::showWelcome);
 
     act = makeAction(QStringLiteral("import"), QStringLiteral("Импорт…"),
                      QKeySequence(QStringLiteral("Ctrl+I")),
@@ -463,6 +477,8 @@ void MainWindow::createMenus()
     fileMenu->addAction(action(QStringLiteral("save")));
     fileMenu->addAction(action(QStringLiteral("save-as")));
     fileMenu->addSeparator();
+    fileMenu->addAction(action(QStringLiteral("home")));
+    fileMenu->addSeparator();
     fileMenu->addAction(action(QStringLiteral("import")));
     fileMenu->addAction(action(QStringLiteral("export")));
     fileMenu->addAction(action(QStringLiteral("pdf")));
@@ -561,21 +577,22 @@ void MainWindow::createMenus()
 
 void MainWindow::createCanvas()
 {
-    auto *central = new QWidget(this);
-    auto *grid = new QGridLayout(central);
+    m_centralStack = new QStackedWidget(this);
+    m_editorPage = new QWidget(m_centralStack);
+    auto *grid = new QGridLayout(m_editorPage);
     grid->setContentsMargins(0, 0, 0, 0);
     grid->setSpacing(0);
 
-    auto *corner = new QLabel(QStringLiteral("мм"), central);
+    auto *corner = new QLabel(QStringLiteral("мм"), m_editorPage);
     corner->setAlignment(Qt::AlignCenter);
     corner->setFixedSize(22, 22);
     corner->setStyleSheet(QStringLiteral(
         "background:#202226; color:#8b929d; font-size:9px;"
         "border-right:1px solid #2c2f35; border-bottom:1px solid #2c2f35;"));
 
-    m_hRuler = new Ruler(Qt::Horizontal, central);
-    m_vRuler = new Ruler(Qt::Vertical, central);
-    m_view = new CanvasView(central);
+    m_hRuler = new Ruler(Qt::Horizontal, m_editorPage);
+    m_vRuler = new Ruler(Qt::Vertical, m_editorPage);
+    m_view = new CanvasView(m_editorPage);
     m_scene = m_view->scene();
 
     m_hRuler->setView(m_view);
@@ -586,7 +603,23 @@ void MainWindow::createCanvas()
     grid->addWidget(m_vRuler, 1, 0);
     grid->addWidget(m_view, 1, 1);
 
-    setCentralWidget(central);
+    m_welcome = new WelcomeWidget(m_centralStack);
+    m_centralStack->addWidget(m_welcome);
+    m_centralStack->addWidget(m_editorPage);
+    setCentralWidget(m_centralStack);
+    m_centralStack->setCurrentWidget(m_welcome);
+
+    connect(m_welcome, &WelcomeWidget::createRequested, this, &MainWindow::newDocument);
+    connect(m_welcome, &WelcomeWidget::openRequested, this, &MainWindow::openDocument);
+    connect(m_welcome, &WelcomeWidget::sampleRequested, this,
+            &MainWindow::loadSampleDocument);
+    connect(m_welcome, &WelcomeWidget::recentRequested, this,
+            [this](const QString &path) {
+                if (!maybeSave())
+                    return;
+                if (openPath(path))
+                    showEditor();
+            });
 
     connect(m_view, &CanvasView::zoomChanged, this, &MainWindow::updateZoomUi);
     connect(m_view, &CanvasView::scenePosChanged, this, &MainWindow::updateCoordinates);
@@ -727,6 +760,7 @@ void MainWindow::createDocks()
 void MainWindow::createMainToolBar()
 {
     auto *bar = addToolBar(QStringLiteral("Основная"));
+    m_mainToolBar = bar;
     bar->setObjectName(QStringLiteral("MainToolBar"));
     bar->setMovable(false);
     bar->setFloatable(false);
@@ -784,6 +818,7 @@ void MainWindow::createMainToolBar()
 void MainWindow::createPropertyBar()
 {
     auto *bar = addToolBar(QStringLiteral("Свойства инструмента"));
+    m_propertyBar = bar;
     bar->setObjectName(QStringLiteral("PropertyBar"));
     bar->setMovable(false);
     bar->setFloatable(false);
@@ -1105,11 +1140,90 @@ void MainWindow::createStatusBar()
 
 void MainWindow::populateSample()
 {
+    loadSampleDocument();
+}
+
+void MainWindow::showWelcome()
+{
+    if (!m_centralStack || !m_welcome)
+        return;
+
+    // The start screen is a clean cover: hide the editing chrome.
+    if (m_mainToolBar)
+        m_mainToolBar->hide();
+    if (m_propertyBar)
+        m_propertyBar->hide();
+    if (m_toolsDock)
+        m_toolsDock->hide();
+    if (m_paletteDock)
+        m_paletteDock->hide();
+    if (m_dockPanels) {
+        for (QDockWidget *dock : m_dockPanels->docks())
+            dock->hide();
+    }
+    statusBar()->hide();
+
+    m_welcome->setRecentFiles(recentFiles());
+    m_centralStack->setCurrentWidget(m_welcome);
+}
+
+void MainWindow::showEditor()
+{
+    if (!m_centralStack || !m_editorPage)
+        return;
+
+    m_centralStack->setCurrentWidget(m_editorPage);
+
+    if (m_mainToolBar)
+        m_mainToolBar->show();
+    if (m_propertyBar)
+        m_propertyBar->show();
+    if (m_toolsDock)
+        m_toolsDock->show();
+    if (m_paletteDock)
+        m_paletteDock->show();
+    if (m_dockPanels) {
+        for (QDockWidget *dock : m_dockPanels->docks())
+            dock->show();
+    }
+    statusBar()->show();
+}
+
+void MainWindow::loadSampleDocument()
+{
+    if (!maybeSave())
+        return;
     applyDocument(Document::sample());
     m_filePath.clear();
     m_modified = false;
-    updateTitle();
     resetHistory();
+    updateTitle();
+    showEditor();
+    m_view->fitPage();
+    statusBar()->showMessage(QStringLiteral("Открыт демонстрационный документ."), 4000);
+}
+
+QStringList MainWindow::recentFiles() const
+{
+    QSettings settings;
+    return settings.value(QStringLiteral("recentFiles")).toStringList();
+}
+
+void MainWindow::addRecentFile(const QString &path)
+{
+    if (path.isEmpty())
+        return;
+    const QString absolute = QFileInfo(path).absoluteFilePath();
+    QStringList files = recentFiles();
+    files.removeAll(absolute);
+    files.prepend(absolute);
+    while (files.size() > 8)
+        files.removeLast();
+
+    QSettings settings;
+    settings.setValue(QStringLiteral("recentFiles"), files);
+    if (m_welcome)
+        m_welcome->setRecentFiles(files);
 }
 
 // ---------------------------------------------------------------------------
@@ -1307,6 +1421,7 @@ void MainWindow::newDocument()
     m_modified = false;
     resetHistory();
     updateTitle();
+    showEditor();
     m_view->fitPage();
     statusBar()->showMessage(QStringLiteral("Создан новый документ A4."), 4000);
 }
@@ -1344,6 +1459,8 @@ bool MainWindow::openPath(const QString &path)
     m_modified = false;
     resetHistory();
     updateTitle();
+    addRecentFile(path);
+    showEditor();
     m_view->fitPage();
     return true;
 }
@@ -1363,6 +1480,7 @@ void MainWindow::saveDocument()
 
     m_modified = false;
     updateTitle();
+    addRecentFile(m_filePath);
     statusBar()->showMessage(
         QStringLiteral("Сохранено: %1").arg(QFileInfo(m_filePath).fileName()), 4000);
 }
@@ -1390,6 +1508,7 @@ void MainWindow::saveDocumentAs()
     m_filePath = path;
     m_modified = false;
     updateTitle();
+    addRecentFile(path);
     statusBar()->showMessage(
         QStringLiteral("Сохранено: %1").arg(QFileInfo(path).fileName()), 4000);
 }
@@ -1886,7 +2005,7 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("О программе"),
         QStringLiteral(
-            "<h3>Vectora 0.4</h3>"
+            "<h3>Vectora 0.1.5</h3>"
             "<p>Кроссплатформенный векторный редактор на C++ и Qt 6.</p>"
             "<p>Работают: документы .vct, экспорт PNG/SVG/PDF, печать, "
             "рисование фигур и кривых, Bezier с типами узлов, докеры "

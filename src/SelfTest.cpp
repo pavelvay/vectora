@@ -10,6 +10,7 @@
 #include <QKeyEvent>
 #include <QSlider>
 #include <QToolButton>
+#include <QTabWidget>
 #include <QMouseEvent>
 #include <QPageSize>
 #include <QPainter>
@@ -354,6 +355,8 @@ int SelfTest::run(const QString &directory)
         window.resize(1400, 900);
         window.show();
         QApplication::processEvents();
+        window.openPath(dir.filePath(QStringLiteral("sample.vct")));
+        QApplication::processEvents();
 
         auto *canvas = window.findChild<CanvasView *>();
         check(canvas != nullptr, QStringLiteral("canvas found in main window"));
@@ -446,6 +449,38 @@ int SelfTest::run(const QString &directory)
                     }
                 }
 
+                QDockWidget *effectsDock = nullptr;
+                for (QDockWidget *dock : window.findChildren<QDockWidget *>()) {
+                    if (dock->windowTitle() == QStringLiteral("Эффекты"))
+                        effectsDock = dock;
+                }
+                check(effectsDock != nullptr, QStringLiteral("effects docker found"));
+                if (effectsDock) {
+                    bool hasApplyButton = false;
+                    for (QToolButton *button :
+                         effectsDock->findChildren<QToolButton *>()) {
+                        if (button->text().contains(QStringLiteral("Применить прозрачность")))
+                            hasApplyButton = true;
+                    }
+                    check(!hasApplyButton,
+                          QStringLiteral("transparency has no apply button"));
+
+                    auto *tabs = effectsDock->findChild<QTabWidget *>();
+                    if (tabs)
+                        tabs->setCurrentIndex(1);
+                    QApplication::processEvents();
+                    const QList<QSlider *> sliders =
+                        effectsDock->findChildren<QSlider *>();
+                    check(!sliders.isEmpty(), QStringLiteral("transparency slider found"));
+                    if (!sliders.isEmpty()) {
+                        sliders.first()->setValue(42);
+                        QApplication::processEvents();
+                        check(qAbs(item->object().opacity - 0.42) < 0.01,
+                              QStringLiteral("transparency applies in real time"));
+                        sliders.first()->sliderReleased();
+                    }
+                }
+
                 QDockWidget *objectsDock = nullptr;
                 for (QDockWidget *dock : window.findChildren<QDockWidget *>()) {
                     if (dock->windowTitle() == QStringLiteral("Объекты"))
@@ -466,6 +501,25 @@ int SelfTest::run(const QString &directory)
                         QApplication::processEvents();
                         check(canvas->layers().size() == layersBefore + 1,
                               QStringLiteral("add layer button creates a layer"));
+
+                        canvas->scene()->clearSelection();
+                        QApplication::processEvents();
+
+                        QToolButton *removeLayerButton = nullptr;
+                        for (QToolButton *button :
+                             objectsDock->findChildren<QToolButton *>()) {
+                            if (button->text().contains(QStringLiteral("Слой"))
+                                && button->text().startsWith(QStringLiteral("−")))
+                                removeLayerButton = button;
+                        }
+                        check(removeLayerButton != nullptr,
+                              QStringLiteral("remove layer button found"));
+                        if (removeLayerButton) {
+                            removeLayerButton->click();
+                            QApplication::processEvents();
+                            check(canvas->layers().size() == layersBefore,
+                                  QStringLiteral("remove layer button deletes layer"));
+                        }
                     }
                 }
             }

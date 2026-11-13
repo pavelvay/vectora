@@ -180,6 +180,13 @@ DockPanels::DockPanels(QMainWindow *host, CanvasView *view, QObject *parent)
     buildOutlineDocker();
     buildTextDocker();
 
+    m_opacityTimer = new QTimer(this);
+    m_opacityTimer->setSingleShot(true);
+    m_opacityTimer->setInterval(650);
+    connect(m_opacityTimer, &QTimer::timeout, this, [this]() {
+        finishOpacityEdit();
+    });
+
     connect(m_view, &CanvasView::selectionChanged, this, [this](int) { refresh(); });
 }
 
@@ -281,9 +288,11 @@ void DockPanels::buildObjectsDocker()
     layout->addWidget(m_tree, 1);
 
     const auto selectedLayer = [this]() -> int {
-        QTreeWidgetItem *item = m_tree->currentItem();
+        QTreeWidgetItem *item = m_tree->selectedItems().value(0);
         if (!item)
-            return -1;
+            item = m_tree->currentItem();
+        if (!item)
+            return m_view->activeLayer();
         if (item->data(0, kItemRole).isValid() && item->parent())
             return item->parent()->data(0, kLayerRole).toInt();
         return item->data(0, kLayerRole).toInt();
@@ -463,6 +472,9 @@ void DockPanels::refreshTree()
     const QSignalBlocker blocker(m_tree);
     m_tree->clear();
 
+    QVector<QTreeWidgetItem *> layerItems(layers.size(), nullptr);
+    bool objectSelected = false;
+
     for (int layer = layers.size() - 1; layer >= 0; --layer) {
         const bool active = layer == m_view->activeLayer();
         auto *layerItem = new QTreeWidgetItem(
@@ -470,6 +482,7 @@ void DockPanels::refreshTree()
                          .arg(active ? QStringLiteral("● ") : QString())
                          .arg(layers.at(layer))});
         layerItem->setData(0, kLayerRole, layer);
+        layerItems[layer] = layerItem;
         QFont layerFont = m_tree->font();
         layerFont.setBold(true);
         layerItem->setFont(0, layerFont);
@@ -486,10 +499,21 @@ void DockPanels::refreshTree()
                                reinterpret_cast<quintptr>(vectorItem)));
             entry->setFlags(entry->flags() | Qt::ItemIsDragEnabled
                             | Qt::ItemIsSelectable | Qt::ItemIsEnabled);
-            if (vectorItem->isSelected())
+            if (vectorItem->isSelected()) {
                 entry->setSelected(true);
+                m_tree->setCurrentItem(entry);
+                objectSelected = true;
+            }
         }
         layerItem->setExpanded(true);
+    }
+
+    if (!objectSelected) {
+        QTreeWidgetItem *activeItem = layerItems.value(m_view->activeLayer(), nullptr);
+        if (activeItem) {
+            activeItem->setSelected(true);
+            m_tree->setCurrentItem(activeItem);
+        }
     }
 
     if (m_layerTarget) {
@@ -585,11 +609,12 @@ void DockPanels::buildPropertiesDocker()
     connect(m_h, &QDoubleSpinBox::editingFinished, this, &DockPanels::applyTransform);
     connect(m_angle, &QDoubleSpinBox::editingFinished, this,
             &DockPanels::applyTransform);
-    connect(m_opacitySlider, &QSlider::valueChanged, this, [this](int value) {
-        m_opacityValue->setText(QStringLiteral("%1 %").arg(value));
-    });
+    connect(m_opacitySlider, &QSlider::valueChanged, this,
+            &DockPanels::applyOpacityLive);
+    connect(m_opacitySlider, &QSlider::sliderPressed, this,
+            [this]() { beginOpacityEdit(); });
     connect(m_opacitySlider, &QSlider::sliderReleased, this,
-            &DockPanels::applyTransform);
+            [this]() { finishOpacityEdit(); });
     connect(apply, &QToolButton::clicked, this, &DockPanels::applyTransform);
 
     connect(m_fillButton, &QToolButton::clicked, this, [this]() {
@@ -668,6 +693,12 @@ void DockPanels::refreshProperties()
         m_angle->setValue(object.rotation);
         m_opacitySlider->setValue(qRound(object.opacity * 100.0));
         m_opacityValue->setText(QStringLiteral("%1 %").arg(m_opacitySlider->value()));
+        if (m_effectOpacity) {
+            const QSignalBlocker blocker(m_effectOpacity);
+            m_effectOpacity->setValue(m_opacitySlider->value());
+            m_effectOpacityValue->setText(
+                QStringLiteral("%1 %").arg(m_opacitySlider->value()));
+        }
         m_strokeWidth->setValue(object.strokeWidth);
         m_outlineColor = object.hasStroke ? object.stroke : m_outlineColor;
         colorButtonIcon(m_outlineColorButton, m_outlineColor);
@@ -1142,28 +1173,20 @@ void DockPanels::buildEffectsDocker()
     opacityRow->addWidget(m_effectOpacityValue);
     transparencyLayout->addLayout(opacityRow);
 
-    auto *transparencyApply = new QToolButton(transparencyTab);
-    transparencyApply->setText(QStringLiteral("Применить прозрачность"));
-    transparencyApply->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    transparencyLayout->addWidget(transparencyApply);
+    auto *transparencyHint = new QLabel(
+        QStringLiteral("Прозрачность применяется сразу при движении ползунка."),
+        transparencyTab);
+    transparencyHint->setWordWrap(true);
+    transparencyHint->setStyleSheet(QStringLiteral("color:#757b85; font-size:11px;"));
+    transparencyLayout->addWidget(transparencyHint);
     transparencyLayout->addStretch(1);
 
-    connect(m_effectOpacity, &QSlider::valueChanged, this, [this](int value) {
-        m_effectOpacityValue->setText(QStringLiteral("%1 %").arg(value));
-    });
-    connect(transparencyApply, &QToolButton::clicked, this, [this]() {
-        const QList<VectorItem *> selected = selection();
-        if (selected.isEmpty()) {
-            emit status(QStringLiteral("Выберите объекты."));
-            return;
-        }
-        emit beginEdit();
-        for (VectorItem *item : selected)
-            item->setObjectOpacity(m_effectOpacity->value() / 100.0);
-        emit endEdit();
-        refreshProperties();
-        emit status(QStringLiteral("Прозрачность применена."));
-    });
+    connect(m_effectOpacity, &QSlider::valueChanged, this,
+            &DockPanels::applyOpacityLive);
+    connect(m_effectOpacity, &QSlider::sliderPressed, this,
+            [this]() { beginOpacityEdit(); });
+    connect(m_effectOpacity, &QSlider::sliderReleased, this,
+            [this]() { finishOpacityEdit(); });
 
     // Blend
     auto *blendTab = new QWidget(tabs);
@@ -1205,6 +1228,59 @@ void DockPanels::buildEffectsDocker()
     layout->addWidget(tabs);
 
     createDock(QStringLiteral("Эффекты"), content);
+}
+
+void DockPanels::beginOpacityEdit()
+{
+    if (!m_opacityEditActive) {
+        m_opacityEditActive = true;
+        emit beginEdit();
+    }
+    if (m_opacityTimer)
+        m_opacityTimer->stop();
+}
+
+void DockPanels::finishOpacityEdit()
+{
+    if (m_opacityTimer)
+        m_opacityTimer->stop();
+    if (m_opacityEditActive) {
+        m_opacityEditActive = false;
+        emit endEdit();
+    }
+}
+
+void DockPanels::applyOpacityLive(int percent)
+{
+    if (m_updating)
+        return;
+
+    if (m_opacityValue)
+        m_opacityValue->setText(QStringLiteral("%1 %").arg(percent));
+    if (m_effectOpacityValue)
+        m_effectOpacityValue->setText(QStringLiteral("%1 %").arg(percent));
+
+    if (m_opacitySlider && m_opacitySlider->value() != percent) {
+        const QSignalBlocker blocker(m_opacitySlider);
+        m_opacitySlider->setValue(percent);
+    }
+    if (m_effectOpacity && m_effectOpacity->value() != percent) {
+        const QSignalBlocker blocker(m_effectOpacity);
+        m_effectOpacity->setValue(percent);
+    }
+
+    const QList<VectorItem *> selected = selection();
+    if (selected.isEmpty())
+        return;
+
+    if (!m_opacityEditActive) {
+        m_opacityEditActive = true;
+        emit beginEdit();
+    }
+    for (VectorItem *item : selected)
+        item->setObjectOpacity(percent / 100.0);
+    if (m_opacityTimer)
+        m_opacityTimer->start();
 }
 
 void DockPanels::applyShadow()
@@ -1259,6 +1335,12 @@ void DockPanels::refreshEffects()
         m_effectOpacity->setValue(qRound(object.opacity * 100.0));
         m_effectOpacityValue->setText(
             QStringLiteral("%1 %").arg(m_effectOpacity->value()));
+        if (m_opacitySlider) {
+            const QSignalBlocker blocker(m_opacitySlider);
+            m_opacitySlider->setValue(m_effectOpacity->value());
+            m_opacityValue->setText(
+                QStringLiteral("%1 %").arg(m_effectOpacity->value()));
+        }
     }
 
     m_updating = false;

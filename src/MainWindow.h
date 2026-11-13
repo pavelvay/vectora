@@ -16,6 +16,7 @@ class QDockWidget;
 class QGraphicsScene;
 class QLabel;
 class QStackedWidget;
+class QToolBar;
 class QTreeWidget;
 class QTreeWidgetItem;
 
@@ -24,6 +25,7 @@ class ColorPalette;
 class DockPanels;
 class Ruler;
 class ToolPalette;
+class WelcomeWidget;
 
 class MainWindow : public QMainWindow
 {
@@ -70,6 +72,11 @@ private:
     void onPaletteColor(const QColor &color);
     void applyFillToSelection(const QColor &color);
     void onSelectionChanged(int count);
+    void showWelcome();
+    void showEditor();
+    void loadSampleDocument();
+    QStringList recentFiles() const;
+    void addRecentFile(const QString &path);
     void refreshQuickTransform();
     void applyQuickTransform();
     void copySelection();
@@ -103,6 +110,11 @@ private:
     QDockWidget *m_toolsDock = nullptr;
     QDockWidget *m_paletteDock = nullptr;
     DockPanels *m_dockPanels = nullptr;
+    QStackedWidget *m_centralStack = nullptr;
+    QWidget *m_editorPage = nullptr;
+    WelcomeWidget *m_welcome = nullptr;
+    QToolBar *m_mainToolBar = nullptr;
+    QToolBar *m_propertyBar = nullptr;
 
     QStackedWidget *m_propertyStack = nullptr;
     QComboBox *m_zoomCombo = nullptr;

@@ -67,6 +67,9 @@ private:
     void distribute(bool horizontal);
     void applyShadow();
     void applyText();
+    void beginOpacityEdit();
+    void finishOpacityEdit();
+    void applyOpacityLive(int percent);
 
     QMainWindow *m_host = nullptr;
     CanvasView *m_view = nullptr;
@@ -125,4 +128,6 @@ private:
     bool m_updating = false;
     QTimer *m_colorTimer = nullptr;
     bool m_colorEditActive = false;
+    QTimer *m_opacityTimer = nullptr;
+    bool m_opacityEditActive = false;
 };
