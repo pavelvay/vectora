@@ -1,9 +1,12 @@
 #pragma once
 
 #include <QHash>
+#include <QJsonObject>
 #include <QMainWindow>
 #include <QPointF>
+#include <QVector>
 
+#include "Document.h"
 #include "Tools.h"
 
 class QAction;
@@ -13,6 +16,7 @@ class QGraphicsScene;
 class QLabel;
 class QStackedWidget;
 class QTreeWidget;
+class QTreeWidgetItem;
 
 class CanvasView;
 class ColorPalette;
@@ -26,6 +30,10 @@ class MainWindow : public QMainWindow
 public:
     explicit MainWindow(QWidget *parent = nullptr);
     void setActiveTool(Tool tool);
+    bool openPath(const QString &path);
+
+protected:
+    void closeEvent(QCloseEvent *event) override;
 
 private:
     void createActions();
@@ -37,6 +45,33 @@ private:
     void createStatusBar();
     void populateSample();
     void applyTool(Tool tool);
+
+    void newDocument();
+    void openDocument();
+    void saveDocument();
+    void saveDocumentAs();
+    void importFile();
+    void exportFile();
+    void exportPdf();
+    void printDocument();
+    void applyDocument(const Document &document);
+    Document currentDocument() const;
+    bool maybeSave();
+    void setModified(bool modified);
+    void updateTitle();
+    void beginEdit();
+    void endEdit();
+    void undo();
+    void redo();
+    void resetHistory();
+    void updateHistoryActions();
+    void onPaletteColor(const QColor &color);
+    void applyFillToSelection(const QColor &color);
+    void onSelectionChanged(int count);
+    void rebuildObjectsTree();
+    void copySelection();
+    void cutSelection();
+    void pasteClipboard();
 
     QAction *makeAction(const QString &key, const QString &text,
                         const QKeySequence &shortcut = QKeySequence(),
@@ -68,16 +103,27 @@ private:
     QDockWidget *m_paletteDock = nullptr;
 
     QStackedWidget *m_propertyStack = nullptr;
+    QTreeWidget *m_objectsTree = nullptr;
     QComboBox *m_zoomCombo = nullptr;
     QComboBox *m_toolbarZoomCombo = nullptr;
     QComboBox *m_unitsCombo = nullptr;
     QLabel *m_coordsLabel = nullptr;
     QLabel *m_hintLabel = nullptr;
     QLabel *m_pageLabel = nullptr;
+    QLabel *m_selectionLabel = nullptr;
 
     QPointF m_cursorScenePos;
     int m_zoomPageIndex = 0;
     int m_transformPageIndex = 1;
     int m_textPageIndex = 2;
     int m_paintPageIndex = 3;
+
+    QString m_filePath;
+    bool m_modified = false;
+    bool m_editOpen = false;
+    bool m_restoring = false;
+    QVector<QJsonObject> m_undoStack;
+    QVector<QJsonObject> m_redoStack;
+    QJsonObject m_pendingSnapshot;
+    QVector<VectorObject> m_clipboard;
 };

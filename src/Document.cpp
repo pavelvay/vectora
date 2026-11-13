@@ -1,0 +1,690 @@
+#include "Document.h"
+
+#include <QBuffer>
+#include <QFile>
+#include <QFileInfo>
+#include <QFontMetricsF>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonParseError>
+#include <QPainterPath>
+#include <QSaveFile>
+#include <QTextDocument>
+#include <QtMath>
+
+namespace {
+
+constexpr qreal kPi = 3.14159265358979323846;
+
+QJsonArray pointArray(const QPointF &p)
+{
+    QJsonArray array;
+    array.append(p.x());
+    array.append(p.y());
+    return array;
+}
+
+QPointF pointFromArray(const QJsonArray &array, int offset = 0)
+{
+    if (array.size() < offset + 2)
+        return QPointF();
+    return QPointF(array.at(offset).toDouble(), array.at(offset + 1).toDouble());
+}
+
+QJsonArray encodePath(const QPainterPath &path)
+{
+    QJsonArray out;
+    int i = 0;
+    while (i < path.elementCount()) {
+        const QPainterPath::Element e = path.elementAt(i);
+        QJsonObject command;
+        if (e.type == QPainterPath::MoveToElement) {
+            command.insert(QStringLiteral("c"), QStringLiteral("M"));
+            command.insert(QStringLiteral("p"), pointArray(QPointF(e.x, e.y)));
+            ++i;
+        } else if (e.type == QPainterPath::LineToElement) {
+            command.insert(QStringLiteral("c"), QStringLiteral("L"));
+            command.insert(QStringLiteral("p"), pointArray(QPointF(e.x, e.y)));
+            ++i;
+        } else if (e.type == QPainterPath::CurveToElement) {
+            if (i + 2 >= path.elementCount())
+                break;
+            const QPainterPath::Element c1 = path.elementAt(i);
+            const QPainterPath::Element c2 = path.elementAt(i + 1);
+            const QPainterPath::Element end = path.elementAt(i + 2);
+            QJsonArray points;
+            points.append(c1.x);
+            points.append(c1.y);
+            points.append(c2.x);
+            points.append(c2.y);
+            points.append(end.x);
+            points.append(end.y);
+            command.insert(QStringLiteral("c"), QStringLiteral("C"));
+            command.insert(QStringLiteral("p"), points);
+            i += 3;
+        } else {
+            ++i;
+            continue;
+        }
+        out.append(command);
+    }
+    return out;
+}
+
+QPainterPath decodePath(const QJsonArray &array)
+{
+    QPainterPath path;
+    for (const QJsonValue &value : array) {
+        const QJsonObject command = value.toObject();
+        const QString type = command.value(QStringLiteral("c")).toString();
+        const QJsonArray p = command.value(QStringLiteral("p")).toArray();
+        if (type == QLatin1String("M")) {
+            path.moveTo(pointFromArray(p));
+        } else if (type == QLatin1String("L")) {
+            path.lineTo(pointFromArray(p));
+        } else if (type == QLatin1String("C") && p.size() >= 6) {
+            path.cubicTo(QPointF(p.at(0).toDouble(), p.at(1).toDouble()),
+                         QPointF(p.at(2).toDouble(), p.at(3).toDouble()),
+                         QPointF(p.at(4).toDouble(), p.at(5).toDouble()));
+        }
+    }
+    return path;
+}
+
+QString colorToJson(const QColor &color, bool enabled)
+{
+    return enabled && color.isValid() ? color.name(QColor::HexArgb) : QString();
+}
+
+QColor colorFromJson(const QJsonValue &value, bool *enabled, const QColor &fallback)
+{
+    if (value.isUndefined() || value.isNull() || value.toString().isEmpty()) {
+        if (enabled)
+            *enabled = false;
+        return fallback;
+    }
+    const QColor color(value.toString());
+    if (!color.isValid())
+        return fallback;
+    if (enabled)
+        *enabled = true;
+    return color;
+}
+
+QString xmlEscape(const QString &text)
+{
+    QString out = text;
+    out.replace(QLatin1Char('&'), QStringLiteral("&amp;"));
+    out.replace(QLatin1Char('<'), QStringLiteral("&lt;"));
+    out.replace(QLatin1Char('>'), QStringLiteral("&gt;"));
+    out.replace(QLatin1Char('"'), QStringLiteral("&quot;"));
+    return out;
+}
+
+QString num(qreal value)
+{
+    return QString::number(value, 'f', 2);
+}
+
+QString svgPathData(const QPainterPath &path)
+{
+    QStringList parts;
+    int i = 0;
+    while (i < path.elementCount()) {
+        const QPainterPath::Element e = path.elementAt(i);
+        if (e.type == QPainterPath::MoveToElement) {
+            parts << QStringLiteral("M %1 %2").arg(num(e.x), num(e.y));
+            ++i;
+        } else if (e.type == QPainterPath::LineToElement) {
+            parts << QStringLiteral("L %1 %2").arg(num(e.x), num(e.y));
+            ++i;
+        } else if (e.type == QPainterPath::CurveToElement && i + 2 < path.elementCount()) {
+            const auto c1 = path.elementAt(i);
+            const auto c2 = path.elementAt(i + 1);
+            const auto end = path.elementAt(i + 2);
+            parts << QStringLiteral("C %1 %2 %3 %4 %5 %6")
+                         .arg(num(c1.x), num(c1.y), num(c2.x), num(c2.y),
+                              num(end.x), num(end.y));
+            i += 3;
+        } else {
+            ++i;
+        }
+    }
+    return parts.join(QLatin1Char(' '));
+}
+
+QImage imageFromJson(const QJsonValue &value)
+{
+    const QString base64 = value.toString();
+    if (base64.isEmpty())
+        return QImage();
+    QImage image;
+    image.loadFromData(QByteArray::fromBase64(base64.toLatin1()), "PNG");
+    return image;
+}
+
+QString imageToJson(const QImage &image)
+{
+    if (image.isNull())
+        return QString();
+    QByteArray bytes;
+    QBuffer buffer(&bytes);
+    buffer.open(QIODevice::WriteOnly);
+    image.save(&buffer, "PNG");
+    return QString::fromLatin1(bytes.toBase64());
+}
+
+QPainterPath starPath(qreal outer, qreal inner, int points)
+{
+    QPainterPath path;
+    for (int i = 0; i < points * 2; ++i) {
+        const qreal radius = (i % 2 == 0) ? outer : inner;
+        const qreal angle = -kPi / 2.0 + i * kPi / points;
+        const QPointF p(radius * std::cos(angle), radius * std::sin(angle));
+        if (i == 0)
+            path.moveTo(p);
+        else
+            path.lineTo(p);
+    }
+    path.closeSubpath();
+    return path;
+}
+
+Qt::Alignment textAlignment(int align)
+{
+    Qt::Alignment horizontal = Qt::AlignLeft;
+    if (align == 1)
+        horizontal = Qt::AlignHCenter;
+    else if (align == 2)
+        horizontal = Qt::AlignRight;
+    return horizontal | Qt::AlignTop;
+}
+
+QFont fontFromJson(const QJsonObject &object)
+{
+    QFont font(object.value(QStringLiteral("family")).toString(QStringLiteral("Adwaita Sans")));
+    font.setPixelSize(qMax(1, object.value(QStringLiteral("size")).toInt(18)));
+    font.setBold(object.value(QStringLiteral("bold")).toBool());
+    font.setItalic(object.value(QStringLiteral("italic")).toBool());
+    font.setUnderline(object.value(QStringLiteral("underline")).toBool());
+    return font;
+}
+
+QJsonObject fontToJson(const QFont &font)
+{
+    QJsonObject object;
+    object.insert(QStringLiteral("family"), font.family());
+    object.insert(QStringLiteral("size"),
+                  font.pixelSize() > 0 ? font.pixelSize() : 18);
+    object.insert(QStringLiteral("bold"), font.bold());
+    object.insert(QStringLiteral("italic"), font.italic());
+    object.insert(QStringLiteral("underline"), font.underline());
+    return object;
+}
+
+} // namespace
+
+QString shapeTypeId(ShapeType type)
+{
+    switch (type) {
+    case ShapeType::Rectangle: return QStringLiteral("rect");
+    case ShapeType::Ellipse: return QStringLiteral("ellipse");
+    case ShapeType::Polygon: return QStringLiteral("polygon");
+    case ShapeType::Star: return QStringLiteral("star");
+    case ShapeType::Spiral: return QStringLiteral("spiral");
+    case ShapeType::Line: return QStringLiteral("line");
+    case ShapeType::Bezier: return QStringLiteral("bezier");
+    case ShapeType::Freehand: return QStringLiteral("freehand");
+    case ShapeType::Artistic: return QStringLiteral("artistic");
+    case ShapeType::Text: return QStringLiteral("text");
+    case ShapeType::Image: return QStringLiteral("image");
+    }
+    return QStringLiteral("rect");
+}
+
+ShapeType shapeTypeFromId(const QString &id)
+{
+    if (id == QLatin1String("ellipse"))
+        return ShapeType::Ellipse;
+    if (id == QLatin1String("polygon"))
+        return ShapeType::Polygon;
+    if (id == QLatin1String("star"))
+        return ShapeType::Star;
+    if (id == QLatin1String("spiral"))
+        return ShapeType::Spiral;
+    if (id == QLatin1String("line"))
+        return ShapeType::Line;
+    if (id == QLatin1String("bezier"))
+        return ShapeType::Bezier;
+    if (id == QLatin1String("freehand"))
+        return ShapeType::Freehand;
+    if (id == QLatin1String("artistic"))
+        return ShapeType::Artistic;
+    if (id == QLatin1String("text"))
+        return ShapeType::Text;
+    if (id == QLatin1String("image"))
+        return ShapeType::Image;
+    return ShapeType::Rectangle;
+}
+
+QRectF VectorObject::localBounds() const
+{
+    if (type == ShapeType::Text || type == ShapeType::Image)
+        return textBox;
+    return path.boundingRect();
+}
+
+void Document::clear()
+{
+    objects.clear();
+}
+
+void Document::paintObject(QPainter *painter, const VectorObject &object)
+{
+    painter->save();
+    painter->setOpacity(object.opacity);
+
+    const bool shadow = object.shadow;
+    if (shadow) {
+        painter->save();
+        painter->translate(8.0, 8.0);
+        QColor shadowColor(0, 0, 0, 70);
+        if (!object.path.isEmpty() && object.hasFill) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(shadowColor);
+            painter->drawPath(object.path);
+        }
+        if (object.type == ShapeType::Text && !object.text.isEmpty()) {
+            painter->setPen(shadowColor);
+            painter->setFont(object.font);
+            painter->drawText(object.textBox, textAlignment(object.textAlign)
+                                                  | Qt::TextWordWrap,
+                             object.text);
+        }
+        painter->restore();
+    }
+
+    if (!object.path.isEmpty()) {
+        if (object.hasFill && object.fill.alpha() > 0) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(object.fill);
+            painter->drawPath(object.path);
+        }
+        if (object.hasStroke && object.strokeWidth > 0.0 && object.stroke.alpha() > 0) {
+            QPen pen(object.stroke, object.strokeWidth);
+            pen.setJoinStyle(Qt::RoundJoin);
+            pen.setCapStyle(Qt::RoundCap);
+            painter->setPen(pen);
+            painter->setBrush(Qt::NoBrush);
+            painter->drawPath(object.path);
+        }
+    }
+
+    if (object.type == ShapeType::Text && !object.text.isEmpty()) {
+        painter->setPen(object.fill);
+        painter->setFont(object.font);
+        painter->drawText(object.textBox,
+                          textAlignment(object.textAlign) | Qt::TextWordWrap,
+                          object.text);
+    }
+
+    if (object.type == ShapeType::Image && !object.image.isNull())
+        painter->drawImage(object.textBox, object.image);
+
+    painter->restore();
+}
+
+void Document::render(QPainter *painter) const
+{
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing, true);
+    painter->setRenderHint(QPainter::TextAntialiasing, true);
+    painter->fillRect(QRectF(0.0, 0.0, pageSize.width(), pageSize.height()), Qt::white);
+
+    for (const VectorObject &object : objects) {
+        const QRectF bounds = object.localBounds();
+        painter->save();
+        painter->translate(object.pos);
+        painter->translate(bounds.center());
+        painter->rotate(object.rotation);
+        painter->translate(-bounds.center());
+        paintObject(painter, object);
+        painter->restore();
+    }
+    painter->restore();
+}
+
+QColor interpolateColor(const QColor &from, const QColor &to, qreal t)
+{
+    return QColor::fromRgbF(from.redF() + (to.redF() - from.redF()) * t,
+                            from.greenF() + (to.greenF() - from.greenF()) * t,
+                            from.blueF() + (to.blueF() - from.blueF()) * t,
+                            from.alphaF() + (to.alphaF() - from.alphaF()) * t);
+}
+
+QJsonObject Document::toJson() const
+{
+    QJsonObject root;
+    root.insert(QStringLiteral("format"), QStringLiteral("vectora-document"));
+    root.insert(QStringLiteral("version"), 1);
+
+    QJsonObject page;
+    page.insert(QStringLiteral("width"), pageSize.width());
+    page.insert(QStringLiteral("height"), pageSize.height());
+    root.insert(QStringLiteral("page"), page);
+
+    QJsonArray objectArray;
+    for (const VectorObject &object : objects) {
+        QJsonObject entry;
+        entry.insert(QStringLiteral("type"), shapeTypeId(object.type));
+        entry.insert(QStringLiteral("pos"), pointArray(object.pos));
+        entry.insert(QStringLiteral("rotation"), object.rotation);
+        entry.insert(QStringLiteral("path"), encodePath(object.path));
+        entry.insert(QStringLiteral("fill"), colorToJson(object.fill, object.hasFill));
+        entry.insert(QStringLiteral("stroke"), colorToJson(object.stroke, object.hasStroke));
+        entry.insert(QStringLiteral("strokeWidth"), object.strokeWidth);
+        entry.insert(QStringLiteral("opacity"), object.opacity);
+        entry.insert(QStringLiteral("shadow"), object.shadow);
+
+        if (object.type == ShapeType::Text) {
+            entry.insert(QStringLiteral("text"), object.text);
+            entry.insert(QStringLiteral("font"), fontToJson(object.font));
+            entry.insert(QStringLiteral("textBox"),
+                         QJsonArray{object.textBox.x(), object.textBox.y(),
+                                    object.textBox.width(), object.textBox.height()});
+            entry.insert(QStringLiteral("textAlign"), object.textAlign);
+        }
+        if (object.type == ShapeType::Image) {
+            entry.insert(QStringLiteral("textBox"),
+                         QJsonArray{object.textBox.x(), object.textBox.y(),
+                                    object.textBox.width(), object.textBox.height()});
+            const QString encoded = imageToJson(object.image);
+            if (!encoded.isEmpty())
+                entry.insert(QStringLiteral("image"), encoded);
+        }
+        objectArray.append(entry);
+    }
+    root.insert(QStringLiteral("objects"), objectArray);
+    return root;
+}
+
+Document Document::fromJson(const QJsonObject &json, QString *error)
+{
+    Document document;
+    if (json.value(QStringLiteral("format")).toString() != QLatin1String("vectora-document")) {
+        if (error)
+            *error = QStringLiteral("Это не документ Vectora.");
+        return document;
+    }
+
+    const QJsonObject page = json.value(QStringLiteral("page")).toObject();
+    const qreal width = page.value(QStringLiteral("width")).toDouble(794.0);
+    const qreal height = page.value(QStringLiteral("height")).toDouble(1123.0);
+    if (width > 0.0 && height > 0.0)
+        document.pageSize = QSizeF(width, height);
+
+    const QJsonArray array = json.value(QStringLiteral("objects")).toArray();
+    for (const QJsonValue &value : array) {
+        const QJsonObject entry = value.toObject();
+        VectorObject object;
+        object.type = shapeTypeFromId(entry.value(QStringLiteral("type")).toString());
+        object.pos = pointFromArray(entry.value(QStringLiteral("pos")).toArray());
+        object.rotation = entry.value(QStringLiteral("rotation")).toDouble(0.0);
+        object.path = decodePath(entry.value(QStringLiteral("path")).toArray());
+        object.fill = colorFromJson(entry.value(QStringLiteral("fill")), &object.hasFill,
+                                    QColor("#4f7cc0"));
+        object.stroke = colorFromJson(entry.value(QStringLiteral("stroke")), &object.hasStroke,
+                                      QColor("#1d2127"));
+        object.strokeWidth = entry.value(QStringLiteral("strokeWidth")).toDouble(2.0);
+        object.opacity = entry.value(QStringLiteral("opacity")).toDouble(1.0);
+        object.shadow = entry.value(QStringLiteral("shadow")).toBool(false);
+
+        if (object.type == ShapeType::Text) {
+            object.text = entry.value(QStringLiteral("text")).toString();
+            object.font = fontFromJson(entry.value(QStringLiteral("font")).toObject());
+            const QJsonArray box = entry.value(QStringLiteral("textBox")).toArray();
+            if (box.size() >= 4)
+                object.textBox = QRectF(box.at(0).toDouble(), box.at(1).toDouble(),
+                                        box.at(2).toDouble(), box.at(3).toDouble());
+            object.textAlign = entry.value(QStringLiteral("textAlign")).toInt(0);
+        }
+        if (object.type == ShapeType::Image) {
+            const QJsonArray box = entry.value(QStringLiteral("textBox")).toArray();
+            if (box.size() >= 4)
+                object.textBox = QRectF(box.at(0).toDouble(), box.at(1).toDouble(),
+                                        box.at(2).toDouble(), box.at(3).toDouble());
+            object.image = imageFromJson(entry.value(QStringLiteral("image")));
+        }
+
+        if (!object.path.isEmpty()
+            || object.type == ShapeType::Text
+            || object.type == ShapeType::Image) {
+            document.objects.append(object);
+        }
+    }
+    return document;
+}
+
+bool Document::save(const QString &path, QString *error) const
+{
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        if (error)
+            *error = QStringLiteral("Не удалось открыть файл для записи: %1")
+                         .arg(file.errorString());
+        return false;
+    }
+
+    const QJsonDocument json(toJson());
+    if (file.write(json.toJson(QJsonDocument::Indented)) < 0) {
+        if (error)
+            *error = QStringLiteral("Ошибка записи: %1").arg(file.errorString());
+        return false;
+    }
+    if (!file.commit()) {
+        if (error)
+            *error = QStringLiteral("Не удалось сохранить файл: %1").arg(file.errorString());
+        return false;
+    }
+    return true;
+}
+
+bool Document::load(const QString &path, QString *error)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        if (error)
+            *error = QStringLiteral("Не удалось открыть файл: %1").arg(file.errorString());
+        return false;
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument json = QJsonDocument::fromJson(file.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError) {
+        if (error)
+            *error = QStringLiteral("Файл повреждён: %1").arg(parseError.errorString());
+        return false;
+    }
+    if (!json.isObject()) {
+        if (error)
+            *error = QStringLiteral("Неизвестный формат файла.");
+        return false;
+    }
+
+    const Document loaded = Document::fromJson(json.object(), error);
+    if (error && !error->isEmpty())
+        return false;
+
+    pageSize = loaded.pageSize;
+    objects = loaded.objects;
+    return true;
+}
+
+QString Document::toSvg() const
+{
+    QString svg;
+    svg += QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    svg += QStringLiteral("<svg xmlns=\"http://www.w3.org/2000/svg\" "
+                          "xmlns:xlink=\"http://www.w3.org/1999/xlink\" "
+                          "width=\"%1\" height=\"%2\" viewBox=\"0 0 %1 %2\">\n")
+               .arg(num(pageSize.width()), num(pageSize.height()));
+    svg += QStringLiteral("  <rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n");
+
+    for (const VectorObject &object : objects) {
+        const QRectF bounds = object.localBounds();
+        svg += QStringLiteral("  <g transform=\"translate(%1,%2) rotate(%3 %4 %5)\" opacity=\"%6\">\n")
+                   .arg(num(object.pos.x()), num(object.pos.y()), num(object.rotation),
+                        num(bounds.center().x()), num(bounds.center().y()),
+                        num(object.opacity));
+
+        if (!object.path.isEmpty()) {
+            const QString fill = object.hasFill
+                                     ? object.fill.name(QColor::HexRgb)
+                                     : QStringLiteral("none");
+            const QString stroke = object.hasStroke
+                                       ? object.stroke.name(QColor::HexRgb)
+                                       : QStringLiteral("none");
+            QString opacityAttributes;
+            if (object.hasFill && object.fill.alpha() < 255)
+                opacityAttributes += QStringLiteral(" fill-opacity=\"%1\"")
+                                         .arg(num(object.fill.alphaF()));
+            if (object.hasStroke && object.stroke.alpha() < 255)
+                opacityAttributes += QStringLiteral(" stroke-opacity=\"%1\"")
+                                         .arg(num(object.stroke.alphaF()));
+
+            svg += QStringLiteral("    <path d=\"%1\" fill=\"%2\" stroke=\"%3\" "
+                                  "stroke-width=\"%4\" stroke-linejoin=\"round\" "
+                                  "stroke-linecap=\"round\"%5/>\n")
+                       .arg(svgPathData(object.path), fill, stroke,
+                            num(object.strokeWidth), opacityAttributes);
+        }
+
+        if (object.type == ShapeType::Text && !object.text.isEmpty()) {
+            const QStringList lines = object.text.split(QLatin1Char('\n'));
+            QFontMetricsF metrics(object.font);
+            const qreal lineHeight = metrics.lineSpacing();
+            const qreal ascent = metrics.ascent();
+            const QString anchor = object.textAlign == 1
+                                       ? QStringLiteral("middle")
+                                       : (object.textAlign == 2 ? QStringLiteral("end")
+                                                                : QStringLiteral("start"));
+            const qreal x = object.textAlign == 1
+                                ? object.textBox.width() / 2.0
+                                : (object.textAlign == 2 ? object.textBox.width() : 0.0);
+            for (int i = 0; i < lines.size(); ++i) {
+                QString textOpacity;
+                if (object.fill.alpha() < 255)
+                    textOpacity = QStringLiteral(" fill-opacity=\"%1\"")
+                                      .arg(num(object.fill.alphaF()));
+                svg += QStringLiteral("    <text x=\"%1\" y=\"%2\" fill=\"%3\" "
+                                      "font-family=\"%4\" font-size=\"%5\" "
+                                      "font-weight=\"%6\" text-anchor=\"%7\"%8>%9</text>\n")
+                           .arg(num(x), num(ascent + i * lineHeight),
+                                object.fill.name(QColor::HexRgb),
+                                xmlEscape(object.font.family()),
+                                num(object.font.pixelSize() > 0
+                                        ? object.font.pixelSize()
+                                        : 18.0),
+                                object.font.bold() ? QStringLiteral("bold")
+                                                   : QStringLiteral("normal"),
+                                anchor, textOpacity, xmlEscape(lines.at(i)));
+            }
+        }
+
+        if (object.type == ShapeType::Image && !object.image.isNull()) {
+            svg += QStringLiteral("    <image x=\"0\" y=\"0\" width=\"%1\" height=\"%2\" "
+                                  "xlink:href=\"data:image/png;base64,%3\"/>\n")
+                       .arg(num(object.textBox.width()), num(object.textBox.height()),
+                            imageToJson(object.image));
+        }
+
+        svg += QStringLiteral("  </g>\n");
+    }
+
+    svg += QStringLiteral("</svg>\n");
+    return svg;
+}
+
+Document Document::sample()
+{
+    Document document;
+
+    const auto makeText = [](const QString &text, const QRectF &box, int pixelSize,
+                             const QColor &color, int align, bool bold) {
+        VectorObject object;
+        object.type = ShapeType::Text;
+        object.text = text;
+        object.pos = box.topLeft();
+        object.textBox = QRectF(0.0, 0.0, box.width(), box.height());
+        object.fill = color;
+        object.hasFill = true;
+        object.hasStroke = false;
+        object.textAlign = align;
+        QFont font(QStringLiteral("Adwaita Sans"));
+        font.setPixelSize(pixelSize);
+        font.setBold(bold);
+        object.font = font;
+        return object;
+    };
+
+    document.objects.append(makeText(QStringLiteral("VECTORA"),
+                                     QRectF(0, 96, 794, 76), 58, QColor("#1d2127"), 1, true));
+    document.objects.append(makeText(QStringLiteral("векторный редактор"),
+                                     QRectF(0, 182, 794, 30), 19, QColor("#6b7280"), 1, false));
+
+    const auto makePath = [](ShapeType type, const QPainterPath &path, const QPointF &pos,
+                             const QColor &fill, const QColor &stroke, qreal strokeWidth) {
+        VectorObject object;
+        object.type = type;
+        object.path = path;
+        object.pos = pos;
+        object.fill = fill;
+        object.hasFill = fill.alpha() > 0;
+        object.stroke = stroke;
+        object.hasStroke = stroke.alpha() > 0 && strokeWidth > 0.0;
+        object.strokeWidth = strokeWidth;
+        return object;
+    };
+
+    QPainterPath rule;
+    rule.moveTo(0, 0);
+    rule.lineTo(140, 0);
+    document.objects.append(makePath(ShapeType::Line, rule, QPointF(327, 236),
+                                     QColor(Qt::transparent), QColor("#4f7cc0"), 4));
+
+    QPainterPath card;
+    card.addRoundedRect(QRectF(0, 0, 250, 250), 28, 28);
+    VectorObject cardObject = makePath(ShapeType::Rectangle, card, QPointF(100, 320),
+                                       QColor("#6b8cf0"), QColor(Qt::transparent), 0);
+    cardObject.rotation = -6;
+    document.objects.append(cardObject);
+
+    QPainterPath circle;
+    circle.addEllipse(QRectF(0, 0, 176, 176));
+    document.objects.append(makePath(ShapeType::Ellipse, circle, QPointF(438, 352),
+                                     QColor("#ff8a3d"), QColor(Qt::transparent), 0));
+
+    QPainterPath star = starPath(78, 33, 5);
+    document.objects.append(makePath(ShapeType::Star, star, QPointF(660, 640),
+                                     QColor("#16a3a3"), QColor("#0f7f7f"), 3));
+
+    QPainterPath dot;
+    dot.addEllipse(QRectF(0, 0, 54, 54));
+    document.objects.append(makePath(ShapeType::Ellipse, dot, QPointF(500, 690),
+                                     QColor("#1d2127"), QColor(Qt::transparent), 0));
+
+    QPainterPath curve;
+    curve.moveTo(0, 0);
+    curve.cubicTo(130, -70, 330, 80, 520, -10);
+    document.objects.append(makePath(ShapeType::Bezier, curve, QPointF(128, 742),
+                                     QColor(Qt::transparent), QColor("#e0466b"), 5));
+
+    document.objects.append(makeText(QStringLiteral("Ваш дизайн\nздесь"),
+                                     QRectF(100, 842, 520, 120), 44, QColor("#1d2127"), 0, true));
+    document.objects.append(makeText(QStringLiteral("интерфейс · этап 2"),
+                                     QRectF(102, 990, 320, 26), 15, QColor("#8b929d"), 0, false));
+    document.objects.append(makeText(QStringLiteral("A4 · 210 × 297 мм"),
+                                     QRectF(586, 1064, 180, 26), 15, QColor("#9aa1ac"), 2, false));
+
+    return document;
+}

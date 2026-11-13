@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(Vectora VERSION 0.1.0 LANGUAGES CXX)
+project(Vectora VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,6 +31,12 @@ qt_add_executable(vectora
     src/ColorPalette.h
     src/MainWindow.cpp
     src/MainWindow.h
+    src/Document.cpp
+    src/Document.h
+    src/VectorItem.cpp
+    src/VectorItem.h
+    src/SelfTest.cpp
+    src/SelfTest.h
 )
 
 target_link_libraries(vectora PRIVATE

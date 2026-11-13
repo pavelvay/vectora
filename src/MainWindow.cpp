@@ -4,11 +4,16 @@
 #include <QApplication>
 #include <QAbstractItemView>
 #include <QBrush>
+#include <QCloseEvent>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QDialog>
+#include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFont>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFontComboBox>
 #include <QFormLayout>
 #include <QFrame>
@@ -26,8 +31,14 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPageLayout>
+#include <QPageSize>
 #include <QPainterPath>
+#include <QPdfWriter>
 #include <QPen>
+#include <QPrintDialog>
+#include <QPrinter>
+#include <QSaveFile>
 #include <QScrollBar>
 #include <QShortcut>
 #include <QSignalBlocker>
@@ -39,10 +50,12 @@
 #include <QTextDocument>
 #include <QTextOption>
 #include <QTimer>
+#include <QImage>
 #include <QToolBar>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
+#include <QSvgRenderer>
 #include <QtMath>
 
 #include "CanvasView.h"
@@ -51,6 +64,7 @@
 #include "Ruler.h"
 #include "Theme.h"
 #include "ToolPalette.h"
+#include "VectorItem.h"
 
 namespace {
 
@@ -185,39 +199,62 @@ QAction *MainWindow::action(const QString &key) const
 void MainWindow::createActions()
 {
     // File
-    makeAction(QStringLiteral("new"), QStringLiteral("Создать"),
-               QKeySequence::New, QStringLiteral("Создать новый документ"));
-    makeAction(QStringLiteral("open"), QStringLiteral("Открыть…"),
-               QKeySequence::Open, QStringLiteral("Открыть документ"));
-    makeAction(QStringLiteral("save"), QStringLiteral("Сохранить"),
-               QKeySequence::Save, QStringLiteral("Сохранить документ"));
-    makeAction(QStringLiteral("save-as"), QStringLiteral("Сохранить как…"),
-               QKeySequence::SaveAs, QStringLiteral("Сохранить документ под новым именем"));
-    makeAction(QStringLiteral("import"), QStringLiteral("Импорт…"),
-               QKeySequence(QStringLiteral("Ctrl+I")), QStringLiteral("Импортировать SVG, PDF или изображение"));
-    makeAction(QStringLiteral("export"), QStringLiteral("Экспорт…"),
-               QKeySequence(QStringLiteral("Ctrl+E")), QStringLiteral("Экспортировать документ"));
-    makeAction(QStringLiteral("pdf"), QStringLiteral("Экспорт в PDF…"),
-               QKeySequence(), QStringLiteral("Экспортировать документ в PDF"));
-    makeAction(QStringLiteral("print"), QStringLiteral("Печать…"),
-               QKeySequence::Print, QStringLiteral("Печать документа"));
+    QAction *act = makeAction(QStringLiteral("new"), QStringLiteral("Создать"),
+                              QKeySequence::New, QStringLiteral("Создать новый документ"), false);
+    connect(act, &QAction::triggered, this, &MainWindow::newDocument);
+
+    act = makeAction(QStringLiteral("open"), QStringLiteral("Открыть…"),
+                     QKeySequence::Open, QStringLiteral("Открыть документ"), false);
+    connect(act, &QAction::triggered, this, &MainWindow::openDocument);
+
+    act = makeAction(QStringLiteral("save"), QStringLiteral("Сохранить"),
+                     QKeySequence::Save, QStringLiteral("Сохранить документ"), false);
+    connect(act, &QAction::triggered, this, &MainWindow::saveDocument);
+
+    act = makeAction(QStringLiteral("save-as"), QStringLiteral("Сохранить как…"),
+                     QKeySequence::SaveAs, QStringLiteral("Сохранить документ под новым именем"), false);
+    connect(act, &QAction::triggered, this, &MainWindow::saveDocumentAs);
+
+    act = makeAction(QStringLiteral("import"), QStringLiteral("Импорт…"),
+                     QKeySequence(QStringLiteral("Ctrl+I")),
+                     QStringLiteral("Импортировать SVG или изображение"), false);
+    connect(act, &QAction::triggered, this, &MainWindow::importFile);
+
+    act = makeAction(QStringLiteral("export"), QStringLiteral("Экспорт…"),
+                     QKeySequence(QStringLiteral("Ctrl+E")),
+                     QStringLiteral("Экспортировать в PNG или SVG"), false);
+    connect(act, &QAction::triggered, this, &MainWindow::exportFile);
+
+    act = makeAction(QStringLiteral("pdf"), QStringLiteral("Экспорт в PDF…"),
+                     QKeySequence(), QStringLiteral("Экспортировать документ в PDF"), false);
+    connect(act, &QAction::triggered, this, &MainWindow::exportPdf);
+
+    act = makeAction(QStringLiteral("print"), QStringLiteral("Печать…"),
+                     QKeySequence::Print, QStringLiteral("Печать документа"), false);
+    connect(act, &QAction::triggered, this, &MainWindow::printDocument);
+
     auto *quit = makeAction(QStringLiteral("quit"), QStringLiteral("Выход"),
                             QKeySequence::Quit, QStringLiteral("Закрыть приложение"), false);
-    connect(quit, &QAction::triggered, qApp, &QApplication::quit);
+    connect(quit, &QAction::triggered, this, &QWidget::close);
 
     // Edit
-    makeAction(QStringLiteral("undo"), QStringLiteral("Отменить"),
-               QKeySequence::Undo, QStringLiteral("Отменить последнее действие"));
-    makeAction(QStringLiteral("redo"), QStringLiteral("Повторить"),
-               QKeySequence::Redo, QStringLiteral("Повторить отменённое действие"));
+    act = makeAction(QStringLiteral("undo"), QStringLiteral("Отменить"),
+                     QKeySequence::Undo, QStringLiteral("Отменить последнее действие"), false);
+    connect(act, &QAction::triggered, this, &MainWindow::undo);
+    act->setEnabled(false);
+
+    act = makeAction(QStringLiteral("redo"), QStringLiteral("Повторить"),
+                     QKeySequence::Redo, QStringLiteral("Повторить отменённое действие"), false);
+    connect(act, &QAction::triggered, this, &MainWindow::redo);
+    act->setEnabled(false);
     makeAction(QStringLiteral("cut"), QStringLiteral("Вырезать"),
-               QKeySequence::Cut, QStringLiteral("Вырезать выделенные объекты"));
+               QKeySequence::Cut, QStringLiteral("Вырезать выделенные объекты"), false);
     makeAction(QStringLiteral("copy"), QStringLiteral("Копировать"),
-               QKeySequence::Copy, QStringLiteral("Копировать выделенные объекты"));
+               QKeySequence::Copy, QStringLiteral("Копировать выделенные объекты"), false);
     makeAction(QStringLiteral("paste"), QStringLiteral("Вставить"),
-               QKeySequence::Paste, QStringLiteral("Вставить объекты из буфера"));
+               QKeySequence::Paste, QStringLiteral("Вставить объекты из буфера"), false);
     makeAction(QStringLiteral("duplicate"), QStringLiteral("Дублировать"),
-               QKeySequence(QStringLiteral("Ctrl+D")), QStringLiteral("Создать копию выделения"));
+               QKeySequence(QStringLiteral("Ctrl+D")), QStringLiteral("Создать копию выделения"), false);
     makeAction(QStringLiteral("delete"), QStringLiteral("Удалить"),
                QKeySequence::Delete, QStringLiteral("Удалить выделенные объекты"), false);
     makeAction(QStringLiteral("select-all"), QStringLiteral("Выделить всё"),
@@ -235,7 +272,7 @@ void MainWindow::createActions()
     makeAction(QStringLiteral("fit"), QStringLiteral("По размеру страницы"),
                QKeySequence(QStringLiteral("Ctrl+0")), QStringLiteral("Вписать страницу в окно"), false);
     makeAction(QStringLiteral("zoom-selection"), QStringLiteral("По выделению"),
-               QKeySequence(QStringLiteral("Ctrl+2")), QStringLiteral("Приблизить выделенные объекты"));
+               QKeySequence(QStringLiteral("Ctrl+2")), QStringLiteral("Приблизить выделенные объекты"), false);
     makeAction(QStringLiteral("rulers"), QStringLiteral("Линейки"),
                QKeySequence(QStringLiteral("Ctrl+R")), QStringLiteral("Показать или скрыть линейки"));
     makeAction(QStringLiteral("guides"), QStringLiteral("Направляющие"),
@@ -338,6 +375,29 @@ void MainWindow::createActions()
             &MainWindow::selectAllObjects);
     connect(action(QStringLiteral("delete")), &QAction::triggered, this,
             &MainWindow::deleteSelection);
+    connect(action(QStringLiteral("zoom-selection")), &QAction::triggered, this,
+            [this]() { m_view->zoomToSelection(); });
+    connect(action(QStringLiteral("copy")), &QAction::triggered, this,
+            &MainWindow::copySelection);
+    connect(action(QStringLiteral("cut")), &QAction::triggered, this,
+            &MainWindow::cutSelection);
+    connect(action(QStringLiteral("paste")), &QAction::triggered, this,
+            &MainWindow::pasteClipboard);
+    connect(action(QStringLiteral("duplicate")), &QAction::triggered, this, [this]() {
+        const QList<VectorItem *> selected = m_view->selectedVectorItems();
+        if (selected.isEmpty()) {
+            statusBar()->showMessage(QStringLiteral("Нет объектов для дублирования."), 3000);
+            return;
+        }
+        beginEdit();
+        for (VectorItem *item : selected) {
+            VectorObject copy = item->object();
+            copy.pos += QPointF(16.0, 16.0);
+            VectorItem *added = m_view->addVectorObject(copy, false, false);
+            added->setSelected(true);
+        }
+        endEdit();
+    });
     connect(action(QStringLiteral("shortcuts")), &QAction::triggered, this,
             &MainWindow::showShortcuts);
     connect(action(QStringLiteral("about")), &QAction::triggered, this,
@@ -526,6 +586,16 @@ void MainWindow::createCanvas()
     connect(m_view, &CanvasView::statusHint, this, [this](const QString &text) {
         statusBar()->showMessage(text, 5000);
     });
+    connect(m_view, &CanvasView::beginEdit, this, &MainWindow::beginEdit);
+    connect(m_view, &CanvasView::endEdit, this, &MainWindow::endEdit);
+    connect(m_view, &CanvasView::selectionChanged, this,
+            &MainWindow::onSelectionChanged);
+    connect(m_view, &CanvasView::colorPicked, this, [this](const QColor &color) {
+        m_view->setFillColor(color);
+        m_toolPalette->setFillColor(color);
+        statusBar()->showMessage(
+            QStringLiteral("Пипетка: %1").arg(color.name().toUpper()), 5000);
+    });
 
     connect(m_view->horizontalScrollBar(), &QScrollBar::valueChanged, m_hRuler,
             qOverload<>(&QWidget::update));
@@ -587,34 +657,27 @@ void MainWindow::createDocks()
     }
     layerBarLayout->addStretch(1);
 
-    auto *tree = new QTreeWidget(objectsHost);
-    tree->setHeaderHidden(true);
-    tree->setIndentation(14);
-    tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_objectsTree = new QTreeWidget(objectsHost);
+    m_objectsTree->setHeaderHidden(true);
+    m_objectsTree->setIndentation(14);
+    m_objectsTree->setSelectionMode(QAbstractItemView::SingleSelection);
 
-    auto *layer1 = new QTreeWidgetItem(tree, {QStringLiteral("Слой 1")});
-    QFont layerFont = tree->font();
-    layerFont.setBold(true);
-    layer1->setFont(0, layerFont);
-    layer1->setExpanded(true);
-
-    const QStringList objects = {
-        QStringLiteral("Текст: VECTORA"),
-        QStringLiteral("Текст: векторный редактор"),
-        QStringLiteral("Прямоугольник"),
-        QStringLiteral("Эллипс"),
-        QStringLiteral("Звезда"),
-        QStringLiteral("Кривая"),
-        QStringLiteral("Текст: Ваш дизайн здесь"),
-    };
-    for (const QString &name : objects)
-        new QTreeWidgetItem(layer1, {name});
-
-    auto *layer2 = new QTreeWidgetItem(tree, {QStringLiteral("Слой 2")});
-    layer2->setFont(0, layerFont);
+    connect(m_objectsTree, &QTreeWidget::itemSelectionChanged, this, [this]() {
+        const QList<QTreeWidgetItem *> selected = m_objectsTree->selectedItems();
+        if (selected.isEmpty())
+            return;
+        const int index = selected.first()->data(0, Qt::UserRole).toInt();
+        const QList<VectorItem *> items = m_view->vectorItems();
+        if (index >= 0 && index < items.size()) {
+            if (m_restoring)
+                return;
+            m_view->scene()->clearSelection();
+            items.at(index)->setSelected(true);
+        }
+    });
 
     objectsLayout->addWidget(layerBar);
-    objectsLayout->addWidget(tree, 1);
+    objectsLayout->addWidget(m_objectsTree, 1);
 
     m_objectsDock->setWidget(objectsHost);
     addDockWidget(Qt::RightDockWidgetArea, m_objectsDock);
@@ -667,7 +730,7 @@ void MainWindow::createDocks()
     propsLayout->addLayout(opacityRow);
 
     auto *hint = new QLabel(QStringLiteral(
-        "Значения справочные: редактирование объектов появится на следующем этапе."),
+        "Панель показывает пример. Редактирование свойств — следующий этап."),
         propsHost);
     hint->setWordWrap(true);
     hint->setStyleSheet(QStringLiteral("color:#757b85; font-size:11px;"));
@@ -692,6 +755,38 @@ void MainWindow::createDocks()
     connect(m_palette, &ColorPalette::statusHint, this, [this](const QString &text) {
         statusBar()->showMessage(text, 4000);
     });
+    connect(m_palette, &ColorPalette::colorPicked, this,
+            [this](const QColor &color, const QString &name) {
+                Q_UNUSED(name)
+                onPaletteColor(color);
+            });
+
+    connect(m_toolPalette, &ToolPalette::fillColorClicked, this, [this]() {
+        const QColor color = QColorDialog::getColor(m_view->fillColor(), this,
+                                                    QStringLiteral("Цвет заливки"));
+        if (color.isValid())
+            onPaletteColor(color);
+    });
+    connect(m_toolPalette, &ToolPalette::strokeColorClicked, this, [this]() {
+        const QColor color = QColorDialog::getColor(m_view->strokeColor(), this,
+                                                    QStringLiteral("Цвет обводки"));
+        if (!color.isValid())
+            return;
+        m_view->setStrokeColor(color);
+        m_toolPalette->setStrokeColor(color);
+        const QList<VectorItem *> selected = m_view->selectedVectorItems();
+        if (!selected.isEmpty()) {
+            beginEdit();
+            for (VectorItem *item : selected)
+                item->setStrokeColor(color);
+            endEdit();
+        }
+        statusBar()->showMessage(
+            QStringLiteral("Цвет обводки: %1").arg(color.name().toUpper()), 4000);
+    });
+
+    m_toolPalette->setFillColor(m_view->fillColor());
+    m_toolPalette->setStrokeColor(m_view->strokeColor());
 }
 
 // ---------------------------------------------------------------------------
@@ -949,6 +1044,10 @@ void MainWindow::createStatusBar()
     m_coordsLabel->setStyleSheet(QStringLiteral("color:#8b929d; padding:0 10px;"));
     statusBar()->addPermanentWidget(m_coordsLabel);
 
+    m_selectionLabel = new QLabel(QStringLiteral("Выделено: 0"), this);
+    m_selectionLabel->setStyleSheet(QStringLiteral("color:#8b929d; padding:0 10px;"));
+    statusBar()->addPermanentWidget(m_selectionLabel);
+
     m_pageLabel = new QLabel(QStringLiteral("Страница 1 из 1"), this);
     m_pageLabel->setStyleSheet(QStringLiteral("color:#8b929d; padding:0 10px;"));
     statusBar()->addPermanentWidget(m_pageLabel);
@@ -988,91 +1087,11 @@ void MainWindow::createStatusBar()
 
 void MainWindow::populateSample()
 {
-    QFont titleFont(QStringLiteral("Adwaita Sans"));
-    titleFont.setPixelSize(58);
-    titleFont.setWeight(QFont::Bold);
-    titleFont.setLetterSpacing(QFont::AbsoluteSpacing, 11.0);
-
-    auto *title = m_scene->addText(QStringLiteral("VECTORA"), titleFont);
-    title->setDefaultTextColor(QColor(0x1d, 0x21, 0x27));
-    title->setTextWidth(794);
-    title->setPos(0, 96);
-    {
-        QTextOption option;
-        option.setAlignment(Qt::AlignHCenter);
-        title->document()->setDefaultTextOption(option);
-    }
-
-    QFont subtitleFont(QStringLiteral("Adwaita Sans"));
-    subtitleFont.setPixelSize(19);
-    subtitleFont.setLetterSpacing(QFont::AbsoluteSpacing, 4.0);
-
-    auto *subtitle = m_scene->addText(QStringLiteral("векторный редактор"), subtitleFont);
-    subtitle->setDefaultTextColor(QColor(0x6b, 0x72, 0x80));
-    subtitle->setTextWidth(794);
-    subtitle->setPos(0, 182);
-    {
-        QTextOption option;
-        option.setAlignment(Qt::AlignHCenter);
-        subtitle->document()->setDefaultTextOption(option);
-    }
-
-    auto *rule = m_scene->addLine(0, 0, 140, 0, QPen(QColor(0x4f, 0x7c, 0xc0), 4.0));
-    rule->setPos(327, 236);
-
-    // Gradient card.
-    QPainterPath cardPath;
-    cardPath.addRoundedRect(QRectF(0, 0, 250, 250), 28, 28);
-    QLinearGradient cardGradient(0, 0, 250, 250);
-    cardGradient.setColorAt(0.0, QColor("#5b8def"));
-    cardGradient.setColorAt(1.0, QColor("#8a5cf6"));
-    auto *card = m_scene->addPath(cardPath, Qt::NoPen, QBrush(cardGradient));
-    card->setPos(100, 320);
-    card->setRotation(-6);
-    card->setTransformOriginPoint(125, 125);
-
-    auto *circle = m_scene->addEllipse(QRectF(0, 0, 176, 176), Qt::NoPen,
-                                       QBrush(QColor("#ff8a3d")));
-    circle->setPos(438, 352);
-    circle->setOpacity(0.94);
-
-    auto *dot = m_scene->addEllipse(QRectF(0, 0, 54, 54), Qt::NoPen,
-                                    QBrush(QColor(0x1d, 0x21, 0x27)));
-    dot->setPos(500, 690);
-
-    QPainterPath star = starShape(QPointF(0, 0), 78, 33);
-    star.translate(660, 640);
-    auto *starItem = m_scene->addPath(star, QPen(QColor("#0f7f7f"), 3.0),
-                                      QBrush(QColor("#16a3a3")));
-    starItem->setOpacity(0.92);
-
-    QPainterPath curve;
-    curve.moveTo(0, 0);
-    curve.cubicTo(130, -70, 330, 80, 520, -10);
-    auto *curveItem = m_scene->addPath(curve, QPen(QColor("#e0466b"), 5.0, Qt::SolidLine,
-                                                   Qt::RoundCap, Qt::RoundJoin));
-    curveItem->setPos(128, 742);
-
-    QFont headlineFont(QStringLiteral("Adwaita Sans"));
-    headlineFont.setPixelSize(44);
-    headlineFont.setWeight(QFont::Bold);
-
-    auto *headline = m_scene->addText(QStringLiteral("Ваш дизайн\nздесь"), headlineFont);
-    headline->setDefaultTextColor(QColor(0x1d, 0x21, 0x27));
-    headline->setTextWidth(520);
-    headline->setPos(100, 842);
-
-    QFont captionFont(QStringLiteral("Adwaita Sans"));
-    captionFont.setPixelSize(15);
-    captionFont.setLetterSpacing(QFont::AbsoluteSpacing, 1.5);
-
-    auto *caption = m_scene->addText(QStringLiteral("интерфейс · этап 1"), captionFont);
-    caption->setDefaultTextColor(QColor(0x8b, 0x92, 0x9d));
-    caption->setPos(102, 990);
-
-    auto *format = m_scene->addText(QStringLiteral("A4 · 210 × 297 мм"), captionFont);
-    format->setDefaultTextColor(QColor(0x9a, 0xa1, 0xac));
-    format->setPos(586, 1064);
+    applyDocument(Document::sample());
+    m_filePath.clear();
+    m_modified = false;
+    updateTitle();
+    resetHistory();
 }
 
 // ---------------------------------------------------------------------------
@@ -1116,7 +1135,6 @@ void MainWindow::applyTool(Tool tool)
     }
     m_propertyStack->setCurrentIndex(page);
 
-    setWindowTitle(QStringLiteral("Vectora — %1").arg(info->name));
     m_hintLabel->setText(QStringLiteral("%1 · %2").arg(info->name, info->hint));
     statusBar()->showMessage(QStringLiteral("Инструмент: %1 (%2)")
                                  .arg(info->name, info->shortcut),
@@ -1188,24 +1206,578 @@ void MainWindow::updateCoordinates(const QPointF &scenePos)
 
 void MainWindow::selectAllObjects()
 {
-    const QList<QGraphicsItem *> items = m_scene->items();
-    for (QGraphicsItem *item : items)
-        item->setSelected(true);
-    statusBar()->showMessage(QStringLiteral("Выделено объектов: %1").arg(items.size()), 3000);
+    m_view->selectAllObjects();
+    statusBar()->showMessage(QStringLiteral("Выделены все объекты."), 3000);
 }
 
 void MainWindow::deleteSelection()
 {
-    const QList<QGraphicsItem *> selected = m_scene->selectedItems();
-    if (selected.isEmpty()) {
-        statusBar()->showMessage(QStringLiteral("Нечего удалять: нет выделенных объектов"), 3000);
+    m_view->deleteSelectedObjects();
+}
+
+// ---------------------------------------------------------------------------
+// Document and file handling
+// ---------------------------------------------------------------------------
+
+Document MainWindow::currentDocument() const
+{
+    Document document;
+    if (!m_view)
+        return document;
+    document.pageSize = m_view->pageSize();
+    document.objects = m_view->objects();
+    return document;
+}
+
+void MainWindow::applyDocument(const Document &document)
+{
+    m_restoring = true;
+    m_view->setDocument(document);
+    m_restoring = false;
+    rebuildObjectsTree();
+    updateHistoryActions();
+}
+
+void MainWindow::setModified(bool modified)
+{
+    if (m_modified == modified)
+        return;
+    m_modified = modified;
+    updateTitle();
+}
+
+void MainWindow::updateTitle()
+{
+    QString name = QStringLiteral("Без имени");
+    if (!m_filePath.isEmpty())
+        name = QFileInfo(m_filePath).fileName();
+    setWindowTitle(QStringLiteral("%1%2 — Vectora")
+                       .arg(name, m_modified ? QStringLiteral(" *") : QString()));
+}
+
+bool MainWindow::maybeSave()
+{
+    if (!m_modified || m_view->objects().isEmpty())
+        return true;
+
+    const QMessageBox::StandardButton answer = QMessageBox::warning(
+        this, QStringLiteral("Несохранённые изменения"),
+        QStringLiteral("Документ изменён. Сохранить изменения?"),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+        QMessageBox::Save);
+
+    if (answer == QMessageBox::Cancel)
+        return false;
+    if (answer == QMessageBox::Save) {
+        saveDocument();
+        return !m_modified;
+    }
+    return true;
+}
+
+void MainWindow::newDocument()
+{
+    if (!maybeSave())
+        return;
+    applyDocument(Document());
+    m_filePath.clear();
+    m_modified = false;
+    resetHistory();
+    updateTitle();
+    m_view->fitPage();
+    statusBar()->showMessage(QStringLiteral("Создан новый документ A4."), 4000);
+}
+
+void MainWindow::openDocument()
+{
+    if (!maybeSave())
+        return;
+
+    QString directory = m_filePath.isEmpty() ? QDir::homePath()
+                                             : QFileInfo(m_filePath).absolutePath();
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Открыть документ"), directory,
+        QStringLiteral("Документы Vectora (*.vct);;Все файлы (*)"));
+    if (path.isEmpty())
+        return;
+
+    if (openPath(path)) {
+        statusBar()->showMessage(
+            QStringLiteral("Открыт документ: %1").arg(QFileInfo(path).fileName()), 5000);
+    }
+}
+
+bool MainWindow::openPath(const QString &path)
+{
+    Document document;
+    QString error;
+    if (!document.load(path, &error)) {
+        QMessageBox::critical(this, QStringLiteral("Ошибка открытия"), error);
+        return false;
+    }
+
+    applyDocument(document);
+    m_filePath = path;
+    m_modified = false;
+    resetHistory();
+    updateTitle();
+    m_view->fitPage();
+    return true;
+}
+
+void MainWindow::saveDocument()
+{
+    if (m_filePath.isEmpty()) {
+        saveDocumentAs();
         return;
     }
-    for (QGraphicsItem *item : selected) {
-        m_scene->removeItem(item);
-        delete item;
+
+    QString error;
+    if (!currentDocument().save(m_filePath, &error)) {
+        QMessageBox::critical(this, QStringLiteral("Ошибка сохранения"), error);
+        return;
     }
-    statusBar()->showMessage(QStringLiteral("Удалено объектов: %1").arg(selected.size()), 3000);
+
+    m_modified = false;
+    updateTitle();
+    statusBar()->showMessage(
+        QStringLiteral("Сохранено: %1").arg(QFileInfo(m_filePath).fileName()), 4000);
+}
+
+void MainWindow::saveDocumentAs()
+{
+    QString suggested = m_filePath;
+    if (suggested.isEmpty())
+        suggested = QDir::homePath() + QStringLiteral("/без имени.vct");
+
+    QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Сохранить как"), suggested,
+        QStringLiteral("Документы Vectora (*.vct)"));
+    if (path.isEmpty())
+        return;
+    if (!path.endsWith(QLatin1String(".vct"), Qt::CaseInsensitive))
+        path += QStringLiteral(".vct");
+
+    QString error;
+    if (!currentDocument().save(path, &error)) {
+        QMessageBox::critical(this, QStringLiteral("Ошибка сохранения"), error);
+        return;
+    }
+
+    m_filePath = path;
+    m_modified = false;
+    updateTitle();
+    statusBar()->showMessage(
+        QStringLiteral("Сохранено: %1").arg(QFileInfo(path).fileName()), 4000);
+}
+
+void MainWindow::importFile()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Импорт"), QDir::homePath(),
+        QStringLiteral("Изображения и SVG (*.png *.jpg *.jpeg *.bmp *.svg);;"
+                       "Все файлы (*)"));
+    if (path.isEmpty())
+        return;
+
+    QImage image;
+    if (path.endsWith(QLatin1String(".svg"), Qt::CaseInsensitive)) {
+        QSvgRenderer renderer(path);
+        if (!renderer.isValid()) {
+            QMessageBox::critical(this, QStringLiteral("Импорт"),
+                                  QStringLiteral("Не удалось прочитать SVG-файл."));
+            return;
+        }
+        QSize size = renderer.defaultSize();
+        if (size.isEmpty())
+            size = QSize(600, 600);
+        image = QImage(size * 2, QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::transparent);
+        QPainter painter(&image);
+        renderer.render(&painter);
+    } else {
+        image.load(path);
+    }
+
+    if (image.isNull()) {
+        QMessageBox::critical(this, QStringLiteral("Импорт"),
+                              QStringLiteral("Не удалось прочитать изображение."));
+        return;
+    }
+
+    const QSizeF page = m_view->pageSize();
+    QSizeF size = image.size();
+    const qreal maxWidth = page.width() * 0.8;
+    const qreal maxHeight = page.height() * 0.8;
+    const qreal scale = qMin<qreal>(1.0, qMin(maxWidth / size.width(),
+                                              maxHeight / size.height()));
+    size *= scale;
+
+    VectorObject object;
+    object.type = ShapeType::Image;
+    object.image = image;
+    object.textBox = QRectF(0.0, 0.0, size.width(), size.height());
+    object.pos = QPointF((page.width() - size.width()) / 2.0,
+                         (page.height() - size.height()) / 2.0);
+    object.hasFill = false;
+    object.hasStroke = false;
+
+    beginEdit();
+    m_view->addVectorObject(object);
+    endEdit();
+    statusBar()->showMessage(
+        QStringLiteral("Импортировано: %1").arg(QFileInfo(path).fileName()), 5000);
+}
+
+void MainWindow::exportFile()
+{
+    QString suggested = m_filePath;
+    if (suggested.isEmpty())
+        suggested = QDir::homePath() + QStringLiteral("/без имени.png");
+    else
+        suggested = QFileInfo(suggested).absolutePath() + QLatin1Char('/')
+                    + QFileInfo(suggested).completeBaseName() + QStringLiteral(".png");
+
+    QString selectedFilter;
+    QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Экспорт"), suggested,
+        QStringLiteral("PNG-изображение (*.png);;SVG-вектор (*.svg)"), &selectedFilter);
+    if (path.isEmpty())
+        return;
+    if (!path.contains(QLatin1Char('.'))) {
+        if (selectedFilter.contains(QLatin1String("SVG")))
+            path += QStringLiteral(".svg");
+        else
+            path += QStringLiteral(".png");
+    }
+
+    const Document document = currentDocument();
+
+    if (path.endsWith(QLatin1String(".svg"), Qt::CaseInsensitive)) {
+        QSaveFile file(path);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QMessageBox::critical(this, QStringLiteral("Экспорт"),
+                                  QStringLiteral("Не удалось открыть файл: %1")
+                                      .arg(file.errorString()));
+            return;
+        }
+        file.write(document.toSvg().toUtf8());
+        if (!file.commit()) {
+            QMessageBox::critical(this, QStringLiteral("Экспорт"),
+                                  QStringLiteral("Не удалось сохранить файл: %1")
+                                      .arg(file.errorString()));
+            return;
+        }
+    } else {
+        constexpr qreal scale = 2.0;
+        QImage image(QSize(qRound(document.pageSize.width() * scale),
+                           qRound(document.pageSize.height() * scale)),
+                     QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::white);
+        QPainter painter(&image);
+        painter.scale(scale, scale);
+        document.render(&painter);
+        painter.end();
+        if (!image.save(path)) {
+            QMessageBox::critical(this, QStringLiteral("Экспорт"),
+                                  QStringLiteral("Не удалось сохранить PNG."));
+            return;
+        }
+    }
+
+    statusBar()->showMessage(
+        QStringLiteral("Экспортировано: %1").arg(QFileInfo(path).fileName()), 5000);
+}
+
+void MainWindow::exportPdf()
+{
+    QString suggested = m_filePath;
+    if (suggested.isEmpty())
+        suggested = QDir::homePath() + QStringLiteral("/без имени.pdf");
+    else
+        suggested = QFileInfo(suggested).absolutePath() + QLatin1Char('/')
+                    + QFileInfo(suggested).completeBaseName() + QStringLiteral(".pdf");
+
+    QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Экспорт в PDF"), suggested,
+        QStringLiteral("PDF-документ (*.pdf)"));
+    if (path.isEmpty())
+        return;
+    if (!path.endsWith(QLatin1String(".pdf"), Qt::CaseInsensitive))
+        path += QStringLiteral(".pdf");
+
+    const Document document = currentDocument();
+    QPdfWriter writer(path);
+    writer.setPageSize(QPageSize(QPageSize::A4));
+    writer.setResolution(96);
+    writer.setPageMargins(QMarginsF(0, 0, 0, 0));
+
+    QPainter painter(&writer);
+    const qreal scaleX = writer.width() / document.pageSize.width();
+    const qreal scaleY = writer.height() / document.pageSize.height();
+    painter.scale(scaleX, scaleY);
+    document.render(&painter);
+    painter.end();
+
+    statusBar()->showMessage(
+        QStringLiteral("PDF сохранён: %1").arg(QFileInfo(path).fileName()), 5000);
+}
+
+void MainWindow::printDocument()
+{
+    const Document document = currentDocument();
+    QPrinter printer(QPrinter::HighResolution);
+    printer.setDocName(m_filePath.isEmpty() ? QStringLiteral("Vectora")
+                                            : QFileInfo(m_filePath).fileName());
+
+    QPrintDialog dialog(&printer, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    QPainter painter;
+    if (!painter.begin(&printer)) {
+        QMessageBox::critical(this, QStringLiteral("Печать"),
+                              QStringLiteral("Не удалось начать печать."));
+        return;
+    }
+
+    const QRectF page = printer.pageRect(QPrinter::DevicePixel);
+    const qreal scale = qMin(page.width() / document.pageSize.width(),
+                             page.height() / document.pageSize.height());
+    painter.translate(page.topLeft());
+    painter.scale(scale, scale);
+    document.render(&painter);
+    painter.end();
+}
+
+// ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
+
+void MainWindow::beginEdit()
+{
+    if (m_restoring || m_editOpen || !m_view)
+        return;
+    m_editOpen = true;
+    m_pendingSnapshot = currentDocument().toJson();
+}
+
+void MainWindow::endEdit()
+{
+    if (m_restoring) {
+        m_editOpen = false;
+        return;
+    }
+    if (!m_editOpen)
+        return;
+    m_editOpen = false;
+
+    const QJsonObject current = currentDocument().toJson();
+    if (current == m_pendingSnapshot)
+        return;
+
+    m_undoStack.append(m_pendingSnapshot);
+    if (m_undoStack.size() > 100)
+        m_undoStack.removeFirst();
+    m_redoStack.clear();
+
+    m_modified = true;
+    updateTitle();
+    rebuildObjectsTree();
+    updateHistoryActions();
+}
+
+void MainWindow::undo()
+{
+    if (m_undoStack.isEmpty())
+        return;
+
+    const QJsonObject previous = m_undoStack.takeLast();
+    m_redoStack.append(currentDocument().toJson());
+
+    QString error;
+    const Document document = Document::fromJson(previous, &error);
+    m_restoring = true;
+    m_view->setDocument(document);
+    m_restoring = false;
+
+    m_modified = true;
+    updateTitle();
+    rebuildObjectsTree();
+    updateHistoryActions();
+    statusBar()->showMessage(QStringLiteral("Действие отменено."), 2500);
+}
+
+void MainWindow::redo()
+{
+    if (m_redoStack.isEmpty())
+        return;
+
+    const QJsonObject next = m_redoStack.takeLast();
+    m_undoStack.append(currentDocument().toJson());
+
+    QString error;
+    const Document document = Document::fromJson(next, &error);
+    m_restoring = true;
+    m_view->setDocument(document);
+    m_restoring = false;
+
+    m_modified = true;
+    updateTitle();
+    rebuildObjectsTree();
+    updateHistoryActions();
+    statusBar()->showMessage(QStringLiteral("Действие повторено."), 2500);
+}
+
+void MainWindow::resetHistory()
+{
+    m_undoStack.clear();
+    m_redoStack.clear();
+    m_editOpen = false;
+    updateHistoryActions();
+}
+
+void MainWindow::updateHistoryActions()
+{
+    QAction *undoAction = action(QStringLiteral("undo"));
+    QAction *redoAction = action(QStringLiteral("redo"));
+    if (undoAction)
+        undoAction->setEnabled(!m_undoStack.isEmpty());
+    if (redoAction)
+        redoAction->setEnabled(!m_redoStack.isEmpty());
+}
+
+// ---------------------------------------------------------------------------
+// Colour helpers
+// ---------------------------------------------------------------------------
+
+void MainWindow::rebuildObjectsTree()
+{
+    if (!m_objectsTree || !m_view)
+        return;
+
+    const QList<VectorItem *> items = m_view->vectorItems();
+    const QSignalBlocker blocker(m_objectsTree);
+    m_objectsTree->clear();
+
+    auto *layer = new QTreeWidgetItem(m_objectsTree, {QStringLiteral("Слой 1")});
+    QFont layerFont = m_objectsTree->font();
+    layerFont.setBold(true);
+    layer->setFont(0, layerFont);
+    layer->setExpanded(true);
+
+    for (int i = items.size() - 1; i >= 0; --i) {
+        const VectorObject object = items.at(i)->object();
+        QString name;
+        switch (object.type) {
+        case ShapeType::Rectangle: name = QStringLiteral("Прямоугольник"); break;
+        case ShapeType::Ellipse: name = QStringLiteral("Эллипс"); break;
+        case ShapeType::Polygon: name = QStringLiteral("Многоугольник"); break;
+        case ShapeType::Star: name = QStringLiteral("Звезда"); break;
+        case ShapeType::Spiral: name = QStringLiteral("Спираль"); break;
+        case ShapeType::Line: name = QStringLiteral("Линия"); break;
+        case ShapeType::Bezier: name = QStringLiteral("Кривая Безье"); break;
+        case ShapeType::Freehand: name = QStringLiteral("Свободная форма"); break;
+        case ShapeType::Artistic: name = QStringLiteral("Мазок"); break;
+        case ShapeType::Text: {
+            QString first = object.text.section(QLatin1Char('\n'), 0, 0).trimmed();
+            if (first.size() > 22)
+                first = first.left(22) + QStringLiteral("…");
+            name = QStringLiteral("Текст: %1").arg(first);
+            break;
+        }
+        case ShapeType::Image: name = QStringLiteral("Изображение"); break;
+        }
+
+        auto *entry = new QTreeWidgetItem(layer, {name});
+        entry->setData(0, Qt::UserRole, i);
+    }
+}
+
+void MainWindow::onPaletteColor(const QColor &color)
+{
+    m_view->setFillColor(color);
+    m_toolPalette->setFillColor(color);
+    applyFillToSelection(color);
+    statusBar()->showMessage(
+        QStringLiteral("Цвет заливки: %1").arg(color.name().toUpper()), 4000);
+}
+
+void MainWindow::applyFillToSelection(const QColor &color)
+{
+    const QList<VectorItem *> selected = m_view->selectedVectorItems();
+    if (selected.isEmpty())
+        return;
+
+    beginEdit();
+    for (VectorItem *item : selected) {
+        if (item->object().type == ShapeType::Text)
+            item->setFillColor(color);
+        else {
+            item->setFillColor(color);
+            if (!item->object().hasStroke)
+                item->setStrokeWidth(m_view->strokeWidth());
+        }
+    }
+    endEdit();
+}
+
+void MainWindow::onSelectionChanged(int count)
+{
+    if (m_selectionLabel)
+        m_selectionLabel->setText(QStringLiteral("Выделено: %1").arg(count));
+}
+
+void MainWindow::copySelection()
+{
+    const QList<VectorItem *> selected = m_view->selectedVectorItems();
+    if (selected.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("Нет выделенных объектов."), 3000);
+        return;
+    }
+
+    m_clipboard.clear();
+    for (VectorItem *item : selected)
+        m_clipboard.append(item->object());
+    statusBar()->showMessage(
+        QStringLiteral("Скопировано объектов: %1").arg(m_clipboard.size()), 3000);
+}
+
+void MainWindow::cutSelection()
+{
+    copySelection();
+    if (m_clipboard.isEmpty())
+        return;
+    m_view->deleteSelectedObjects();
+    statusBar()->showMessage(
+        QStringLiteral("Вырезано объектов: %1").arg(m_clipboard.size()), 3000);
+}
+
+void MainWindow::pasteClipboard()
+{
+    if (m_clipboard.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("Буфер обмена пуст."), 3000);
+        return;
+    }
+
+    beginEdit();
+    m_view->scene()->clearSelection();
+    for (VectorObject object : m_clipboard) {
+        object.pos += QPointF(18.0, 18.0);
+        VectorItem *item = m_view->addVectorObject(object, false, false);
+        item->setSelected(true);
+    }
+    endEdit();
+    statusBar()->showMessage(
+        QStringLiteral("Вставлено объектов: %1").arg(m_clipboard.size()), 3000);
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    if (maybeSave())
+        event->accept();
+    else
+        event->ignore();
 }
 
 void MainWindow::showShortcuts()
@@ -1259,9 +1831,10 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("О программе"),
         QStringLiteral(
-            "<h3>Vectora 0.1</h3>"
+            "<h3>Vectora 0.2</h3>"
             "<p>Кроссплатформенный векторный редактор на C++ и Qt 6.</p>"
-            "<p>Сейчас готов интерфейс: инструменты, панель свойств, линейки, "
-            "слои, палитра и холст с пробной страницей A4.</p>"
+            "<p>Работают: документы .vct, экспорт PNG/SVG/PDF, печать, "
+            "рисование фигур и кривых, текст, узлы, заливка, обводка, "
+            "тень, перетекание, обрезка, копирование и Undo/Redo.</p>"
             "<p style='color:#666'>Linux · Windows · macOS</p>"));
 }

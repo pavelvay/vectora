@@ -2,14 +2,15 @@
 
 #include <QButtonGroup>
 #include <QFrame>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <functional>
+
 #include "Icons.h"
 #include "Theme.h"
-
-namespace {
 
 class FillStrokeIndicator : public QWidget
 {
@@ -17,9 +18,19 @@ public:
     explicit FillStrokeIndicator(QWidget *parent = nullptr)
         : QWidget(parent)
     {
-        setFixedSize(40, 40);
-        setToolTip(QStringLiteral("Заливка и обводка"));
+        setFixedSize(40, 42);
+        setCursor(Qt::PointingHandCursor);
     }
+
+    void setColors(const QColor &fill, const QColor &stroke)
+    {
+        m_fill = fill;
+        m_stroke = stroke;
+        update();
+    }
+
+    std::function<void()> onFillClicked;
+    std::function<void()> onStrokeClicked;
 
 protected:
     void paintEvent(QPaintEvent *) override
@@ -29,17 +40,35 @@ protected:
 
         // Outline swatch (back).
         p.setPen(QPen(QColor(0xd7, 0xdb, 0xe2), 1.4));
-        p.setBrush(Qt::NoBrush);
-        p.drawRect(QRectF(7.0, 7.0, 20.0, 20.0));
+        p.setBrush(m_stroke);
+        p.drawRect(QRectF(7.0, 5.0, 20.0, 20.0));
 
         // Fill swatch (front).
         p.setPen(QPen(QColor(0x10, 0x11, 0x13), 1.4));
-        p.setBrush(QColor(0x4f, 0x7c, 0xc0));
-        p.drawRect(QRectF(14.0, 14.0, 19.0, 19.0));
+        p.setBrush(m_fill);
+        p.drawRect(QRectF(13.0, 13.0, 20.0, 20.0));
     }
-};
 
-} // namespace
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        if (event->button() == Qt::LeftButton) {
+            if (QRectF(13.0, 13.0, 20.0, 20.0).contains(event->position())
+                && onFillClicked) {
+                onFillClicked();
+            } else if (QRectF(7.0, 5.0, 20.0, 20.0).contains(event->position())
+                       && onStrokeClicked) {
+                onStrokeClicked();
+            }
+            event->accept();
+            return;
+        }
+        QWidget::mousePressEvent(event);
+    }
+
+private:
+    QColor m_fill = QColor("#4f7cc0");
+    QColor m_stroke = QColor("#d7dbe2");
+};
 
 ToolPalette::ToolPalette(QWidget *parent)
     : QWidget(parent)
@@ -84,8 +113,10 @@ ToolPalette::ToolPalette(QWidget *parent)
 
     layout->addStretch(1);
 
-    auto *indicator = new FillStrokeIndicator(this);
-    layout->addWidget(indicator, 0, Qt::AlignHCenter);
+    m_indicator = new FillStrokeIndicator(this);
+    m_indicator->onFillClicked = [this]() { emit fillColorClicked(); };
+    m_indicator->onStrokeClicked = [this]() { emit strokeColorClicked(); };
+    layout->addWidget(m_indicator, 0, Qt::AlignHCenter);
 
     connect(m_group, &QButtonGroup::idClicked, this, [this](int id) {
         emit toolSelected(static_cast<Tool>(id));
@@ -99,4 +130,16 @@ void ToolPalette::setCurrentTool(Tool tool)
 {
     if (auto *button = m_group->button(int(tool)))
         button->setChecked(true);
+}
+
+void ToolPalette::setFillColor(const QColor &color)
+{
+    m_fillColor = color;
+    m_indicator->setColors(m_fillColor, m_strokeColor);
+}
+
+void ToolPalette::setStrokeColor(const QColor &color)
+{
+    m_strokeColor = color;
+    m_indicator->setColors(m_fillColor, m_strokeColor);
 }

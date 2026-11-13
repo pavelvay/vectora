@@ -3,6 +3,7 @@
 
 #include "Icons.h"
 #include "MainWindow.h"
+#include "SelfTest.h"
 #include "Theme.h"
 
 int main(int argc, char *argv[])
@@ -11,18 +12,28 @@ int main(int argc, char *argv[])
     app.setApplicationName(QStringLiteral("Vectora"));
     app.setApplicationDisplayName(QStringLiteral("Vectora"));
     app.setOrganizationName(QStringLiteral("Vectora"));
-    app.setApplicationVersion(QStringLiteral("0.1.0"));
+    app.setApplicationVersion(QStringLiteral("0.2.0"));
     app.setDesktopFileName(QStringLiteral("vectora"));
     app.setWindowIcon(Icons::appIcon());
 
     Theme::apply(app);
 
+    const QStringList args = app.arguments();
+
+    const int selfTestIndex = args.indexOf(QStringLiteral("--self-test"));
+    if (selfTestIndex > 0 && selfTestIndex + 1 < args.size())
+        return SelfTest::run(args.at(selfTestIndex + 1));
+
     MainWindow window;
     window.show();
 
-    // Development helpers: render the window to a PNG and exit, optionally
+    // Development helper: open a document passed on the command line.
+    const int openIndex = args.indexOf(QStringLiteral("--open"));
+    if (openIndex > 0 && openIndex + 1 < args.size())
+        window.openPath(args.at(openIndex + 1));
+
+    // Development help: render the window to a PNG and exit, optionally
     // starting with a specific tool selected.
-    const QStringList args = app.arguments();
     const int toolIndex = args.indexOf(QStringLiteral("--tool"));
     if (toolIndex > 0 && toolIndex + 1 < args.size()) {
         const QString id = args.at(toolIndex + 1);
