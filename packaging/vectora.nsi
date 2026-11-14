@@ -15,6 +15,10 @@ RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 
 !define MUI_ABORTWARNING
+!define MUI_ICON "resources\vectora.ico"
+!define MUI_UNICON "resources\vectora.ico"
+Icon "resources\vectora.ico"
+UninstallIcon "resources\vectora.ico"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES

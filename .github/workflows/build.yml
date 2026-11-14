@@ -86,17 +86,22 @@ jobs:
           arch: win64_msvc2022_64
           setup-python: false
           cache: true
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install Ninja
+        run: choco install ninja --no-progress -y
       - name: Configure and build
         shell: pwsh
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
-          cmake --build build --config Release
+          cmake --build build
       - name: Deploy Qt and build installer
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item build\Release\vectora.exe dist\vectora.exe
+          Copy-Item build\vectora.exe dist\vectora.exe
           & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --compiler-runtime `
             --no-translations --dir dist dist\vectora.exe
           choco install nsis --no-progress -y
@@ -131,6 +136,7 @@ jobs:
               --out "Vectora.iconset/icon_${size}x${size}@2x.png" >/dev/null
           done
           iconutil -c icns Vectora.iconset -o vectora.icns
+          mkdir -p "$APP/Contents/Resources"
           cp vectora.icns "$APP/Contents/Resources/vectora.icns"
           /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile vectora" \
             "$APP/Contents/Info.plist" 2>/dev/null || \
