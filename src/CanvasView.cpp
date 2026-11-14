@@ -512,7 +512,7 @@ void CanvasView::drawPreview(QPainter *painter)
         if (m_bezierNodes.size() >= 2)
             painter->drawPath(buildBezierPath());
 
-        // Rubber band to the cursor, like CorelDRAW's rubber-band preview.
+        // Rubber band from the last node to the cursor.
         if (m_bezierHasCursor && !m_bezierDragging) {
             QPen rubber = previewPen();
             rubber.setColor(QColor(0x7f, 0xae, 0xf7, 150));

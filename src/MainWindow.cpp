@@ -1675,7 +1675,7 @@ void MainWindow::createDocks()
         }
     });
 
-    // Right dockers, tabbed like CorelDRAW's docker group.
+    // Right dockers grouped into tabs.
     m_dockPanels = new DockPanels(this, m_view, this);
     const QList<QDockWidget *> dockers = m_dockPanels->docks();
     if (dockers.size() >= 7) {
