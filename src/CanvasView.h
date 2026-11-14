@@ -51,6 +51,25 @@ public:
     VectorItem *addVectorObject(const VectorObject &object, bool record = true,
                                 bool select = true);
     void setDocument(const Document &document);
+    QVector<PageInfo> pageList() const { return m_pages; }
+    QVector<MasterPage> masterList() const { return m_masters; }
+    int currentPage() const { return m_currentPage; }
+    QString pageLabel(int index) const;
+    void setCurrentPage(int index);
+    void setPageList(const QVector<PageInfo> &pages,
+                     const QVector<MasterPage> &masters, int currentPage);
+    int addPage(const QString &name = QString());
+    int duplicatePage(int index);
+    void removePage(int index);
+    void movePage(int from, int to);
+    void renamePage(int index, const QString &name);
+    void setPageInfo(int index, const PageInfo &info);
+    int addMaster(const QString &name = QString());
+    void renameMaster(int index, const QString &name);
+    void setMasterInfo(int index, const MasterPage &master);
+    void applyMasterToPage(int pageIndex, int masterIndex);
+    void applyPageVisibility();
+    QImage renderPageImage(int index, const QSize &size) const;
     QVector<VectorObject> objects() const;
 
     void deleteSelectedObjects();
@@ -121,6 +140,13 @@ public:
     void convertSelectionToCurves();
     void simplifySelectedPath();
     void convertStrokeToPath();
+    void applyTextOnPath();
+    void applyTextInShape();
+    void detachTextSpecial();
+    void applyContour(int steps, qreal distance, int direction,
+                      const QColor &color, bool filled);
+    void resetEnvelope();
+    bool envelopeActive() const { return m_envelopeItem != nullptr; }
     bool hasSelectedNodes() const { return !m_selectedNodeElements.isEmpty(); }
     int selectedNodeElement() const { return m_nodeElement; }
     void addNodeAtSelectedSegment();
@@ -160,6 +186,7 @@ signals:
     void zoomChanged(qreal zoom);
     void statusHint(const QString &text);
     void beginEdit();
+    void pageChanged(int index);
     void endEdit();
     void selectionChanged(int count);
     void colorPicked(const QColor &color);
@@ -229,6 +256,9 @@ private:
 
     qreal m_zoom = 1.0;
     QSizeF m_pageSize = QSizeF(794.0, 1123.0);
+    QVector<PageInfo> m_pages;
+    QVector<MasterPage> m_masters;
+    int m_currentPage = 0;
     bool m_grid = false;
     bool m_showPrintableArea = false;
     bool m_spaceHeld = false;
@@ -301,6 +331,32 @@ private:
     int m_gridStep = 20;
     qreal m_snapThreshold = 6.0;
     QVector<QLineF> m_smartGuides;
+    QVector<QPainterPath> regionize(const QVector<QPainterPath> &sources) const;
+    bool shapeBuilderPress(const QPointF &scenePos);
+    void shapeBuilderMove(const QPointF &scenePos);
+    void shapeBuilderRelease(const QPointF &scenePos, bool deleteRegions);
+    void drawShapeBuilderOverlay(QPainter *painter);
+
+    bool envelopePress(const QPointF &scenePos);
+    void envelopeMove(const QPointF &scenePos);
+    void remapEnvelope();
+    void drawEnvelopeOverlay(QPainter *painter);
+
+    bool m_shapeDragging = false;
+    bool m_shapeHasRegions = false;
+    QPointF m_shapeStart;
+    QPointF m_shapeCurrent;
+    QVector<QPainterPath> m_shapeRegions;
+    QVector<VectorObject> m_shapeStyles;
+    QList<VectorItem *> m_shapeSources;
+
+    VectorItem *m_envelopeItem = nullptr;
+    QVector<QPainterPath::Element> m_envelopeOriginal;
+    QVector<QPointF> m_envelopeGrid;
+    QRectF m_envelopeBounds;
+    int m_envelopeDragIndex = -1;
+    bool m_envelopeEditing = false;
+
     bool m_knifeActive = false;
     QPointF m_knifeStart;
     QPointF m_knifeCurrent;

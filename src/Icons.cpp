@@ -122,6 +122,34 @@ void paintTool(QPainter &p, const QString &id, const QColor &c)
         p.setBrush(c);
         p.drawRect(QRectF(-7.5, 0.5, 7.0, 3.5));
         p.restore();
+    } else if (id == QLatin1String("shapebuilder")) {
+        QPainterPath left;
+        left.addEllipse(QRectF(3.5, 4.0, 11.0, 11.0));
+        QPainterPath right;
+        right.addEllipse(QRectF(9.5, 9.0, 11.0, 11.0));
+        p.setBrush(QColor(c.red(), c.green(), c.blue(), 70));
+        p.drawPath(left.united(right));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(left);
+        p.drawPath(right);
+    } else if (id == QLatin1String("envelope")) {
+        p.setBrush(Qt::NoBrush);
+        QPainterPath grid;
+        for (int i = 0; i <= 3; ++i) {
+            grid.moveTo(3.0 + i * 6.0, 3.0);
+            grid.lineTo(3.0 + i * 6.0, 21.0);
+            grid.moveTo(3.0, 3.0 + i * 6.0);
+            grid.lineTo(21.0, 3.0 + i * 6.0);
+        }
+        QPen thin = stroke(c, 1.2);
+        thin.setStyle(Qt::DotLine);
+        p.setPen(thin);
+        p.drawPath(grid);
+        p.setPen(stroke(c, 1.4));
+        p.setBrush(c);
+        for (int i = 0; i <= 3; ++i)
+            for (int j = 0; j <= 3; ++j)
+                p.drawEllipse(QPointF(3.0 + i * 6.0, 3.0 + j * 6.0), 1.3, 1.3);
     } else if (id == QLatin1String("rect")) {
         p.drawRoundedRect(QRectF(3.8, 6.0, 16.4, 12.0), 1.6, 1.6);
     } else if (id == QLatin1String("ellipse")) {

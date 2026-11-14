@@ -7,6 +7,8 @@
 struct PaletteEntry {
     QColor color;
     QString name;
+    bool spot = false;    // Spot Colour entry
+    bool global = false;  // document-wide global colour
 };
 
 class ColorPalette : public QWidget
@@ -17,6 +19,11 @@ public:
     explicit ColorPalette(QWidget *parent = nullptr);
 
     QSize sizeHint() const override;
+
+    static QVector<PaletteEntry> defaultEntries();
+    void setEntries(const QVector<PaletteEntry> &entries);
+    QVector<PaletteEntry> entries() const { return m_entries; }
+    void addEntry(const PaletteEntry &entry);
 
 signals:
     void colorPicked(const QColor &color, const QString &name);

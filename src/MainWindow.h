@@ -58,6 +58,7 @@ private:
     void importFile();
     void exportFile();
     void exportPdf();
+    void exportAllPages();
     void printDocument();
     void applyDocument(const Document &document);
     Document currentDocument() const;

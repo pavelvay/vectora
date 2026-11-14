@@ -285,6 +285,18 @@ void CanvasView::setActiveTool(Tool tool)
     m_knifeActive = false;
     m_eraserActive = false;
     m_eraserPoints.clear();
+    m_shapeDragging = false;
+    m_shapeHasRegions = false;
+    m_shapeRegions.clear();
+    m_shapeStyles.clear();
+    m_shapeSources.clear();
+    if (tool != Tool::Envelope) {
+        m_envelopeItem = nullptr;
+        m_envelopeGrid.clear();
+        m_envelopeOriginal.clear();
+        m_envelopeDragIndex = -1;
+        m_envelopeEditing = false;
+    }
 
     m_tool = tool;
     setDragMode(tool == Tool::Select ? QGraphicsView::RubberBandDrag
@@ -361,8 +373,53 @@ void CanvasView::drawBackground(QPainter *painter, const QRectF &rect)
     }
 
     painter->setPen(Qt::NoPen);
-    painter->setBrush(Qt::white);
+    const QColor pageColor =
+        (m_currentPage >= 0 && m_currentPage < m_pages.size())
+            ? m_pages.at(m_currentPage).background
+            : QColor(Qt::white);
+    painter->setBrush(pageColor);
     painter->drawRect(page);
+
+    // Master page artwork is drawn behind the editable objects of the page.
+    if (m_currentPage >= 0 && m_currentPage < m_pages.size()) {
+        const int master = m_pages.at(m_currentPage).master;
+        if (master >= 0 && master < m_masters.size()) {
+            for (VectorItem *item : vectorItems()) {
+                const VectorObject object = item->object();
+                if (object.page != -1 - master)
+                    continue;
+                const QRectF bounds = object.localBounds();
+                painter->save();
+                painter->translate(object.pos);
+                painter->translate(bounds.center());
+                painter->rotate(object.rotation);
+                painter->translate(-bounds.center());
+                Document::paintObject(painter, object);
+                painter->restore();
+            }
+        }
+    }
+
+    if (m_currentPage >= 0 && m_currentPage < m_pages.size()
+        && (m_pages.at(m_currentPage).bleed > 0.0
+            || m_pages.at(m_currentPage).margin > 0.0)) {
+        const PageInfo &info = m_pages.at(m_currentPage);
+        if (info.bleed > 0.0) {
+            QPen bleedPen(QColor(0xff, 0x66, 0x99, 90), 1.0);
+            bleedPen.setStyle(Qt::DashLine);
+            painter->setPen(bleedPen);
+            painter->setBrush(Qt::NoBrush);
+            painter->drawRect(page.adjusted(-info.bleed, -info.bleed,
+                                            info.bleed, info.bleed));
+        }
+        if (info.margin > 0.0) {
+            QPen marginPen(QColor(0x4f, 0x7c, 0xc0, 90), 1.0);
+            marginPen.setStyle(Qt::DotLine);
+            painter->setPen(marginPen);
+            painter->drawRect(page.adjusted(info.margin, info.margin,
+                                            -info.margin, -info.margin));
+        }
+    }
 
     if (m_grid) {
         painter->setPen(QPen(QColor(0x4f, 0x7c, 0xc0, 26), 1.0));
@@ -522,6 +579,9 @@ void CanvasView::drawPreview(QPainter *painter)
         painter->drawPath(buildFreehandPath(m_eraserPoints));
         painter->restore();
     }
+
+    drawShapeBuilderOverlay(painter);
+    drawEnvelopeOverlay(painter);
 
     if (!m_drawing)
         return;
@@ -737,6 +797,8 @@ VectorItem *CanvasView::addVectorObject(const VectorObject &object, bool record,
     }
 
     VectorObject copy = object;
+    if (copy.page == -9999)
+        copy.page = m_currentPage;
     if (copy.layer < 0 || copy.layer >= m_layers.size())
         copy.layer = m_activeLayer;
     if (copy.id <= 0)
@@ -780,6 +842,300 @@ VectorItem *CanvasView::addVectorObject(const VectorObject &object, bool record,
     return item;
 }
 
+
+QString CanvasView::pageLabel(int index) const
+{
+    if (index < 0) {
+        const int master = -1 - index;
+        if (master >= 0 && master < m_masters.size())
+            return QStringLiteral("Мастер: %1").arg(m_masters.at(master).name);
+        return QStringLiteral("Мастер");
+    }
+    if (index < m_pages.size())
+        return m_pages.at(index).name;
+    return QStringLiteral("Страница");
+}
+
+void CanvasView::applyPageVisibility()
+{
+    for (VectorItem *item : vectorItems()) {
+        const VectorObject object = item->object();
+        const bool layerOk =
+            object.layer < 0 || object.layer >= m_layerVisible.size()
+            || m_layerVisible.at(object.layer);
+        item->setVisible(layerOk && object.page == m_currentPage);
+    }
+    viewport()->update();
+}
+
+void CanvasView::setCurrentPage(int index)
+{
+    if (!m_pages.isEmpty() && m_currentPage >= 0 && m_currentPage < m_pages.size())
+        m_pages[m_currentPage].size = m_pageSize;
+
+    const int minimum = -m_masters.size();
+    const int maximum = m_pages.size() - 1;
+    index = qBound(minimum, index, maximum);
+    if (index == m_currentPage && !m_pages.isEmpty()) {
+        applyPageVisibility();
+        return;
+    }
+
+    m_currentPage = index;
+    if (m_currentPage >= 0 && m_currentPage < m_pages.size()) {
+        m_pageSize = m_pages.at(m_currentPage).size;
+        for (VectorItem *item : vectorItems())
+            item->setVisible(false);
+    }
+    scene()->clearSelection();
+    applyPageVisibility();
+    emit selectionChanged(0);
+    emit pageChanged(m_currentPage);
+    viewport()->update();
+    emit statusHint(QStringLiteral("Открыто: %1").arg(pageLabel(m_currentPage)));
+}
+
+void CanvasView::setPageList(const QVector<PageInfo> &pages,
+                             const QVector<MasterPage> &masters, int currentPage)
+{
+    m_pages = pages;
+    if (m_pages.isEmpty())
+        m_pages.append(PageInfo{QStringLiteral("Страница 1"), m_pageSize,
+                                QColor(Qt::white), 37.8, 11.34, -1});
+    m_masters = masters;
+    m_currentPage = qBound(-m_masters.size(), currentPage, m_pages.size() - 1);
+    if (m_currentPage >= 0)
+        m_pageSize = m_pages.at(m_currentPage).size;
+    applyPageVisibility();
+    emit pageChanged(m_currentPage);
+}
+
+int CanvasView::addPage(const QString &name)
+{
+    if (m_currentPage >= 0 && m_currentPage < m_pages.size())
+        m_pages[m_currentPage].size = m_pageSize;
+    PageInfo info;
+    info.name = name.isEmpty()
+                    ? QStringLiteral("Страница %1").arg(m_pages.size() + 1)
+                    : name;
+    info.size = m_currentPage >= 0 && m_currentPage < m_pages.size()
+                    ? m_pages.at(m_currentPage).size
+                    : QSizeF(794.0, 1123.0);
+    if (m_currentPage >= 0 && m_currentPage < m_pages.size()) {
+        info.background = m_pages.at(m_currentPage).background;
+        info.margin = m_pages.at(m_currentPage).margin;
+        info.bleed = m_pages.at(m_currentPage).bleed;
+    }
+    emit beginEdit();
+    m_pages.append(info);
+    emit endEdit();
+    setCurrentPage(m_pages.size() - 1);
+    return m_pages.size() - 1;
+}
+
+int CanvasView::duplicatePage(int index)
+{
+    if (index < 0 || index >= m_pages.size())
+        return index;
+    emit beginEdit();
+    m_pages.insert(index + 1, m_pages.at(index));
+    m_pages[index + 1].name = QStringLiteral("%1 (копия)").arg(m_pages.at(index).name);
+
+    QVector<VectorItem *> items;
+    for (VectorItem *item : vectorItems()) {
+        if (item->object().page == index)
+            items.append(item);
+    }
+
+    // Move the following pages down before inserting the copy, otherwise the
+    // freshly created duplicates would be shifted as well.
+    for (VectorItem *item : vectorItems()) {
+        VectorObject object = item->object();
+        if (object.page > index) {
+            object.page += 1;
+            item->setObject(object);
+        }
+    }
+
+    scene()->clearSelection();
+    for (VectorItem *item : items) {
+        VectorObject copy = item->object();
+        copy.page = index + 1;
+        copy.id = m_nextObjectId++;
+        copy.masterId = 0;
+        copy.group = 0;
+        addVectorObject(copy, false, false);
+    }
+    emit endEdit();
+    setCurrentPage(index + 1);
+    return index + 1;
+}
+
+void CanvasView::removePage(int index)
+{
+    if (index < 0 || index >= m_pages.size() || m_pages.size() <= 1)
+        return;
+    emit beginEdit();
+    const int removedPage = index;
+    for (VectorItem *item : vectorItems()) {
+        if (item->object().page == removedPage) {
+            scene()->removeItem(item);
+            delete item;
+        }
+    }
+    for (VectorItem *item : vectorItems()) {
+        VectorObject object = item->object();
+        if (object.page > removedPage) {
+            object.page -= 1;
+            item->setObject(object);
+        }
+    }
+    m_pages.removeAt(index);
+    for (PageInfo &page : m_pages) {
+        if (page.master >= 0)
+            page.master = page.master;
+    }
+    emit endEdit();
+    setCurrentPage(qMin(m_currentPage, m_pages.size() - 1));
+    emit pageChanged(m_currentPage);
+}
+
+void CanvasView::movePage(int from, int to)
+{
+    if (from < 0 || from >= m_pages.size() || to < 0 || to >= m_pages.size()
+        || from == to)
+        return;
+    emit beginEdit();
+    m_pages.move(from, to);
+    for (VectorItem *item : vectorItems()) {
+        VectorObject object = item->object();
+        if (object.page < 0)
+            continue;
+        int page = object.page;
+        if (page == from)
+            page = to;
+        else if (from < to && page > from && page <= to)
+            page -= 1;
+        else if (from > to && page >= to && page < from)
+            page += 1;
+        if (page != object.page) {
+            object.page = page;
+            item->setObject(object);
+        }
+    }
+    emit endEdit();
+    setCurrentPage(to);
+    emit pageChanged(m_currentPage);
+}
+
+void CanvasView::renamePage(int index, const QString &name)
+{
+    if (index < 0 || index >= m_pages.size() || name.trimmed().isEmpty())
+        return;
+    m_pages[index].name = name.trimmed();
+    emit beginEdit();
+    emit endEdit();
+    emit pageChanged(m_currentPage);
+}
+
+void CanvasView::setPageInfo(int index, const PageInfo &info)
+{
+    if (index < 0 || index >= m_pages.size())
+        return;
+    emit beginEdit();
+    m_pages[index] = info;
+    if (index == m_currentPage) {
+        m_pageSize = info.size;
+        setPageSize(info.size);
+    }
+    emit endEdit();
+    emit pageChanged(m_currentPage);
+    viewport()->update();
+}
+
+int CanvasView::addMaster(const QString &name)
+{
+    MasterPage master;
+    master.name = name.isEmpty()
+                      ? QStringLiteral("Мастер %1").arg(m_masters.size() + 1)
+                      : name;
+    m_masters.append(master);
+    emit beginEdit();
+    emit endEdit();
+    emit pageChanged(m_currentPage);
+    return m_masters.size() - 1;
+}
+
+void CanvasView::renameMaster(int index, const QString &name)
+{
+    if (index < 0 || index >= m_masters.size() || name.trimmed().isEmpty())
+        return;
+    m_masters[index].name = name.trimmed();
+    emit pageChanged(m_currentPage);
+}
+
+void CanvasView::setMasterInfo(int index, const MasterPage &master)
+{
+    if (index < 0 || index >= m_masters.size())
+        return;
+    m_masters[index] = master;
+    emit pageChanged(m_currentPage);
+}
+
+void CanvasView::applyMasterToPage(int pageIndex, int masterIndex)
+{
+    if (pageIndex < 0 || pageIndex >= m_pages.size())
+        return;
+    m_pages[pageIndex].master = masterIndex;
+    emit beginEdit();
+    emit endEdit();
+    emit pageChanged(m_currentPage);
+    viewport()->update();
+}
+
+QImage CanvasView::renderPageImage(int index, const QSize &size) const
+{
+    Document document;
+    document.pages = m_pages;
+    document.masters = m_masters;
+    document.layers = m_layers;
+    document.layerVisible = m_layerVisible;
+    document.layerLocked = m_layerLocked;
+    document.pageSize = index >= 0 && index < m_pages.size()
+                            ? m_pages.at(index).size
+                            : (m_pages.isEmpty() ? m_pageSize : m_pages.first().size);
+    document.currentPage = index >= 0 ? index : 0;
+    if (index < 0 && !document.pages.isEmpty()) {
+        PageInfo info = document.pages.first();
+        info.master = -1 - index;
+        document.pages[0] = info;
+    }
+    for (const VectorObject &object : objects()) {
+        if (object.page == index)
+            document.objects.append(object);
+    }
+    if (index >= 0 && index < m_pages.size()) {
+        const int master = m_pages.at(index).master;
+        if (master >= 0) {
+            for (const VectorObject &object : objects()) {
+                if (object.page == -1 - master)
+                    document.objects.prepend(object);
+            }
+        }
+    }
+
+    QImage image(size, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::white);
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const qreal scale = qMin(size.width() / qMax<qreal>(1.0, document.pageSize.width()),
+                             size.height() / qMax<qreal>(1.0, document.pageSize.height()));
+    painter.scale(scale, scale);
+    document.render(&painter);
+    painter.end();
+    return image;
+}
+
 void CanvasView::setDocument(const Document &document)
 {
     if (m_textEditor)
@@ -812,14 +1168,32 @@ void CanvasView::setDocument(const Document &document)
     }
     m_activeLayer = qBound(0, m_activeLayer, m_layers.size() - 1);
 
-    setPageSize(document.pageSize);
-    for (const VectorObject &object : document.objects)
-        addVectorObject(object, false, false);
+    m_pages = document.pages;
+    if (m_pages.isEmpty()) {
+        m_pages.append(PageInfo{QStringLiteral("Страница 1"), document.pageSize,
+                                QColor(Qt::white), 37.8, 11.34, -1});
+    }
+    m_masters = document.masters;
+    m_currentPage = document.currentPage;
+    if (m_currentPage < 0)
+        m_currentPage = 0;
+    if (m_currentPage >= m_pages.size())
+        m_currentPage = m_pages.size() - 1;
+
+    setPageSize(m_pages.at(m_currentPage).size);
+    for (const VectorObject &object : document.objects) {
+        VectorObject copy = object;
+        if (copy.page == -9999)
+            copy.page = 0;
+        addVectorObject(copy, false, false);
+    }
     normalizeZOrder();
     for (int i = 0; i < m_layers.size(); ++i)
         applyLayerState(i);
+    applyPageVisibility();
     updateSnapSettings();
     emit selectionChanged(0);
+    emit pageChanged(m_currentPage);
     viewport()->update();
 }
 
@@ -1160,7 +1534,7 @@ void CanvasView::applyLayerState(int layer)
     const bool locked = m_layerLocked.value(layer, false);
     for (VectorItem *item : itemsInLayer(layer)) {
         const bool itemLocked = item->isLocked();
-        item->setVisible(visible);
+        item->setVisible(visible && item->object().page == m_currentPage);
         item->setFlag(QGraphicsItem::ItemIsSelectable, !locked && !itemLocked);
         item->setFlag(QGraphicsItem::ItemIsMovable, !locked && !itemLocked);
         if (locked || itemLocked)
@@ -2644,6 +3018,631 @@ void CanvasView::convertStrokeToPath()
                         : QStringLiteral("Нет объектов с обводкой."));
 }
 
+
+QVector<QPainterPath> CanvasView::regionize(const QVector<QPainterPath> &sources) const
+{
+    QVector<QPainterPath> regions;
+    for (const QPainterPath &source : sources) {
+        if (regions.isEmpty()) {
+            regions.append(source);
+            continue;
+        }
+        QVector<QPainterPath> next;
+        QPainterPath remaining = source;
+        for (const QPainterPath &region : regions) {
+            const QPainterPath outside = region.subtracted(source);
+            const QPainterPath inside = region.intersected(source);
+            if (!outside.isEmpty())
+                next.append(outside);
+            if (!inside.isEmpty())
+                next.append(inside);
+            remaining = remaining.subtracted(region);
+        }
+        if (!remaining.isEmpty())
+            next.append(remaining);
+        regions = next;
+    }
+    return regions;
+}
+
+bool CanvasView::shapeBuilderPress(const QPointF &scenePos)
+{
+    m_shapeSources.clear();
+    m_shapeRegions.clear();
+    m_shapeStyles.clear();
+
+    QList<VectorItem *> candidates = selectedVectorItems();
+    if (candidates.size() < 2)
+        candidates = vectorItems();
+
+    QVector<QPainterPath> paths;
+    for (VectorItem *item : candidates) {
+        if (!item->isVisible() || item->object().locked || layerLocked(layerOf(item)))
+            continue;
+        const VectorObject object = item->object();
+        QPainterPath path;
+        if (object.type == ShapeType::Text)
+            path = item->mapToScene(buildTextPath(object));
+        else if (!object.path.isEmpty())
+            path = item->mapToScene(object.path);
+        if (path.isEmpty())
+            continue;
+        paths.append(path);
+        m_shapeSources.append(item);
+    }
+
+    if (paths.size() < 2) {
+        emit statusHint(QStringLiteral("Создание фигур: нужно минимум два объекта."));
+        return false;
+    }
+
+    m_shapeRegions = regionize(paths);
+    for (const QPainterPath &region : m_shapeRegions) {
+        VectorObject style = m_shapeSources.first()->object();
+        for (int i = m_shapeSources.size() - 1; i >= 0; --i) {
+            if (region.subtracted(paths.at(i)).isEmpty()) {
+                style = m_shapeSources.at(i)->object();
+                break;
+            }
+        }
+        m_shapeStyles.append(style);
+    }
+
+    m_shapeDragging = true;
+    m_shapeHasRegions = true;
+    m_shapeStart = scenePos;
+    m_shapeCurrent = scenePos;
+    viewport()->update();
+    return true;
+}
+
+void CanvasView::shapeBuilderMove(const QPointF &scenePos)
+{
+    if (!m_shapeDragging)
+        return;
+    m_shapeCurrent = scenePos;
+    viewport()->update();
+}
+
+void CanvasView::shapeBuilderRelease(const QPointF &scenePos, bool deleteRegions)
+{
+    if (!m_shapeDragging)
+        return;
+    m_shapeCurrent = scenePos;
+    m_shapeDragging = false;
+
+    const bool click = QLineF(m_shapeStart, m_shapeCurrent).length() < 3.0;
+    const QRectF rect = QRectF(m_shapeStart, m_shapeCurrent).normalized().adjusted(-0.5, -0.5, 0.5, 0.5);
+
+    QVector<int> chosen;
+    for (int i = 0; i < m_shapeRegions.size(); ++i) {
+        const QPainterPath &region = m_shapeRegions.at(i);
+        if (click ? region.contains(m_shapeStart) : region.intersects(rect))
+            chosen.append(i);
+    }
+
+    if (chosen.isEmpty()) {
+        m_shapeRegions.clear();
+        m_shapeStyles.clear();
+        m_shapeSources.clear();
+        m_shapeHasRegions = false;
+        viewport()->update();
+        emit statusHint(QStringLiteral("Области не выбраны."));
+        return;
+    }
+
+    QPainterPath merged;
+    VectorObject mergedStyle = m_shapeStyles.value(chosen.first());
+    for (int index : chosen) {
+        if (merged.isEmpty())
+            merged = m_shapeRegions.at(index);
+        else
+            merged = merged.united(m_shapeRegions.at(index));
+    }
+
+    emit beginEdit();
+    for (VectorItem *item : m_shapeSources) {
+        scene()->removeItem(item);
+        delete item;
+    }
+
+    int created = 0;
+    const int layer = mergedStyle.layer;
+    if (!deleteRegions && !merged.isEmpty()) {
+        VectorObject object = mergedStyle;
+        object.type = ShapeType::Bezier;
+        object.path = merged;
+        object.pos = QPointF(0, 0);
+        object.rotation = 0;
+        object.text.clear();
+        object.id = 0;
+        object.masterId = 0;
+        object.group = 0;
+        object.layer = layer;
+        if (addVectorObject(object, false, true))
+            ++created;
+    }
+
+    for (int i = 0; i < m_shapeRegions.size(); ++i) {
+        if (chosen.contains(i))
+            continue;
+        if (m_shapeRegions.at(i).isEmpty())
+            continue;
+        VectorObject object = m_shapeStyles.at(i);
+        object.type = ShapeType::Bezier;
+        object.path = m_shapeRegions.at(i);
+        object.pos = QPointF(0, 0);
+        object.rotation = 0;
+        object.text.clear();
+        object.id = 0;
+        object.masterId = 0;
+        object.group = 0;
+        object.layer = layer;
+        addVectorObject(object, false, false);
+        ++created;
+    }
+
+    emit endEdit();
+    m_shapeRegions.clear();
+    m_shapeStyles.clear();
+    m_shapeSources.clear();
+    m_shapeHasRegions = false;
+    viewport()->update();
+    emit statusHint(deleteRegions
+                        ? QStringLiteral("Области удалены: %1").arg(chosen.size())
+                        : QStringLiteral("Области объединены: %1").arg(chosen.size()));
+}
+
+void CanvasView::drawShapeBuilderOverlay(QPainter *painter)
+{
+    if (!m_shapeHasRegions)
+        return;
+    const qreal s = transform().m11() > 0 ? transform().m11() : 1.0;
+    const bool click = QLineF(m_shapeStart, m_shapeCurrent).length() < 3.0;
+    const QRectF rect = QRectF(m_shapeStart, m_shapeCurrent).normalized().adjusted(-0.5, -0.5, 0.5, 0.5);
+
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing, true);
+    for (int i = 0; i < m_shapeRegions.size(); ++i) {
+        const QPainterPath &region = m_shapeRegions.at(i);
+        const bool hovered = click ? region.contains(m_shapeStart) : region.intersects(rect);
+        painter->setPen(QPen(hovered ? QColor(0xff, 0xb3, 0x47) : QColor(0x7f, 0xae, 0xf7, 160),
+                             (hovered ? 1.6 : 0.9) / s));
+        painter->setBrush(hovered ? QColor(0xff, 0xb3, 0x47, 90)
+                                  : QColor(0x7f, 0xae, 0xf7, 24));
+        painter->drawPath(region);
+    }
+    if (!click) {
+        QPen marquee(QColor(0xff, 0xb3, 0x47), 0.0);
+        marquee.setStyle(Qt::DashLine);
+        painter->setPen(marquee);
+        painter->setBrush(QColor(0xff, 0xb3, 0x47, 26));
+        painter->drawRect(rect);
+    }
+    painter->restore();
+}
+
+void CanvasView::applyTextOnPath()
+{
+    VectorItem *textItem = nullptr;
+    VectorItem *pathItem = nullptr;
+    for (VectorItem *item : selectedVectorItems()) {
+        if (item->object().type == ShapeType::Text && !textItem)
+            textItem = item;
+        else if (item->hasPath() && !pathItem)
+            pathItem = item;
+    }
+    if (!textItem || !pathItem) {
+        emit statusHint(QStringLiteral("Выберите текст и кривую (текст + контур)."));
+        return;
+    }
+
+    const VectorObject pathObject = pathItem->object();
+    const QPainterPath scenePath =
+        pathItem->mapToScene(pathObject.type == ShapeType::Text
+                                 ? buildTextPath(pathObject)
+                                 : pathObject.path);
+    if (scenePath.isEmpty()) {
+        emit statusHint(QStringLiteral("Контур пуст."));
+        return;
+    }
+
+    VectorObject textObject = textItem->object();
+    const QPainterPath localPath = textItem->mapFromScene(scenePath);
+    textObject.textOnPath = true;
+    textObject.textInShape = false;
+    textObject.textPathCurve = localPath;
+    textObject.textPathOffset = 0.0;
+    textObject.textPathReverse = false;
+    textObject.textBox = localPath.boundingRect().adjusted(-10, -30, 10, 30);
+
+    emit beginEdit();
+    textItem->setObject(textObject);
+    emit endEdit();
+    emit statusHint(QStringLiteral("Текст размещён по контуру."));
+}
+
+void CanvasView::applyTextInShape()
+{
+    VectorItem *textItem = nullptr;
+    VectorItem *shapeItem = nullptr;
+    for (VectorItem *item : selectedVectorItems()) {
+        if (item->object().type == ShapeType::Text && !textItem)
+            textItem = item;
+        else if (item->hasPath() && !shapeItem)
+            shapeItem = item;
+    }
+    if (!textItem || !shapeItem) {
+        emit statusHint(QStringLiteral("Выберите текст и фигуру-контейнер."));
+        return;
+    }
+
+    const VectorObject shapeObject = shapeItem->object();
+    const QPainterPath sceneShape = shapeItem->mapToScene(shapeObject.path);
+    if (sceneShape.isEmpty()) {
+        emit statusHint(QStringLiteral("Фигура пуста."));
+        return;
+    }
+
+    VectorObject textObject = textItem->object();
+    const QPainterPath localShape = textItem->mapFromScene(sceneShape);
+    textObject.textInShape = true;
+    textObject.textOnPath = false;
+    textObject.textShape = localShape;
+    const QRectF box = localShape.boundingRect().adjusted(6, 6, -6, -6);
+    if (box.width() > 4.0 && box.height() > 4.0) {
+        textObject.textBox = box;
+    }
+    emit beginEdit();
+    textItem->setObject(textObject);
+    emit endEdit();
+    emit statusHint(QStringLiteral("Текст помещён в фигуру."));
+}
+
+void CanvasView::detachTextSpecial()
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    int changed = 0;
+    emit beginEdit();
+    for (VectorItem *item : selected) {
+        VectorObject object = item->object();
+        if (object.type != ShapeType::Text)
+            continue;
+        if (!object.textOnPath && !object.textInShape)
+            continue;
+        object.textOnPath = false;
+        object.textInShape = false;
+        object.textPathCurve = QPainterPath();
+        object.textShape = QPainterPath();
+        item->setObject(object);
+        ++changed;
+    }
+    emit endEdit();
+    emit statusHint(changed > 0
+                        ? QStringLiteral("Текст отсоединён от контура: %1").arg(changed)
+                        : QStringLiteral("Нет текста по контуру или в фигуре."));
+}
+
+void CanvasView::applyContour(int steps, qreal distance, int direction,
+                              const QColor &color, bool filled)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty()) {
+        emit statusHint(QStringLiteral("Выберите объект для контура."));
+        return;
+    }
+    steps = qBound(1, steps, 40);
+    distance = qBound(0.5, distance, 400.0);
+
+    emit beginEdit();
+    int created = 0;
+    for (VectorItem *item : selected) {
+        const VectorObject source = item->object();
+        QPainterPath base = source.type == ShapeType::Text ? buildTextPath(source)
+                                                           : source.path;
+        if (base.isEmpty())
+            continue;
+
+        for (int i = 1; i <= steps; ++i) {
+            const qreal width = 2.0 * distance * i;
+            QPainterPathStroker stroker;
+            stroker.setWidth(width);
+            stroker.setJoinStyle(Qt::RoundJoin);
+            stroker.setCapStyle(Qt::RoundCap);
+            const QPainterPath ring = stroker.createStroke(base);
+
+            QVector<QPainterPath> variants;
+            if (direction == 0 || direction == 2)
+                variants.append(base.united(ring));
+            if (direction == 1 || direction == 2)
+                variants.append(base.subtracted(ring));
+
+            for (const QPainterPath &variant : variants) {
+                if (variant.isEmpty())
+                    continue;
+                VectorObject object = source;
+                object.type = ShapeType::Bezier;
+                object.path = variant;
+                object.text.clear();
+                object.id = 0;
+                object.masterId = 0;
+                object.group = 0;
+                if (filled) {
+                    object.hasFill = true;
+                    object.fillStyle = 0;
+                    object.fill = color;
+                    object.hasStroke = false;
+                } else {
+                    object.hasFill = false;
+                    object.hasStroke = true;
+                    object.stroke = color;
+                    object.strokeWidth = qMax<qreal>(1.0, source.strokeWidth);
+                    object.dashPattern.clear();
+                }
+                addVectorObject(object, false, false);
+                ++created;
+            }
+        }
+    }
+    emit endEdit();
+    emit statusHint(created > 0
+                        ? QStringLiteral("Создано контуров: %1").arg(created)
+                        : QStringLiteral("Контур не создан: нет подходящих объектов."));
+}
+
+bool CanvasView::envelopePress(const QPointF &scenePos)
+{
+    const qreal tolerance = 12.0 / (m_zoom > 0.0 ? m_zoom : 1.0);
+
+    if (m_envelopeItem) {
+        int best = -1;
+        qreal bestDistance = tolerance;
+        for (int i = 0; i < m_envelopeGrid.size(); ++i) {
+            const QPointF handle = m_envelopeItem->mapToScene(m_envelopeGrid.at(i));
+            const qreal d = QLineF(handle, scenePos).length();
+            if (d <= bestDistance) {
+                bestDistance = d;
+                best = i;
+            }
+        }
+        if (best >= 0) {
+            m_envelopeDragIndex = best;
+            m_envelopeEditing = true;
+            emit beginEdit();
+            return true;
+        }
+        return false;
+    }
+
+    QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty()) {
+        VectorItem *hit = itemAtScene(scenePos);
+        if (hit)
+            selected.append(hit);
+    }
+    VectorItem *target = nullptr;
+    for (VectorItem *item : selected) {
+        if (item->hasPath() && item->isVisible()) {
+            target = item;
+            break;
+        }
+    }
+    if (!target) {
+        emit statusHint(QStringLiteral("Конверт: выберите векторный объект."));
+        return false;
+    }
+
+    scene()->clearSelection();
+    target->setSelected(true);
+    m_envelopeItem = target;
+    m_envelopeOriginal = target->pathElements();
+    m_envelopeBounds = target->localBounds();
+    if (m_envelopeBounds.width() < 1.0 || m_envelopeBounds.height() < 1.0) {
+        resetEnvelope();
+        emit statusHint(QStringLiteral("Конверт: объект слишком мал."));
+        return false;
+    }
+
+    m_envelopeGrid.clear();
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            m_envelopeGrid.append(QPointF(
+                m_envelopeBounds.left()
+                    + m_envelopeBounds.width() * column / 3.0,
+                m_envelopeBounds.top()
+                    + m_envelopeBounds.height() * row / 3.0));
+        }
+    }
+    m_envelopeDragIndex = -1;
+    viewport()->update();
+    emit statusHint(QStringLiteral("Конверт: перетаскивайте узлы сетки, "
+                                   "Shift+E повторно — сброс."));
+    return true;
+}
+
+void CanvasView::envelopeMove(const QPointF &scenePos)
+{
+    if (!m_envelopeItem || m_envelopeDragIndex < 0
+        || m_envelopeDragIndex >= m_envelopeGrid.size())
+        return;
+    m_envelopeGrid[m_envelopeDragIndex] = m_envelopeItem->mapFromScene(scenePos);
+    remapEnvelope();
+    viewport()->update();
+}
+
+void CanvasView::remapEnvelope()
+{
+    if (!m_envelopeItem || m_envelopeGrid.size() != 16
+        || m_envelopeOriginal.isEmpty())
+        return;
+
+    const QRectF bounds = m_envelopeBounds;
+    const qreal width = qMax<qreal>(0.001, bounds.width());
+    const qreal height = qMax<qreal>(0.001, bounds.height());
+
+    auto basis = [](qreal t, int i) {
+        const qreal mt = 1.0 - t;
+        switch (i) {
+        case 0: return mt * mt * mt;
+        case 1: return 3.0 * t * mt * mt;
+        case 2: return 3.0 * t * t * mt;
+        default: return t * t * t;
+        }
+    };
+    auto basisDerivative = [](qreal t, int i) {
+        const qreal mt = 1.0 - t;
+        switch (i) {
+        case 0: return -3.0 * mt * mt;
+        case 1: return 3.0 * mt * mt - 6.0 * t * mt;
+        case 2: return 6.0 * t * mt - 3.0 * t * t;
+        default: return 3.0 * t * t;
+        }
+    };
+    auto gridPoint = [this](int column, int row) {
+        return m_envelopeGrid.at(row * 4 + column);
+    };
+    auto surface = [&](qreal u, qreal v) {
+        QPointF point;
+        for (int row = 0; row < 4; ++row) {
+            for (int column = 0; column < 4; ++column) {
+                point += gridPoint(column, row)
+                         * (basis(u, column) * basis(v, row));
+            }
+        }
+        return point;
+    };
+    auto tangentU = [&](qreal u, qreal v) {
+        QPointF point;
+        for (int row = 0; row < 4; ++row) {
+            for (int column = 0; column < 4; ++column) {
+                point += gridPoint(column, row)
+                         * (basisDerivative(u, column) * basis(v, row));
+            }
+        }
+        return point;
+    };
+    auto tangentV = [&](qreal u, qreal v) {
+        QPointF point;
+        for (int row = 0; row < 4; ++row) {
+            for (int column = 0; column < 4; ++column) {
+                point += gridPoint(column, row)
+                         * (basis(u, column) * basisDerivative(v, row));
+            }
+        }
+        return point;
+    };
+    auto normalize = [&](const QPointF &point) {
+        return QPointF(qBound(0.0, (point.x() - bounds.left()) / width, 1.0),
+                       qBound(0.0, (point.y() - bounds.top()) / height, 1.0));
+    };
+    auto warp = [&](const QPointF &point) {
+        const QPointF uv = normalize(point);
+        return surface(uv.x(), uv.y());
+    };
+    auto warpOffset = [&](const QPointF &anchor, const QPointF &control) {
+        const QPointF uv = normalize(anchor);
+        const QPointF tu = tangentU(uv.x(), uv.y()) / width;
+        const QPointF tv = tangentV(uv.x(), uv.y()) / height;
+        const QPointF offset = control - anchor;
+        return surface(uv.x(), uv.y()) + tu * offset.x() + tv * offset.y();
+    };
+
+    QVector<QPainterPath::Element> elements = m_envelopeOriginal;
+    QPointF anchor;
+    QPainterPath::ElementType previous = QPainterPath::MoveToElement;
+    for (int i = 0; i < elements.size(); ++i) {
+        QPainterPath::Element &element = elements[i];
+        const QPointF original(element.x, element.y);
+        QPointF mapped;
+        if (element.type == QPainterPath::CurveToElement
+            || (element.type == QPainterPath::CurveToDataElement
+                && previous == QPainterPath::CurveToElement)) {
+            mapped = warpOffset(anchor, original);
+        } else {
+            mapped = warp(original);
+        }
+        element.x = mapped.x();
+        element.y = mapped.y();
+
+        if (element.type == QPainterPath::MoveToElement
+            || element.type == QPainterPath::LineToElement)
+            anchor = original;
+        else if (element.type == QPainterPath::CurveToDataElement
+                 && previous == QPainterPath::CurveToDataElement)
+            anchor = original;
+        previous = element.type;
+    }
+    m_envelopeItem->setPathElements(elements);
+}
+
+void CanvasView::resetEnvelope()
+{
+    if (!m_envelopeItem)
+        return;
+    if (!m_envelopeOriginal.isEmpty())
+        m_envelopeItem->setPathElements(m_envelopeOriginal);
+    m_envelopeGrid.clear();
+    if (m_envelopeBounds.width() >= 1.0 && m_envelopeBounds.height() >= 1.0) {
+        for (int row = 0; row < 4; ++row) {
+            for (int column = 0; column < 4; ++column) {
+                m_envelopeGrid.append(QPointF(
+                    m_envelopeBounds.left()
+                        + m_envelopeBounds.width() * column / 3.0,
+                    m_envelopeBounds.top()
+                        + m_envelopeBounds.height() * row / 3.0));
+            }
+        }
+    }
+    m_envelopeDragIndex = -1;
+    viewport()->update();
+}
+
+void CanvasView::drawEnvelopeOverlay(QPainter *painter)
+{
+    if (!m_envelopeItem)
+        return;
+    const qreal s = transform().m11() > 0 ? transform().m11() : 1.0;
+
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing, true);
+    painter->setPen(QPen(QColor(0xff, 0xb3, 0x47, 170), 1.0 / s, Qt::DashLine));
+    painter->setBrush(Qt::NoBrush);
+    for (int row = 0; row < 4; ++row) {
+        QPainterPath line;
+        for (int column = 0; column < 4; ++column) {
+            const QPointF point = m_envelopeItem->mapToScene(
+                m_envelopeGrid.at(row * 4 + column));
+            if (column == 0)
+                line.moveTo(point);
+            else
+                line.lineTo(point);
+        }
+        painter->drawPath(line);
+    }
+    for (int column = 0; column < 4; ++column) {
+        QPainterPath line;
+        for (int row = 0; row < 4; ++row) {
+            const QPointF point = m_envelopeItem->mapToScene(
+                m_envelopeGrid.at(row * 4 + column));
+            if (row == 0)
+                line.moveTo(point);
+            else
+                line.lineTo(point);
+        }
+        painter->drawPath(line);
+    }
+
+    const qreal radius = 4.0 / s;
+    for (int i = 0; i < m_envelopeGrid.size(); ++i) {
+        const QPointF point = m_envelopeItem->mapToScene(m_envelopeGrid.at(i));
+        painter->setPen(QPen(QColor(0x4f, 0x7c, 0xc0), 1.0 / s));
+        painter->setBrush(i == m_envelopeDragIndex ? QColor(0xff, 0xb3, 0x47)
+                                                   : QColor(0xf4, 0xf7, 0xfb));
+        painter->drawEllipse(point, radius, radius);
+    }
+    painter->restore();
+}
+
 void CanvasView::groupSelection()
 {
     const QList<VectorItem *> selected = selectedVectorItems();
@@ -3570,6 +4569,16 @@ void CanvasView::mousePressEvent(QMouseEvent *event)
         m_eraserPoints = {scenePos};
         viewport()->update();
         break;
+    case Tool::ShapeBuilder:
+        shapeBuilderPress(scenePos);
+        break;
+    case Tool::Envelope:
+        if (envelopePress(scenePos)) {
+            viewport()->update();
+        } else if (m_envelopeItem) {
+            viewport()->update();
+        }
+        break;
     case Tool::Rectangle:
         startDrawing(DrawMode::Rectangle, scenePos);
         break;
@@ -3791,6 +4800,18 @@ void CanvasView::mouseMoveEvent(QMouseEvent *event)
         return;
     }
 
+    if (m_shapeDragging) {
+        shapeBuilderMove(scenePos);
+        emit scenePosChanged(scenePos);
+        return;
+    }
+
+    if (m_envelopeDragIndex >= 0) {
+        envelopeMove(scenePos);
+        emit scenePosChanged(scenePos);
+        return;
+    }
+
     if (m_drawing) {
         m_drawCurrent = scenePos;
         if ((m_drawMode == DrawMode::Freehand || m_drawMode == DrawMode::Artistic)
@@ -3875,6 +4896,24 @@ void CanvasView::mouseReleaseEvent(QMouseEvent *event)
         return;
     }
 
+    if (m_shapeDragging) {
+        shapeBuilderRelease(mapToScene(event->pos()),
+                            event->modifiers() & Qt::AltModifier);
+        event->accept();
+        return;
+    }
+
+    if (m_envelopeDragIndex >= 0) {
+        m_envelopeDragIndex = -1;
+        if (m_envelopeEditing) {
+            m_envelopeEditing = false;
+            emit endEdit();
+        }
+        viewport()->update();
+        event->accept();
+        return;
+    }
+
     if (m_drawing) {
         finishDrawing(mapToScene(event->pos()));
         event->accept();
@@ -3886,6 +4925,13 @@ void CanvasView::mouseReleaseEvent(QMouseEvent *event)
 
 void CanvasView::mouseDoubleClickEvent(QMouseEvent *event)
 {
+    if (m_tool == Tool::Envelope && m_envelopeItem) {
+        resetEnvelope();
+        emit statusHint(QStringLiteral("Конверт сброшен."));
+        event->accept();
+        return;
+    }
+
     if (m_tool == Tool::Node) {
         const QPointF scenePos = mapToScene(event->pos());
         VectorItem *item = itemAtScene(scenePos);

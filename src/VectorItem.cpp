@@ -224,6 +224,33 @@ void VectorItem::setGradientFill(int style, const QColor &second, qreal angle)
     update();
 }
 
+void VectorItem::setGradientDefinition(int style, const QVector<GradientStop> &stops,
+                                       qreal angle, const QPointF &center,
+                                       qreal radius)
+{
+    m_object.fillStyle = qBound(0, style, 6);
+    m_object.gradientStops = stops;
+    m_object.gradientAngle = angle;
+    m_object.gradientCenter = QPointF(qBound(0.0, center.x(), 1.0),
+                                      qBound(0.0, center.y(), 1.0));
+    m_object.gradientRadius = qBound(0.01, radius, 4.0);
+    if (stops.size() >= 2) {
+        m_object.fill = stops.first().color;
+        m_object.fill2 = stops.last().color;
+    }
+    m_object.hasFill = true;
+    update();
+}
+
+void VectorItem::setMeshColors(const QColor &topRight, const QColor &bottomLeft,
+                               const QColor &bottomRight)
+{
+    m_object.fill2 = topRight;
+    m_object.meshColor3 = bottomLeft;
+    m_object.meshColor4 = bottomRight;
+    update();
+}
+
 void VectorItem::setStrokeColor(const QColor &color)
 {
     m_object.stroke = color;
@@ -252,6 +279,24 @@ void VectorItem::setStrokeStyle(int capStyle, int joinStyle, qreal miterLimit,
 void VectorItem::setObjectOpacity(qreal opacity)
 {
     m_object.opacity = qBound(0.0, opacity, 1.0);
+    update();
+}
+
+void VectorItem::setFillOpacity(qreal opacity)
+{
+    m_object.fillOpacity = qBound(0.0, opacity, 1.0);
+    update();
+}
+
+void VectorItem::setStrokeOpacity(qreal opacity)
+{
+    m_object.strokeOpacity = qBound(0.0, opacity, 1.0);
+    update();
+}
+
+void VectorItem::setBlendMode(int mode)
+{
+    m_object.blendMode = qBound(0, mode, 11);
     update();
 }
 

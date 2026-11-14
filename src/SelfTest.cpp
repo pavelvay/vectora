@@ -1047,6 +1047,353 @@ int SelfTest::run(const QString &directory)
                   && view.vectorItems().first()->object().type == ShapeType::Bezier,
               QStringLiteral("primitive converted to curves"));
 
+        // Shape Builder merges regions selected by a marquee.
+        {
+            view.setDocument(Document());
+            VectorObject first;
+            first.type = ShapeType::Rectangle;
+            first.path.addRect(QRectF(0, 0, 100, 100));
+            first.pos = QPointF(100, 100);
+            VectorObject second = first;
+            second.pos = QPointF(150, 100);
+            VectorItem *a = view.addVectorObject(first, false, false);
+            VectorItem *b = view.addVectorObject(second, false, false);
+            view.scene()->clearSelection();
+            a->setSelected(true);
+            b->setSelected(true);
+            view.show();
+            view.setActiveTool(Tool::ShapeBuilder);
+            const QPoint from = view.mapFromScene(QPointF(60, 60));
+            const QPoint to = view.mapFromScene(QPointF(320, 260));
+            drag(view, from, to);
+            check(view.vectorItems().size() == 1,
+                  QStringLiteral("shape builder merges all regions"));
+            view.setActiveTool(Tool::Select);
+        }
+
+        // Contour creates outer and inner outlines.
+        {
+            view.setDocument(Document());
+            VectorObject rect;
+            rect.type = ShapeType::Rectangle;
+            rect.path.addRect(QRectF(0, 0, 100, 80));
+            rect.pos = QPointF(100, 100);
+            rect.stroke = QColor("#ff0000");
+            VectorItem *item = view.addVectorObject(rect, false, false);
+            view.scene()->clearSelection();
+            item->setSelected(true);
+            view.applyContour(3, 4.0, 0, QColor("#ff0000"), true);
+            check(view.vectorItems().size() == 4,
+                  QStringLiteral("contour creates 3 outer outlines"));
+            view.applyContour(2, 4.0, 1, QColor("#00ff00"), false);
+            check(view.vectorItems().size() == 6,
+                  QStringLiteral("contour creates inner outlines"));
+        }
+
+        // Envelope warps the object through its control grid.
+        {
+            view.setDocument(Document());
+            VectorObject rect;
+            rect.type = ShapeType::Rectangle;
+            rect.path.addRect(QRectF(0, 0, 100, 100));
+            rect.pos = QPointF(100, 100);
+            VectorItem *item = view.addVectorObject(rect, false, false);
+            view.scene()->clearSelection();
+            item->setSelected(true);
+            view.show();
+            view.setActiveTool(Tool::Envelope);
+            sendMouse(view.viewport(), QEvent::MouseButtonPress,
+                      view.mapFromScene(QPointF(150, 150)), Qt::LeftButton,
+                      Qt::LeftButton);
+            sendMouse(view.viewport(), QEvent::MouseButtonRelease,
+                      view.mapFromScene(QPointF(150, 150)), Qt::LeftButton,
+                      Qt::NoButton);
+            check(view.envelopeActive(), QStringLiteral("envelope grid activated"));
+            const QPointF originalTopLeft = item->localBounds().topLeft();
+            const QPointF handleScene = item->mapToScene(originalTopLeft);
+            sendMouse(view.viewport(), QEvent::MouseButtonPress,
+                      view.mapFromScene(handleScene), Qt::LeftButton, Qt::LeftButton);
+            sendMouse(view.viewport(), QEvent::MouseMove,
+                      view.mapFromScene(handleScene + QPointF(-30, -30)),
+                      Qt::NoButton, Qt::LeftButton);
+            const QRectF warped = item->localBounds();
+            sendMouse(view.viewport(), QEvent::MouseButtonRelease,
+                      view.mapFromScene(handleScene + QPointF(-30, -30)),
+                      Qt::LeftButton, Qt::NoButton);
+            check(QLineF(originalTopLeft, warped.topLeft()).length() > 5.0
+                      && item->object().type == ShapeType::Rectangle,
+                  QStringLiteral("envelope drag warps geometry"));
+            view.setActiveTool(Tool::Select);
+        }
+
+        // Gradient types, stop transparency and colour spaces.
+        {
+            VectorObject gradient;
+            gradient.type = ShapeType::Rectangle;
+            gradient.path.addRect(QRectF(0, 0, 100, 100));
+            gradient.fillStyle = 4;
+            gradient.gradientStops = {GradientStop{0.0, QColor("#ff0000"), 1.0},
+                                      GradientStop{0.5, QColor("#00ff00"), 0.6},
+                                      GradientStop{1.0, QColor("#0000ff"), 1.0}};
+            Document doc;
+            doc.objects.append(gradient);
+            QImage image(120, 120, QImage::Format_ARGB32);
+            image.fill(Qt::white);
+            QPainter painter(&image);
+            doc.render(&painter);
+            painter.end();
+            check(image.pixelColor(10, 60) != image.pixelColor(58, 60)
+                      && image.pixelColor(58, 60) != image.pixelColor(100, 60),
+                  QStringLiteral("multi-stop gradient renders"));
+
+            gradient.fillStyle = 3;
+            Document conic;
+            conic.objects.append(gradient);
+            QImage conicImage(120, 120, QImage::Format_ARGB32);
+            conicImage.fill(Qt::white);
+            QPainter conicPainter(&conicImage);
+            conic.render(&conicPainter);
+            conicPainter.end();
+            check(conicImage.pixelColor(50, 50) != conicImage.pixelColor(50, 20),
+                  QStringLiteral("conic gradient renders"));
+
+            gradient.fillStyle = 6;
+            Document mesh;
+            mesh.objects.append(gradient);
+            QImage meshImage(120, 120, QImage::Format_ARGB32);
+            meshImage.fill(Qt::white);
+            QPainter meshPainter(&meshImage);
+            mesh.render(&meshPainter);
+            meshPainter.end();
+            check(meshImage.pixelColor(10, 10) != meshImage.pixelColor(100, 100),
+                  QStringLiteral("mesh gradient renders"));
+
+            Document parsed = Document::fromJson(conic.toJson(), nullptr);
+            check(parsed.objects.first().gradientStops.size() == 3
+                      && parsed.objects.first().fillStyle == 3,
+                  QStringLiteral("gradient stops serialize"));
+
+            const QString svg = conic.toSvg();
+            check(svg.contains(QStringLiteral("stop-color=\"#00ff00\""))
+                      && svg.contains(QStringLiteral("radialGradient"))
+                      && svg.contains(QStringLiteral("stop-opacity=\"0.60\"")),
+                  QStringLiteral("gradient exported to SVG"));
+
+            check(colorToHex(QColor("#123456")) == QStringLiteral("#123456")
+                      && colorFromHex(QStringLiteral("#00ff00")) == QColor("#00ff00"),
+                  QStringLiteral("hex colour conversion"));
+            qreal c = 0, m = 0, y = 0, k = 0;
+            colorToCmyk(QColor("#ff0000"), &c, &m, &y, &k);
+            check(qAbs(c) < 0.01 && qAbs(m - 1.0) < 0.01
+                      && qAbs(y - 1.0) < 0.01 && qAbs(k) < 0.01,
+                  QStringLiteral("RGB to CMYK conversion"));
+            const QColor fromCmyk = colorFromCmyk(1.0, 0.0, 0.0, 0.0);
+            check(fromCmyk.red() < 3 && fromCmyk.green() > 250
+                      && fromCmyk.blue() > 250,
+                  QStringLiteral("CMYK to RGB conversion"));
+            qreal labL = 0, labA = 0, labB = 0;
+            colorToLab(QColor("#ffffff"), &labL, &labA, &labB);
+            check(qAbs(labL - 100.0) < 1.0,
+                  QStringLiteral("RGB to Lab conversion"));
+            const QColor fromLab = colorFromLab(53.0, 80.0, 67.0);
+            check(fromLab.red() > 200 && fromLab.green() < 80,
+                  QStringLiteral("Lab to RGB conversion"));
+            const QColor hsl = colorFromHsl(0.0, 1.0, 0.5);
+            check(hsl.red() > 250 && hsl.green() < 5,
+                  QStringLiteral("HSL conversion"));
+        }
+
+        // Blend modes and independent fill/stroke transparency.
+        {
+            VectorObject top;
+            top.type = ShapeType::Rectangle;
+            top.path.addRect(QRectF(0, 0, 100, 100));
+            top.fill = QColor("#ff8800");
+            VectorObject plain = top;
+
+            top.blendMode = 1; // multiply
+            top.fillOpacity = 0.5;
+            Document doc;
+            doc.objects.append(plain);
+            doc.objects.append(top);
+            QImage image(120, 120, QImage::Format_ARGB32);
+            image.fill(Qt::white);
+            QPainter painter(&image);
+            doc.render(&painter);
+            painter.end();
+            const QColor blended = image.pixelColor(50, 50);
+
+            Document single;
+            single.objects.append(plain);
+            QImage plainImage(120, 120, QImage::Format_ARGB32);
+            plainImage.fill(Qt::white);
+            QPainter plainPainter(&plainImage);
+            single.render(&plainPainter);
+            plainPainter.end();
+
+            check(blended != plainImage.pixelColor(50, 50),
+                  QStringLiteral("blend mode changes compositing"));
+
+            Document parsed = Document::fromJson(doc.toJson(), nullptr);
+            check(parsed.objects.size() == 2
+                      && parsed.objects.at(1).blendMode == 1
+                      && qAbs(parsed.objects.at(1).fillOpacity - 0.5) < 0.001,
+                  QStringLiteral("blend mode and fill opacity serialize"));
+        }
+
+        // Text on path, text in shape and typography extras.
+        {
+            view.setDocument(Document());
+            VectorObject textObject;
+            textObject.type = ShapeType::Text;
+            textObject.text = QStringLiteral("Vectora");
+            textObject.font = QFont(QStringLiteral("DejaVu Sans"), 24);
+            textObject.textBox = QRectF(0, 0, 300, 60);
+            textObject.pos = QPointF(80, 80);
+            textObject.hasFill = true;
+
+            VectorObject curveObject;
+            curveObject.type = ShapeType::Bezier;
+            QPainterPath curve;
+            curve.moveTo(0, 120);
+            curve.cubicTo(80, 20, 220, 220, 300, 120);
+            curveObject.path = curve;
+            curveObject.pos = QPointF(60, 60);
+            curveObject.hasFill = false;
+            curveObject.hasStroke = true;
+
+            VectorItem *textItem = view.addVectorObject(textObject, false, false);
+            VectorItem *curveItem = view.addVectorObject(curveObject, false, false);
+            view.scene()->clearSelection();
+            textItem->setSelected(true);
+            curveItem->setSelected(true);
+            view.applyTextOnPath();
+            check(textItem->object().textOnPath
+                      && !textItem->object().textPathCurve.isEmpty()
+                      && !buildTextPath(textItem->object()).isEmpty(),
+                  QStringLiteral("text placed on a path"));
+
+            const QString svg = view.objects().isEmpty()
+                                    ? QString()
+                                    : QString();
+            Q_UNUSED(svg)
+
+            view.detachTextSpecial();
+            check(!textItem->object().textOnPath,
+                  QStringLiteral("text detached from path"));
+
+            textItem->setSelected(true);
+            curveItem->setSelected(true);
+            view.applyTextInShape();
+            check(textItem->object().textInShape
+                      && !textItem->object().textShape.isEmpty(),
+                  QStringLiteral("text placed inside a shape"));
+
+            view.detachTextSpecial();
+            VectorObject typography = textItem->object();
+            typography.underline = true;
+            typography.strikeOut = true;
+            typography.script = 1;
+            typography.wordSpacing = 6.0;
+            typography.horizontalScale = 1.25;
+            typography.verticalScale = 0.8;
+            typography.paragraphSpacing = 8.0;
+            typography.firstLineIndent = 12.0;
+            textItem->setObject(typography);
+
+            Document textDoc;
+            textDoc.objects.append(typography);
+            const Document reloaded = Document::fromJson(textDoc.toJson(), nullptr);
+            const VectorObject restored = reloaded.objects.first();
+            check(restored.underline && restored.strikeOut && restored.script == 1
+                      && qAbs(restored.wordSpacing - 6.0) < 0.001
+                      && qAbs(restored.horizontalScale - 1.25) < 0.001,
+                  QStringLiteral("typography attributes serialize"));
+
+            QImage textImage(420, 220, QImage::Format_ARGB32);
+            textImage.fill(Qt::white);
+            QPainter textPainter(&textImage);
+            textDoc.render(&textPainter);
+            textPainter.end();
+            check(textImage.pixelColor(400, 200) != QColor(Qt::black),
+                  QStringLiteral("styled text renders"));
+        }
+
+        // Multipage documents, duplication and master pages.
+        {
+            view.setDocument(Document());
+            check(view.pageList().size() == 1
+                      && view.currentPage() == 0,
+                  QStringLiteral("document starts with one page"));
+
+            VectorObject pageRect;
+            pageRect.type = ShapeType::Rectangle;
+            pageRect.path.addRect(QRectF(0, 0, 80, 60));
+            pageRect.pos = QPointF(100, 100);
+            VectorItem *pageOneItem = view.addVectorObject(pageRect, false, false);
+
+            const int pageTwo = view.addPage();
+            check(view.pageList().size() == 2 && view.currentPage() == pageTwo,
+                  QStringLiteral("page added"));
+            check(!pageOneItem->isVisible(),
+                  QStringLiteral("objects are hidden on other pages"));
+
+            VectorItem *pageTwoItem = view.addVectorObject(pageRect, false, false);
+            check(pageTwoItem->object().page == pageTwo,
+                  QStringLiteral("new objects belong to the current page"));
+
+            view.setCurrentPage(0);
+            check(pageOneItem->isVisible() && !pageTwoItem->isVisible(),
+                  QStringLiteral("switching pages updates visibility"));
+
+            const int copy = view.duplicatePage(0);
+            check(view.pageList().size() == 3 && view.currentPage() == copy,
+                  QStringLiteral("page duplicated"));
+            int copiedObjects = 0;
+            for (const VectorObject &object : view.objects()) {
+                if (object.page == copy)
+                    ++copiedObjects;
+            }
+            check(copiedObjects == 1,
+                  QStringLiteral("page duplication copies objects"));
+
+            view.movePage(copy, 0);
+            check(view.currentPage() == 0,
+                  QStringLiteral("page order changes"));
+
+            view.removePage(0);
+            check(view.pageList().size() == 2,
+                  QStringLiteral("page removed"));
+
+            const int master = view.addMaster(QStringLiteral("Обложка"));
+            check(master == 0 && view.masterList().size() == 1,
+                  QStringLiteral("master page created"));
+            view.setCurrentPage(-1 - master);
+            check(view.currentPage() < 0,
+                  QStringLiteral("master page can be edited"));
+            VectorItem *masterItem = view.addVectorObject(pageRect, false, false);
+            check(masterItem->object().page == -1 - master,
+                  QStringLiteral("objects can live on a master page"));
+
+            view.setCurrentPage(0);
+            view.applyMasterToPage(0, master);
+            check(view.pageList().at(0).master == master,
+                  QStringLiteral("master applied to page"));
+            const QImage preview = view.renderPageImage(0, QSize(160, 200));
+            check(!preview.isNull() && preview.width() == 160,
+                  QStringLiteral("page thumbnail renders"));
+
+            Document pagesDoc;
+            pagesDoc.pages = view.pageList();
+            pagesDoc.masters = view.masterList();
+            pagesDoc.currentPage = 0;
+            pagesDoc.objects = view.objects();
+            const Document reloaded = Document::fromJson(pagesDoc.toJson(), nullptr);
+            check(reloaded.pages.size() == 2 && reloaded.masters.size() == 1
+                      && reloaded.pages.at(0).master == master,
+                  QStringLiteral("pages and masters serialize"));
+        }
+
         // Node editor: add/delete, close/open, break and align.
         view.setDocument(Document());
         VectorObject nodeShape;

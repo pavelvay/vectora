@@ -4,14 +4,9 @@
 #include <QPainter>
 #include <QToolTip>
 
-ColorPalette::ColorPalette(QWidget *parent)
-    : QWidget(parent)
+QVector<PaletteEntry> ColorPalette::defaultEntries()
 {
-    setMouseTracking(true);
-    setFixedHeight(34);
-    setMinimumWidth(320);
-
-    m_entries = {
+    return {
         {QColor("#000000"), QStringLiteral("Чёрный")},
         {QColor("#1a1a1a"), QStringLiteral("90% чёрного")},
         {QColor("#333333"), QStringLiteral("80% чёрного")},
@@ -61,6 +56,31 @@ ColorPalette::ColorPalette(QWidget *parent)
     };
 }
 
+ColorPalette::ColorPalette(QWidget *parent)
+    : QWidget(parent)
+{
+    setMouseTracking(true);
+    setFixedHeight(34);
+    setMinimumWidth(320);
+
+    setEntries(defaultEntries());
+}
+
+void ColorPalette::setEntries(const QVector<PaletteEntry> &entries)
+{
+    m_entries = entries;
+    m_hovered = -1;
+    updateGeometry();
+    update();
+}
+
+void ColorPalette::addEntry(const PaletteEntry &entry)
+{
+    m_entries.append(entry);
+    updateGeometry();
+    update();
+}
+
 QSize ColorPalette::sizeHint() const
 {
     return QSize(m_entries.size() * 20, 34);
@@ -97,6 +117,16 @@ void ColorPalette::paintEvent(QPaintEvent *)
         p.setBrush(m_entries.at(i).color);
         p.drawRoundedRect(r, 2.0, 2.0);
 
+        if (m_entries.at(i).spot) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(0xff, 0xb3, 0x47));
+            p.drawEllipse(r.topLeft() + QPointF(3.0, 3.0), 2.2, 2.2);
+        } else if (m_entries.at(i).global) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(0x7f, 0xae, 0xf7));
+            p.drawEllipse(r.topRight() + QPointF(-3.0, 3.0), 2.0, 2.0);
+        }
+
         if (i == m_hovered) {
             p.setPen(QPen(QColor(0xf2, 0xf5, 0xfa), 1.6));
             p.setBrush(Qt::NoBrush);
@@ -113,8 +143,14 @@ void ColorPalette::mouseMoveEvent(QMouseEvent *event)
         update();
         if (index >= 0) {
             const PaletteEntry &entry = m_entries.at(index);
+            QString suffix;
+            if (entry.spot)
+                suffix = QStringLiteral("  [Spot]");
+            else if (entry.global)
+                suffix = QStringLiteral("  [Глобальный]");
             QToolTip::showText(event->globalPosition().toPoint(),
-                               QStringLiteral("%1 — %2").arg(entry.name, entry.color.name().toUpper()),
+                               QStringLiteral("%1 — %2%3")
+                                   .arg(entry.name, entry.color.name().toUpper(), suffix),
                                this);
         }
     }

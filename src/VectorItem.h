@@ -25,11 +25,18 @@ public:
     void setText(const QString &text);
     void setFillColor(const QColor &color);
     void setGradientFill(int style, const QColor &second, qreal angle);
+    void setGradientDefinition(int style, const QVector<GradientStop> &stops,
+                               qreal angle, const QPointF &center, qreal radius);
+    void setMeshColors(const QColor &topRight, const QColor &bottomLeft,
+                       const QColor &bottomRight);
     void setStrokeColor(const QColor &color);
     void setStrokeWidth(qreal width);
     void setStrokeStyle(int capStyle, int joinStyle, qreal miterLimit,
                         const QVector<qreal> &dashPattern);
     void setObjectOpacity(qreal opacity);
+    void setFillOpacity(qreal opacity);
+    void setStrokeOpacity(qreal opacity);
+    void setBlendMode(int mode);
     void setShadowEnabled(bool on);
     void setShadowOffset(const QPointF &offset);
     void setShadowOpacity(qreal opacity);

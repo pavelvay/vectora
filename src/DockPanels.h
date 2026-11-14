@@ -15,6 +15,7 @@ class QDoubleSpinBox;
 class QFontComboBox;
 class QLabel;
 class QLineEdit;
+class QListWidget;
 class QMainWindow;
 class QSlider;
 class QSpinBox;
@@ -51,6 +52,8 @@ private:
     void buildEffectsDocker();
     void buildOutlineDocker();
     void buildTextDocker();
+    void buildPagesDocker();
+    void refreshPages();
 
     QList<VectorItem *> selection() const;
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -110,8 +113,13 @@ private:
     QDoubleSpinBox *m_shadowOpacity = nullptr;
     QToolButton *m_shadowColorButton = nullptr;
     QColor m_shadowColor = QColor(0, 0, 0, 180);
+    QListWidget *m_pagesList = nullptr;
+    QComboBox *m_masterCombo = nullptr;
     QSlider *m_effectOpacity = nullptr;
     QLabel *m_effectOpacityValue = nullptr;
+    QSlider *m_fillOpacity = nullptr;
+    QSlider *m_strokeOpacity = nullptr;
+    QComboBox *m_blendMode = nullptr;
     QSpinBox *m_blendSteps = nullptr;
 
     QToolButton *m_outlineColorButton = nullptr;

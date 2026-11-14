@@ -19,6 +19,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMainWindow>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -212,6 +213,7 @@ DockPanels::DockPanels(QMainWindow *host, CanvasView *view, QObject *parent)
     buildEffectsDocker();
     buildOutlineDocker();
     buildTextDocker();
+    buildPagesDocker();
 
     m_opacityTimer = new QTimer(this);
     m_opacityTimer->setSingleShot(true);
@@ -221,6 +223,7 @@ DockPanels::DockPanels(QMainWindow *host, CanvasView *view, QObject *parent)
     });
 
     connect(m_view, &CanvasView::selectionChanged, this, [this](int) { refresh(); });
+    connect(m_view, &CanvasView::pageChanged, this, [this](int) { refreshPages(); });
 }
 
 QDockWidget *DockPanels::createDock(const QString &title, QWidget *content)
@@ -954,50 +957,224 @@ void DockPanels::openGradientDialog()
         return;
     }
 
+    const VectorObject first = selected.first()->object();
+    QVector<GradientStop> stops = first.gradientStops;
+    if (stops.size() < 2) {
+        stops = {GradientStop{0.0, first.fill, 1.0},
+                 GradientStop{1.0, first.fill2, 1.0}};
+    }
+    QColor meshTopRight = first.fill2;
+    QColor meshBottomLeft = first.meshColor3;
+    QColor meshBottomRight = first.meshColor4;
+
     QDialog dialog(m_host);
-    dialog.setWindowTitle(QStringLiteral("Градиентная заливка"));
+    dialog.setWindowTitle(QStringLiteral("Заливка и градиент"));
+    dialog.resize(420, 560);
     auto *form = new QFormLayout(&dialog);
+
     auto *type = new QComboBox(&dialog);
     type->addItems({QStringLiteral("Сплошная"), QStringLiteral("Линейный градиент"),
-                    QStringLiteral("Радиальный градиент")});
-    auto *color2 = new QPushButton(&dialog);
-    color2->setText(m_gradientColor2.name(QColor::HexArgb).toUpper());
-    color2->setStyleSheet(QStringLiteral("text-align:left; padding:5px;"));
-    auto *angle = spinField(&dialog, 0, 359, 45, QStringLiteral(" °"), 0, 76);
+                    QStringLiteral("Радиальный градиент"),
+                    QStringLiteral("Конический градиент"),
+                    QStringLiteral("Многоточечный градиент"),
+                    QStringLiteral("Свободный градиент"),
+                    QStringLiteral("Mesh (4 угла)")});
+    type->setCurrentIndex(qBound(0, first.fillStyle, 6));
     form->addRow(QStringLiteral("Тип заливки"), type);
-    form->addRow(QStringLiteral("Второй цвет"), color2);
-    form->addRow(QStringLiteral("Угол (для линейного)"), angle);
+
+    auto *list = new QListWidget(&dialog);
+    list->setMinimumHeight(140);
+    form->addRow(QStringLiteral("Цветовые точки"), list);
+
+    auto *stopRow = new QHBoxLayout;
+    auto *addStop = new QPushButton(QStringLiteral("Добавить"), &dialog);
+    auto *removeStop = new QPushButton(QStringLiteral("Удалить"), &dialog);
+    auto *stopColor = new QPushButton(&dialog);
+    auto *position = spinField(&dialog, 0, 100, 100, QStringLiteral(" %"), 0, 60);
+    auto *opacity = spinField(&dialog, 0, 100, 100, QStringLiteral(" %"), 0, 60);
+    stopRow->addWidget(addStop);
+    stopRow->addWidget(removeStop);
+    stopRow->addWidget(stopColor, 1);
+    stopRow->addWidget(position);
+    stopRow->addWidget(opacity);
+    form->addRow(QStringLiteral("Точка"), stopRow);
+
+    auto *angle = spinField(&dialog, 0, 359, qRound(first.gradientAngle),
+                            QStringLiteral(" °"), 0, 76);
+    auto *centerX = spinField(&dialog, 0, 100,
+                              qRound(first.gradientCenter.x() * 100),
+                              QStringLiteral(" %"), 0, 60);
+    auto *centerY = spinField(&dialog, 0, 100,
+                              qRound(first.gradientCenter.y() * 100),
+                              QStringLiteral(" %"), 0, 60);
+    auto *radius = spinField(&dialog, 1, 400,
+                             qRound(first.gradientRadius * 100),
+                             QStringLiteral(" %"), 0, 60);
+    form->addRow(QStringLiteral("Угол"), angle);
+    auto *centerRow = new QHBoxLayout;
+    centerRow->addWidget(centerX);
+    centerRow->addWidget(centerY);
+    form->addRow(QStringLiteral("Центр X / Y"), centerRow);
+    form->addRow(QStringLiteral("Радиус"), radius);
+
+    auto *meshRow = new QHBoxLayout;
+    auto *meshTR = new QPushButton(&dialog);
+    auto *meshBL = new QPushButton(&dialog);
+    auto *meshBR = new QPushButton(&dialog);
+    const auto labelButton = [](QPushButton *button, const QColor &color) {
+        button->setText(color.name(QColor::HexArgb).toUpper());
+        button->setStyleSheet(QStringLiteral("text-align:left; padding:4px;"));
+    };
+    labelButton(meshTR, meshTopRight);
+    labelButton(meshBL, meshBottomLeft);
+    labelButton(meshBR, meshBottomRight);
+    meshRow->addWidget(meshTR, 1);
+    meshRow->addWidget(meshBL, 1);
+    meshRow->addWidget(meshBR, 1);
+    form->addRow(QStringLiteral("Mesh TR / BL / BR"), meshRow);
+
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok
                                              | QDialogButtonBox::Cancel,
                                          &dialog);
     form->addRow(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    connect(color2, &QPushButton::clicked, &dialog, [this, color2]() {
-        const QColor color = QColorDialog::getColor(
-            m_gradientColor2, m_host, QStringLiteral("Второй цвет градиента"),
-            QColorDialog::ShowAlphaChannel);
-        if (!color.isValid())
+
+    int current = 0;
+    const auto refreshStops = [&]() {
+        const QSignalBlocker blocker(list);
+        list->clear();
+        for (const GradientStop &stop : stops) {
+            auto *entry = new QListWidgetItem(
+                QStringLiteral("%1   %2   %3%")
+                    .arg(stop.position * 100.0, 0, 'f', 1)
+                    .arg(stop.color.name(QColor::HexRgb).toUpper())
+                    .arg(stop.opacity * 100.0, 0, 'f', 0));
+            QPixmap swatch(18, 18);
+            swatch.fill(stop.color);
+            entry->setIcon(QIcon(swatch));
+            list->addItem(entry);
+        }
+        current = qBound(0, current, qMax(0, stops.size() - 1));
+        if (list->count() > 0)
+            list->setCurrentRow(current);
+    };
+    const auto loadCurrent = [&]() {
+        if (stops.isEmpty())
             return;
-        m_gradientColor2 = color;
-        color2->setText(color.name(QColor::HexArgb).toUpper());
+        current = qBound(0, current, stops.size() - 1);
+        const GradientStop &stop = stops.at(current);
+        QSignalBlocker positionBlocker(position);
+        QSignalBlocker opacityBlocker(opacity);
+        position->setValue(qRound(stop.position * 100.0));
+        opacity->setValue(qRound(stop.opacity * 100.0));
+        labelButton(stopColor, stop.color);
+    };
+    refreshStops();
+    loadCurrent();
+
+    connect(list, &QListWidget::currentRowChanged, &dialog, [&](int row) {
+        current = row;
+        loadCurrent();
+    });
+    connect(addStop, &QPushButton::clicked, &dialog, [&]() {
+        qreal at = 0.5;
+        if (!stops.isEmpty()) {
+            std::sort(stops.begin(), stops.end(),
+                      [](const GradientStop &a, const GradientStop &b) {
+                          return a.position < b.position;
+                      });
+            at = qBound(0.0, (stops.first().position + stops.last().position) / 2.0,
+                        1.0);
+        }
+        stops.append(GradientStop{at, stops.isEmpty() ? QColor(Qt::white)
+                                                      : stops.first().color,
+                                  1.0});
+        current = stops.size() - 1;
+        refreshStops();
+        loadCurrent();
+    });
+    connect(removeStop, &QPushButton::clicked, &dialog, [&]() {
+        if (stops.size() <= 2 || current < 0 || current >= stops.size())
+            return;
+        stops.removeAt(current);
+        refreshStops();
+        loadCurrent();
+    });
+    connect(position, &QDoubleSpinBox::valueChanged, &dialog, [&](double value) {
+        if (current < 0 || current >= stops.size())
+            return;
+        stops[current].position = qBound(0.0, value / 100.0, 1.0);
+    });
+    connect(opacity, &QDoubleSpinBox::valueChanged, &dialog, [&](double value) {
+        if (current < 0 || current >= stops.size())
+            return;
+        stops[current].opacity = qBound(0.0, value / 100.0, 1.0);
+    });
+    connect(stopColor, &QPushButton::clicked, &dialog, [&]() {
+        if (current < 0 || current >= stops.size())
+            return;
+        const QColor picked = QColorDialog::getColor(
+            stops.at(current).color, m_host, QStringLiteral("Цвет точки"),
+            QColorDialog::ShowAlphaChannel);
+        if (!picked.isValid())
+            return;
+        stops[current].color = picked;
+        labelButton(stopColor, picked);
+        refreshStops();
+    });
+    connect(meshTR, &QPushButton::clicked, &dialog, [&]() {
+        const QColor picked = QColorDialog::getColor(meshTopRight, m_host,
+                                                     QStringLiteral("Правый верхний угол"));
+        if (picked.isValid()) {
+            meshTopRight = picked;
+            labelButton(meshTR, picked);
+        }
+    });
+    connect(meshBL, &QPushButton::clicked, &dialog, [&]() {
+        const QColor picked = QColorDialog::getColor(meshBottomLeft, m_host,
+                                                     QStringLiteral("Левый нижний угол"));
+        if (picked.isValid()) {
+            meshBottomLeft = picked;
+            labelButton(meshBL, picked);
+        }
+    });
+    connect(meshBR, &QPushButton::clicked, &dialog, [&]() {
+        const QColor picked = QColorDialog::getColor(meshBottomRight, m_host,
+                                                     QStringLiteral("Правый нижний угол"));
+        if (picked.isValid()) {
+            meshBottomRight = picked;
+            labelButton(meshBR, picked);
+        }
     });
 
     if (dialog.exec() != QDialog::Accepted)
         return;
 
+    std::sort(stops.begin(), stops.end(),
+              [](const GradientStop &a, const GradientStop &b) {
+                  return a.position < b.position;
+              });
     const int style = type->currentIndex();
     emit beginEdit();
     for (VectorItem *item : selected) {
-        if (style == 0)
-            item->setFillColor(item->object().fill);
-        else
-            item->setGradientFill(style, m_gradientColor2, angle->value());
+        if (style == 0) {
+            item->setFillColor(stops.isEmpty() ? item->object().fill
+                                               : stops.first().color);
+            continue;
+        }
+        item->setGradientDefinition(style, stops, angle->value(),
+                                    QPointF(centerX->value() / 100.0,
+                                            centerY->value() / 100.0),
+                                    radius->value() / 100.0);
+        if (style == 6)
+            item->setMeshColors(meshTopRight, meshBottomLeft, meshBottomRight);
     }
     emit endEdit();
-    emit status(style == 0 ? QStringLiteral("Заливка снова сплошная.")
-                           : QStringLiteral("Градиент применён к объектам: %1")
-                                 .arg(selected.size()));
+    emit status(style == 0
+                    ? QStringLiteral("Заливка снова сплошная.")
+                    : QStringLiteral("Градиент применён к объектам: %1")
+                          .arg(selected.size()));
 }
 
 void DockPanels::buildColorDocker()
@@ -1431,8 +1608,52 @@ void DockPanels::buildEffectsDocker()
     opacityRow->addWidget(m_effectOpacityValue);
     transparencyLayout->addLayout(opacityRow);
 
+    const auto opacityRowFor = [&](const QString &name, QSlider *&slider) {
+        auto *row = new QHBoxLayout;
+        row->addWidget(fieldLabel(name, transparencyTab));
+        slider = new QSlider(Qt::Horizontal, transparencyTab);
+        slider->setRange(0, 100);
+        slider->setValue(100);
+        row->addWidget(slider, 1);
+        transparencyLayout->addLayout(row);
+    };
+    opacityRowFor(QStringLiteral("Заливка"), m_fillOpacity);
+    opacityRowFor(QStringLiteral("Обводка"), m_strokeOpacity);
+
+    auto *blendRow = new QHBoxLayout;
+    blendRow->addWidget(fieldLabel(QStringLiteral("Режим"), transparencyTab));
+    m_blendMode = new QComboBox(transparencyTab);
+    m_blendMode->addItems({QStringLiteral("Обычный"), QStringLiteral("Умножение"),
+                           QStringLiteral("Экран"), QStringLiteral("Перекрытие"),
+                           QStringLiteral("Замена тёмным"), QStringLiteral("Замена светлым"),
+                           QStringLiteral("Осветление"), QStringLiteral("Затемнение"),
+                           QStringLiteral("Жёсткий свет"), QStringLiteral("Мягкий свет"),
+                           QStringLiteral("Разница"), QStringLiteral("Исключение")});
+    blendRow->addWidget(m_blendMode, 1);
+    transparencyLayout->addLayout(blendRow);
+
+    const auto applyOpacityParts = [this]() {
+        const QList<VectorItem *> selected = selection();
+        if (selected.isEmpty())
+            return;
+        emit beginEdit();
+        for (VectorItem *item : selected) {
+            item->setFillOpacity(m_fillOpacity->value() / 100.0);
+            item->setStrokeOpacity(m_strokeOpacity->value() / 100.0);
+            item->setBlendMode(m_blendMode->currentIndex());
+        }
+        emit endEdit();
+    };
+    connect(m_fillOpacity, &QSlider::valueChanged, this,
+            [applyOpacityParts](int) { applyOpacityParts(); });
+    connect(m_strokeOpacity, &QSlider::valueChanged, this,
+            [applyOpacityParts](int) { applyOpacityParts(); });
+    connect(m_blendMode, &QComboBox::currentIndexChanged, this,
+            [applyOpacityParts](int) { applyOpacityParts(); });
+
     auto *transparencyHint = new QLabel(
-        QStringLiteral("Прозрачность применяется сразу при движении ползунка."),
+        QStringLiteral("Прозрачность заливки и обводки независима; режим "
+                       "наложения смешивает объект с тем, что под ним."),
         transparencyTab);
     transparencyHint->setWordWrap(true);
     transparencyHint->setStyleSheet(QStringLiteral("color:#757b85; font-size:11px;"));
@@ -1956,4 +2177,234 @@ void DockPanels::refresh()
             updateColorPreview();
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pages and master pages
+// ---------------------------------------------------------------------------
+
+void DockPanels::buildPagesDocker()
+{
+    auto *content = new QWidget;
+    auto *layout = new QVBoxLayout(content);
+    layout->setContentsMargins(8, 8, 8, 8);
+    layout->setSpacing(6);
+
+    m_pagesList = new QListWidget(content);
+    m_pagesList->setViewMode(QListView::IconMode);
+    m_pagesList->setResizeMode(QListView::Adjust);
+    m_pagesList->setMovement(QListView::Static);
+    m_pagesList->setIconSize(QSize(92, 122));
+    m_pagesList->setGridSize(QSize(108, 156));
+    m_pagesList->setSpacing(4);
+    m_pagesList->setWordWrap(true);
+    layout->addWidget(m_pagesList, 1);
+
+    auto *buttons = new QHBoxLayout;
+    const auto makeButton = [&](const QString &text, const QString &tip) {
+        auto *button = new QToolButton(content);
+        button->setText(text);
+        button->setToolTip(tip);
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        buttons->addWidget(button);
+        return button;
+    };
+    auto *addButton = makeButton(QStringLiteral("+"),
+                                 QStringLiteral("Добавить страницу"));
+    auto *duplicateButton = makeButton(QStringLiteral("⧉"),
+                                       QStringLiteral("Дублировать страницу"));
+    auto *removeButton = makeButton(QStringLiteral("−"),
+                                    QStringLiteral("Удалить страницу"));
+    auto *upButton = makeButton(QStringLiteral("↑"),
+                                QStringLiteral("Переместить выше"));
+    auto *downButton = makeButton(QStringLiteral("↓"),
+                                  QStringLiteral("Переместить ниже"));
+    layout->addLayout(buttons);
+
+    layout->addWidget(separator(content));
+
+    auto *masterRow = new QHBoxLayout;
+    masterRow->addWidget(fieldLabel(QStringLiteral("Мастер"), content));
+    m_masterCombo = new QComboBox(content);
+    masterRow->addWidget(m_masterCombo, 1);
+    layout->addLayout(masterRow);
+
+    auto *masterButtons = new QHBoxLayout;
+    auto *createMaster = new QToolButton(content);
+    createMaster->setText(QStringLiteral("Создать мастер"));
+    createMaster->setToolTip(QStringLiteral("Скопировать текущую страницу в мастер"));
+    auto *openMaster = new QToolButton(content);
+    openMaster->setText(QStringLiteral("Открыть"));
+    openMaster->setToolTip(QStringLiteral("Редактировать мастер-страницу"));
+    masterButtons->addWidget(createMaster, 1);
+    masterButtons->addWidget(openMaster);
+    layout->addLayout(masterButtons);
+
+    auto *headerHint = new QLabel(QStringLiteral(
+        "Колонтитулы и нумерация мастер-страницы видны на всех "
+        "страницах, к которым она применена."), content);
+    headerHint->setWordWrap(true);
+    headerHint->setStyleSheet(QStringLiteral("color:#757b85; font-size:11px;"));
+    layout->addWidget(headerHint);
+
+    connect(m_pagesList, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (m_updating || row < 0)
+            return;
+        const int pages = m_view->pageList().size();
+        m_view->setCurrentPage(row < pages ? row : -1 - (row - pages));
+    });
+    connect(m_pagesList, &QListWidget::itemDoubleClicked, this,
+            [this](QListWidgetItem *item) {
+                if (m_updating || !item)
+                    return;
+                const int row = m_pagesList->row(item);
+                const int pages = m_view->pageList().size();
+                bool ok = false;
+                if (row < pages) {
+                    const QString name = QInputDialog::getText(
+                        m_host, QStringLiteral("Имя страницы"),
+                        QStringLiteral("Название:"), QLineEdit::Normal,
+                        m_view->pageLabel(row), &ok);
+                    if (ok)
+                        m_view->renamePage(row, name);
+                } else {
+                    const int master = row - pages;
+                    const QString name = QInputDialog::getText(
+                        m_host, QStringLiteral("Имя мастера"),
+                        QStringLiteral("Название:"), QLineEdit::Normal,
+                        m_view->pageLabel(-1 - master), &ok);
+                    if (ok)
+                        m_view->renameMaster(master, name);
+                }
+                refreshPages();
+            });
+
+    connect(addButton, &QToolButton::clicked, this, [this]() {
+        m_view->addPage();
+        refreshPages();
+    });
+    connect(duplicateButton, &QToolButton::clicked, this, [this]() {
+        m_view->duplicatePage(qMax(0, m_view->currentPage()));
+        refreshPages();
+    });
+    connect(removeButton, &QToolButton::clicked, this, [this]() {
+        m_view->removePage(qMax(0, m_view->currentPage()));
+        refreshPages();
+    });
+    connect(upButton, &QToolButton::clicked, this, [this]() {
+        const int page = m_view->currentPage();
+        if (page > 0) {
+            m_view->movePage(page, page - 1);
+            refreshPages();
+        }
+    });
+    connect(downButton, &QToolButton::clicked, this, [this]() {
+        const int page = m_view->currentPage();
+        if (page >= 0 && page + 1 < m_view->pageList().size()) {
+            m_view->movePage(page, page + 1);
+            refreshPages();
+        }
+    });
+    connect(createMaster, &QToolButton::clicked, this, [this]() {
+        bool ok = false;
+        const QString name = QInputDialog::getText(
+            m_host, QStringLiteral("Новая мастер-страница"),
+            QStringLiteral("Название:"), QLineEdit::Normal,
+            QStringLiteral("Мастер %1").arg(m_view->masterList().size() + 1), &ok);
+        if (!ok)
+            return;
+        const int master = m_view->addMaster(name);
+        if (m_view->currentPage() >= 0) {
+            m_view->applyMasterToPage(m_view->currentPage(), master);
+            // Copy the current page artwork into the new master page.
+            const QVector<VectorObject> objects = m_view->objects();
+            const int page = m_view->currentPage();
+            m_view->setCurrentPage(-1 - master);
+            for (const VectorObject &object : objects) {
+                if (object.page != page)
+                    continue;
+                VectorObject copy = object;
+                copy.page = -1 - master;
+                copy.id = 0;
+                copy.group = 0;
+                m_view->addVectorObject(copy, false, false);
+            }
+            m_view->setCurrentPage(page);
+        }
+        refreshPages();
+        emit status(QStringLiteral("Мастер-страница создана."));
+    });
+    connect(openMaster, &QToolButton::clicked, this, [this]() {
+        const int current = m_view->currentPage();
+        if (current < 0)
+            return;
+        int master = m_masterCombo->currentIndex() - 1;
+        if (master < 0)
+            master = 0;
+        if (m_view->masterList().isEmpty())
+            return;
+        m_view->setCurrentPage(-1 - qBound(0, master, m_view->masterList().size() - 1));
+        refreshPages();
+    });
+    connect(m_masterCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (m_updating)
+            return;
+        const int page = m_view->currentPage();
+        if (page < 0)
+            return;
+        m_view->applyMasterToPage(page, index - 1);
+        refreshPages();
+    });
+
+    createDock(QStringLiteral("Страницы"), content);
+    refreshPages();
+}
+
+void DockPanels::refreshPages()
+{
+    if (!m_pagesList)
+        return;
+    m_updating = true;
+    const QSignalBlocker blocker(m_pagesList);
+    m_pagesList->clear();
+
+    const QVector<PageInfo> pages = m_view->pageList();
+    for (int i = 0; i < pages.size(); ++i) {
+        const QImage preview = m_view->renderPageImage(i, QSize(184, 244));
+        auto *item = new QListWidgetItem(QIcon(QPixmap::fromImage(preview)),
+                                         pages.at(i).name, m_pagesList);
+        item->setToolTip(QStringLiteral("%1\n%2 × %3 px\nМастер: %4")
+                             .arg(pages.at(i).name)
+                             .arg(qRound(pages.at(i).size.width()))
+                             .arg(qRound(pages.at(i).size.height()))
+                             .arg(pages.at(i).master >= 0
+                                      ? m_view->pageLabel(-1 - pages.at(i).master)
+                                      : QStringLiteral("нет")));
+    }
+    const QVector<MasterPage> masters = m_view->masterList();
+    for (int i = 0; i < masters.size(); ++i) {
+        const QImage preview = m_view->renderPageImage(-1 - i, QSize(184, 244));
+        auto *item = new QListWidgetItem(QIcon(QPixmap::fromImage(preview)),
+                                         QStringLiteral("★ %1").arg(masters.at(i).name),
+                                         m_pagesList);
+        item->setToolTip(QStringLiteral("Мастер-страница «%1»").arg(masters.at(i).name));
+    }
+
+    const int current = m_view->currentPage();
+    if (current >= 0)
+        m_pagesList->setCurrentRow(current);
+    else
+        m_pagesList->setCurrentRow(pages.size() + (-1 - current));
+
+    const QSignalBlocker comboBlocker(m_masterCombo);
+    m_masterCombo->clear();
+    m_masterCombo->addItem(QStringLiteral("Без мастера"));
+    for (const MasterPage &master : masters)
+        m_masterCombo->addItem(master.name);
+    if (current >= 0 && current < pages.size())
+        m_masterCombo->setCurrentIndex(pages.at(current).master + 1);
+    else
+        m_masterCombo->setCurrentIndex(0);
+
+    m_updating = false;
 }
