@@ -3382,6 +3382,8 @@ void MainWindow::showWelcome()
         for (QDockWidget *dock : m_dockPanels->docks())
             dock->hide();
     }
+    if (m_assetDock)
+        m_assetDock->hide();
     statusBar()->hide();
 
     m_welcome->setRecentFiles(recentFiles());
@@ -3406,6 +3408,10 @@ void MainWindow::showEditor()
     if (m_dockPanels) {
         for (QDockWidget *dock : m_dockPanels->docks())
             dock->show();
+    }
+    if (m_assetDock) {
+        m_assetDock->show();
+        m_assetDock->raise();
     }
     statusBar()->show();
 }
@@ -5181,7 +5187,7 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("О программе"),
         QStringLiteral(
-            "<h3>Vectora 0.2.1</h3>"
+            "<h3>Vectora 0.2.2</h3>"
             "<p>Кроссплатформенный векторный редактор на C++ и Qt 6.</p>"
             "<p>Логические операции, нож, ластик, Shape Builder, контур и "
             "конверт; градиенты всех типов, цветовые пространства и палитры; "

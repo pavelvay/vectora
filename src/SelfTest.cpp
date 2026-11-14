@@ -1912,8 +1912,17 @@ int SelfTest::run(const QString &directory)
         window.resize(1400, 900);
         window.show();
         QApplication::processEvents();
+        QDockWidget *libraryDock = nullptr;
+        for (QDockWidget *dock : window.findChildren<QDockWidget *>()) {
+            if (dock->windowTitle() == QStringLiteral("Библиотека"))
+                libraryDock = dock;
+        }
+        check(libraryDock != nullptr && !libraryDock->isVisible(),
+              QStringLiteral("library dock hidden on the welcome page"));
         window.openPath(dir.filePath(QStringLiteral("sample.vct")));
         QApplication::processEvents();
+        check(libraryDock != nullptr && libraryDock->isVisible(),
+              QStringLiteral("library dock appears in the editor"));
 
         auto *canvas = window.findChild<CanvasView *>();
         check(canvas != nullptr, QStringLiteral("canvas found in main window"));
