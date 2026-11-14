@@ -57,8 +57,8 @@ target_link_libraries(vectora PRIVATE
 )
 
 if(WIN32)
-    file(TO_NATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/resources/vectora.ico"
-        VECTORA_ICON)
+    # Forward slashes: rc.exe treats backslashes in quoted paths as escapes.
+    set(VECTORA_ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/vectora.ico")
     configure_file(resources/vectora.rc.in
         ${CMAKE_CURRENT_BINARY_DIR}/vectora.rc @ONLY)
     target_sources(vectora PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vectora.rc)
