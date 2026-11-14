@@ -22,6 +22,7 @@ class QTreeWidgetItem;
 
 class CanvasView;
 class ColorPalette;
+class PageBar;
 class DockPanels;
 class Ruler;
 class ToolPalette;
@@ -114,6 +115,7 @@ private:
     Ruler *m_vRuler = nullptr;
     ToolPalette *m_toolPalette = nullptr;
     ColorPalette *m_palette = nullptr;
+    PageBar *m_pageBar = nullptr;
 
     QDockWidget *m_toolsDock = nullptr;
     QDockWidget *m_paletteDock = nullptr;

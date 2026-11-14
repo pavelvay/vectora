@@ -68,6 +68,7 @@ public:
     void renameMaster(int index, const QString &name);
     void setMasterInfo(int index, const MasterPage &master);
     void applyMasterToPage(int pageIndex, int masterIndex);
+    int createMasterFromPage(int pageIndex, const QString &name);
     void applyPageVisibility();
     QImage renderPageImage(int index, const QSize &size) const;
     QVector<VectorObject> objects() const;

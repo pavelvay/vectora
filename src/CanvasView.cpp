@@ -1093,6 +1093,36 @@ void CanvasView::applyMasterToPage(int pageIndex, int masterIndex)
     viewport()->update();
 }
 
+int CanvasView::createMasterFromPage(int pageIndex, const QString &name)
+{
+    if (pageIndex < 0 || pageIndex >= m_pages.size())
+        return -1;
+    if (m_currentPage >= 0 && m_currentPage < m_pages.size())
+        m_pages[m_currentPage].size = m_pageSize;
+
+    QVector<VectorObject> copies;
+    for (VectorItem *item : vectorItems()) {
+        if (item->object().page == pageIndex)
+            copies.append(item->object());
+    }
+
+    emit beginEdit();
+    const int master = addMaster(name);
+    setCurrentPage(-1 - master);
+    for (VectorObject copy : copies) {
+        copy.page = -1 - master;
+        copy.id = 0;
+        copy.masterId = 0;
+        copy.group = 0;
+        addVectorObject(copy, false, false);
+    }
+    m_pages[pageIndex].master = master;
+    emit endEdit();
+    setCurrentPage(pageIndex);
+    emit pageChanged(m_currentPage);
+    return master;
+}
+
 QImage CanvasView::renderPageImage(int index, const QSize &size) const
 {
     Document document;

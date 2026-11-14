@@ -1373,6 +1373,9 @@ bool Document::load(const QString &path, QString *error)
         return false;
 
     pageSize = loaded.pageSize;
+    pages = loaded.pages;
+    masters = loaded.masters;
+    currentPage = loaded.currentPage;
     layers = loaded.layers;
     groups = loaded.groups;
     guidesX = loaded.guidesX;

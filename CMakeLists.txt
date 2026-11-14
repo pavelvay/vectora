@@ -43,6 +43,8 @@ qt_add_executable(vectora
     src/SvgImporter.h
     src/PageDialog.cpp
     src/PageDialog.h
+    src/PageBar.cpp
+    src/PageBar.h
     src/WelcomeWidget.cpp
     src/WelcomeWidget.h
     resources/resources.qrc

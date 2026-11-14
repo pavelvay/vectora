@@ -76,6 +76,7 @@
 
 #include "CanvasView.h"
 #include "ColorPalette.h"
+#include "PageBar.h"
 #include "DockPanels.h"
 #include "Icons.h"
 #include "PageDialog.h"
@@ -1622,6 +1623,8 @@ void MainWindow::createCanvas()
     connect(m_view, &CanvasView::endEdit, this, &MainWindow::endEdit);
     connect(m_view, &CanvasView::selectionChanged, this,
             &MainWindow::onSelectionChanged);
+    connect(m_view, &CanvasView::pageChanged, this,
+            [this](int) { updatePageBadge(); });
     connect(m_view, &CanvasView::contextMenuRequested, this,
             &MainWindow::showCanvasContextMenu);
     connect(m_view, &CanvasView::colorPicked, this, [this](const QColor &color) {
@@ -1695,7 +1698,14 @@ void MainWindow::createDocks()
     // Bottom: colour palette
     m_paletteDock = new QDockWidget(QStringLiteral("Палитра"), this);
     m_paletteDock->setObjectName(QStringLiteral("PaletteDock"));
-    m_palette = new ColorPalette(m_paletteDock);
+    auto *bottomPanel = new QWidget(m_paletteDock);
+    auto *bottomLayout = new QVBoxLayout(bottomPanel);
+    bottomLayout->setContentsMargins(0, 0, 0, 0);
+    bottomLayout->setSpacing(0);
+    m_pageBar = new PageBar(bottomPanel);
+    bottomLayout->addWidget(m_pageBar);
+
+    m_palette = new ColorPalette(bottomPanel);
     {
         // Restore user, global and spot colours saved between sessions.
         QSettings settings(QStringLiteral("Vectora"), QStringLiteral("Vectora"));
@@ -1716,11 +1726,19 @@ void MainWindow::createDocks()
         }
         m_palette->setEntries(entries);
     }
-    m_paletteDock->setWidget(m_palette);
+    bottomLayout->addWidget(m_palette);
+    m_paletteDock->setWidget(bottomPanel);
     m_paletteDock->setFeatures(QDockWidget::NoDockWidgetFeatures);
     m_paletteDock->setTitleBarWidget(new QWidget(m_paletteDock));
-    m_paletteDock->setFixedHeight(36);
+    m_paletteDock->setFixedHeight(66);
     addDockWidget(Qt::BottomDockWidgetArea, m_paletteDock);
+
+    m_pageBar->setView(m_view);
+    connect(m_pageBar, &PageBar::status, this, [this](const QString &text) {
+        statusBar()->showMessage(text, 3000);
+    });
+    connect(m_pageBar, &PageBar::pageSetupRequested, this,
+            &MainWindow::changePageSize);
 
     connect(m_palette, &ColorPalette::statusHint, this, [this](const QString &text) {
         statusBar()->showMessage(text, 4000);
@@ -2837,6 +2855,20 @@ void MainWindow::updatePageBadge()
                     .arg(qRound(size.width()))
                     .arg(qRound(size.height()));
     m_pageBadge->setText(label);
+    if (m_pageLabel) {
+        const int current = m_view->currentPage();
+        const int total = m_view->pageList().size();
+        if (current >= 0) {
+            m_pageLabel->setText(QStringLiteral("%1  ·  страница %2 из %3")
+                                     .arg(m_view->pageLabel(current))
+                                     .arg(current + 1)
+                                     .arg(total));
+        } else {
+            m_pageLabel->setText(QStringLiteral("Мастер: %1")
+                                     .arg(m_view->pageLabel(current).section(
+                                         QStringLiteral(": "), 1)));
+        }
+    }
 }
 
 void MainWindow::openDocument()

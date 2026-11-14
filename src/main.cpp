@@ -48,6 +48,13 @@ int main(int argc, char *argv[])
         }
     }
 
+    // Development helper: switch to the given page.
+    const int pageIndex = args.indexOf(QStringLiteral("--page"));
+    if (pageIndex > 0 && pageIndex + 1 < args.size()) {
+        if (auto *canvas = window.findChild<CanvasView *>())
+            canvas->setCurrentPage(args.at(pageIndex + 1).toInt());
+    }
+
     // Development helper: select the n-th object (bottom to top).
     const int selectIndex = args.indexOf(QStringLiteral("--select"));
     if (selectIndex > 0 && selectIndex + 1 < args.size()) {
