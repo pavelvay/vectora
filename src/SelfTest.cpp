@@ -23,6 +23,7 @@
 #include "ColorPalette.h"
 #include "Document.h"
 #include "MainWindow.h"
+#include "SvgImporter.h"
 #include "VectorItem.h"
 
 namespace {
@@ -152,6 +153,40 @@ int SelfTest::run(const QString &directory)
                       && qAbs(loadedCircle.pivot.x() - 0.25) < 0.01,
                   QStringLiteral("gradient and pivot preserved"));
         }
+    }
+
+    // --- Editable SVG import -------------------------------------------------
+    out << "\nSVG import\n";
+    {
+        const QString svgPath = dir.filePath(QStringLiteral("import.svg"));
+        QFile svgFile(svgPath);
+        svgFile.open(QIODevice::WriteOnly | QIODevice::Text);
+        svgFile.write(R"SVG(<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300">
+          <defs><linearGradient id="g"><stop offset="0" stop-color="#ff0000"/><stop offset="1" stop-color="#0000ff"/></linearGradient></defs>
+          <g id="group"><rect x="10" y="20" width="100" height="50" fill="url(#g)"/><circle cx="150" cy="30" r="20" fill="#00ff00"/></g>
+          <text x="20" y="200" font-size="24" font-family="Arial">Hello</text>
+        </svg>)SVG");
+        svgFile.close();
+
+        Document imported;
+        QString importError;
+        check(importSvgFile(svgPath, &imported, &importError),
+              QStringLiteral("SVG parsed: %1").arg(importError));
+        check(imported.objects.size() >= 3,
+              QStringLiteral("SVG objects imported (%1)").arg(imported.objects.size()));
+        check(imported.groups.size() >= 1, QStringLiteral("SVG group preserved"));
+        bool hasText = false;
+        bool hasGradient = false;
+        for (const VectorObject &object : imported.objects) {
+            if (object.type == ShapeType::Text && object.text.contains("Hello"))
+                hasText = true;
+            if (object.fillStyle == 1)
+                hasGradient = true;
+        }
+        check(hasText, QStringLiteral("SVG text preserved"));
+        check(hasGradient, QStringLiteral("SVG gradient preserved"));
+        check(qAbs(imported.pageSize.width() - 400.0) < 1.0,
+              QStringLiteral("SVG size preserved"));
     }
 
     // --- Exports -------------------------------------------------------------
@@ -875,6 +910,111 @@ int SelfTest::run(const QString &directory)
                                           scaledItems.at(1)->localBounds()));
         check(qAbs(afterScale.width() - 300.0) < 2.0,
               QStringLiteral("group scaling resizes the selection"));
+
+        // Text spacing and text-to-curves.
+        view.setDocument(Document());
+        VectorObject textObject;
+        textObject.type = ShapeType::Text;
+        textObject.text = QStringLiteral("Abc\nDef");
+        textObject.font.setPixelSize(28);
+        textObject.textBox = QRectF(0, 0, 260, 90);
+        textObject.fill = QColor("#112233");
+        textObject.pos = QPointF(120, 150);
+        VectorItem *textItem = view.addVectorObject(textObject, false, false);
+        textItem->setLetterSpacing(2.5);
+        textItem->setLineSpacing(1.4);
+        check(qAbs(textItem->object().letterSpacing - 2.5) < 0.01
+                  && qAbs(textItem->object().lineSpacing - 1.4) < 0.01,
+              QStringLiteral("text spacing applied"));
+        check(!buildTextPath(textItem->object()).isEmpty(),
+              QStringLiteral("text can be converted to a path"));
+        view.scene()->clearSelection();
+        textItem->setSelected(true);
+        const int textCount = view.vectorItems().size();
+        view.convertTextToCurves();
+        check(view.vectorItems().size() == textCount
+                  && view.selectedVectorItems().size() == 1
+                  && view.selectedVectorItems().first()->object().type
+                         == ShapeType::Bezier,
+              QStringLiteral("text converted to curves"));
+
+        // Node editor: add/delete, close/open, break and align.
+        view.setDocument(Document());
+        VectorObject nodeShape;
+        nodeShape.type = ShapeType::Rectangle;
+        nodeShape.path.addRect(QRectF(0, 0, 120, 80));
+        nodeShape.pos = QPointF(80, 80);
+        VectorItem *nodeItem = view.addVectorObject(nodeShape, false, false);
+        view.setActiveTool(Tool::Node);
+        view.scene()->clearSelection();
+        nodeItem->setSelected(true);
+        const QPointF firstNodeScene = nodeItem->mapToScene(QPointF(0, 0));
+        const QPoint firstNode = view.mapFromScene(firstNodeScene);
+        QMouseEvent nodeClick(QEvent::MouseButtonPress, QPointF(firstNode),
+                              view.viewport()->mapToGlobal(firstNode),
+                              Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(view.viewport(), &nodeClick);
+        QMouseEvent nodeRelease(QEvent::MouseButtonRelease, QPointF(firstNode),
+                                view.viewport()->mapToGlobal(firstNode),
+                                Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(view.viewport(), &nodeRelease);
+        QApplication::processEvents();
+        const int nodesBeforeAdd = nodeItem->pathElements().size();
+        view.addNodeAtSelectedSegment();
+        check(nodeItem->pathElements().size() > nodesBeforeAdd,
+              QStringLiteral("node added on selected segment"));
+        view.deleteSelectedNodes();
+        check(nodeItem->pathElements().size() == nodesBeforeAdd,
+              QStringLiteral("node deleted"));
+
+        VectorObject openCurve;
+        openCurve.type = ShapeType::Bezier;
+        openCurve.path.moveTo(0, 0);
+        openCurve.path.cubicTo(30, -30, 70, 30, 100, 0);
+        openCurve.path.cubicTo(130, 40, 170, -40, 200, 0);
+        openCurve.pos = QPointF(80, 300);
+        VectorItem *openItem = view.addVectorObject(openCurve, false, false);
+        view.scene()->clearSelection();
+        openItem->setSelected(true);
+        view.closeSelectedPath();
+        check(!openItem->pathElements().isEmpty()
+                  && QLineF(QPointF(openItem->pathElements().first().x,
+                                    openItem->pathElements().first().y),
+                            QPointF(openItem->pathElements().last().x,
+                                    openItem->pathElements().last().y))
+                             .length()
+                         < 0.5,
+              QStringLiteral("path closed"));
+        view.openSelectedPath();
+        check(QLineF(QPointF(openItem->pathElements().first().x,
+                             openItem->pathElements().first().y),
+                     QPointF(openItem->pathElements().last().x,
+                             openItem->pathElements().last().y))
+                      .length()
+                  > 1.0,
+              QStringLiteral("path opened"));
+
+        // Select the middle anchor for break.
+        const QPointF middleScene = openItem->mapToScene(QPointF(100, 0));
+        const QPoint middle = view.mapFromScene(middleScene);
+        QMouseEvent middlePress(QEvent::MouseButtonPress, QPointF(middle),
+                                view.viewport()->mapToGlobal(middle),
+                                Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(view.viewport(), &middlePress);
+        QMouseEvent middleRelease(QEvent::MouseButtonRelease, QPointF(middle),
+                                  view.viewport()->mapToGlobal(middle),
+                                  Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(view.viewport(), &middleRelease);
+        QApplication::processEvents();
+        check(view.hasSelectedNodes(),
+              QStringLiteral("middle node selected (element %1 of %2)")
+                  .arg(view.selectedNodeElement())
+                  .arg(openItem->pathElements().size()));
+        const int beforeBreak = view.vectorItems().size();
+        view.breakAtSelectedNode();
+        check(view.vectorItems().size() == beforeBreak + 1,
+              QStringLiteral("curve broken into two objects (%1 -> %2)")
+                  .arg(beforeBreak).arg(view.vectorItems().size()));
 
         // Guides and snapping.
         view.setDocument(Document());

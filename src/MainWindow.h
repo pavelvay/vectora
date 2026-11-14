@@ -143,6 +143,7 @@ private:
     int m_polygonPageIndex = 6;
     int m_starPageIndex = 7;
     int m_spiralPageIndex = 8;
+    int m_nodePageIndex = 9;
     Tool m_currentTool = Tool::Select;
     bool m_updatingShapeOptions = false;
     QDoubleSpinBox *m_rectRadius = nullptr;

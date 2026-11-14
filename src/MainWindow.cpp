@@ -69,6 +69,7 @@
 #include "DockPanels.h"
 #include "Icons.h"
 #include "Ruler.h"
+#include "SvgImporter.h"
 #include "Theme.h"
 #include "ToolPalette.h"
 #include "VectorItem.h"
@@ -308,7 +309,9 @@ void MainWindow::createActions()
     makeAction(QStringLiteral("grid"), QStringLiteral("Сетка"),
                QKeySequence(QStringLiteral("Ctrl+Alt+G")), QStringLiteral("Показать или скрыть сетку"));
     makeAction(QStringLiteral("snap"), QStringLiteral("Привязка"),
-               QKeySequence(), QStringLiteral("Привязка к сетке и направляющим"));
+               QKeySequence(), QStringLiteral("Привязка к сетке, объектам и направляющим"));
+    makeAction(QStringLiteral("snap-settings"), QStringLiteral("Сетка и привязка…"),
+               QKeySequence(), QStringLiteral("Шаг сетки и чувствительность привязки"), false);
     auto *fullscreen = makeAction(QStringLiteral("fullscreen"), QStringLiteral("Полноэкранный режим"),
                                   QKeySequence(QStringLiteral("F11")), QStringLiteral("Во весь экран"));
 
@@ -348,7 +351,7 @@ void MainWindow::createActions()
     makeAction(QStringLiteral("skew"), QStringLiteral("Наклонить…"),
                QKeySequence(), QStringLiteral("Наклонить объект по горизонтали и вертикали"), false);
     makeAction(QStringLiteral("convert-curves"), QStringLiteral("Преобразовать в кривые"),
-               QKeySequence(QStringLiteral("Ctrl+Q")), QStringLiteral("Преобразовать объект в редактируемые кривые"));
+               QKeySequence(QStringLiteral("Ctrl+Q")), QStringLiteral("Преобразовать текст в редактируемые кривые"), false);
     makeAction(QStringLiteral("lock"), QStringLiteral("Заблокировать"),
                QKeySequence(), QStringLiteral("Заблокировать объект от изменений"));
 
@@ -490,6 +493,8 @@ void MainWindow::createActions()
         if (dialog.exec() == QDialog::Accepted)
             m_view->skewSelection(ax->value(), ay->value());
     });
+    connect(action(QStringLiteral("convert-curves")), &QAction::triggered, this,
+            [this]() { m_view->convertTextToCurves(); });
     connect(action(QStringLiteral("group")), &QAction::triggered, this,
             [this]() { m_view->groupSelection(); });
     connect(action(QStringLiteral("ungroup")), &QAction::triggered, this,
@@ -574,6 +579,35 @@ void MainWindow::createActions()
 
     connect(action(QStringLiteral("clear-guides")), &QAction::triggered, this,
             [this]() { m_view->clearGuides(); });
+    connect(action(QStringLiteral("snap-settings")), &QAction::triggered, this, [this]() {
+        QDialog dialog(this);
+        dialog.setWindowTitle(QStringLiteral("Сетка и привязка"));
+        auto *form = new QFormLayout(&dialog);
+        auto *step = new QSpinBox(&dialog);
+        step->setRange(2, 400);
+        step->setValue(m_view->gridStep());
+        step->setSuffix(QStringLiteral(" px"));
+        auto *threshold = new QDoubleSpinBox(&dialog);
+        threshold->setRange(1, 60);
+        threshold->setValue(m_view->snapThreshold());
+        threshold->setSuffix(QStringLiteral(" px"));
+        form->addRow(QStringLiteral("Шаг сетки"), step);
+        form->addRow(QStringLiteral("Чувствительность привязки"), threshold);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok
+                                                 | QDialogButtonBox::Cancel,
+                                             &dialog);
+        form->addRow(buttons);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        m_view->setGridStep(step->value());
+        m_view->setSnapThreshold(threshold->value());
+        statusBar()->showMessage(
+            QStringLiteral("Сетка: %1 px, привязка: %2 px")
+                .arg(step->value())
+                .arg(threshold->value(), 0, 'f', 1), 4000);
+    });
 
     fullscreen->setCheckable(true);
     connect(fullscreen, &QAction::toggled, this, [this](bool on) {
@@ -635,6 +669,7 @@ void MainWindow::createMenus()
     viewMenu->addAction(action(QStringLiteral("clear-guides")));
     viewMenu->addAction(action(QStringLiteral("grid")));
     viewMenu->addAction(action(QStringLiteral("snap")));
+    viewMenu->addAction(action(QStringLiteral("snap-settings")));
     viewMenu->addSeparator();
     viewMenu->addAction(action(QStringLiteral("fullscreen")));
 
@@ -679,6 +714,8 @@ void MainWindow::createMenus()
     textMenu->addSeparator();
     textMenu->addAction(action(QStringLiteral("text-styles")));
     textMenu->addAction(action(QStringLiteral("text-symbol")));
+    textMenu->addSeparator();
+    textMenu->addAction(action(QStringLiteral("convert-curves")));
 
     auto *windowMenu = menuBar()->addMenu(QStringLiteral("Окно"));
     windowMenu->addAction(m_toolsDock->toggleViewAction());
@@ -1291,6 +1328,83 @@ void MainWindow::createPropertyBar()
     m_propertyStack->addWidget(polygonPage);   // 6
     m_propertyStack->addWidget(starPage);      // 7
     m_propertyStack->addWidget(spiralPage);    // 8
+
+    // 9 — node editing
+    auto *nodePage = new QWidget(m_propertyStack);
+    auto *nodeLayout = new QHBoxLayout(nodePage);
+    nodeLayout->setContentsMargins(2, 0, 2, 0);
+    nodeLayout->setSpacing(5);
+
+    nodeLayout->addWidget(fieldLabel(QStringLiteral("Узел")));
+    auto *nodeTypeGroup = new QButtonGroup(nodePage);
+    nodeTypeGroup->setExclusive(true);
+    const QString nodeTypeNames[] = {QStringLiteral("Тупой"),
+                                     QStringLiteral("Сглаженный"),
+                                     QStringLiteral("Симметричный")};
+    for (int i = 0; i < 3; ++i) {
+        auto *button = new QToolButton(nodePage);
+        button->setText(nodeTypeNames[i]);
+        button->setCheckable(true);
+        button->setAutoRaise(true);
+        nodeTypeGroup->addButton(button, i);
+        connect(button, &QToolButton::clicked, this, [this, i]() {
+            m_view->setSelectedNodeType(i);
+        });
+        nodeLayout->addWidget(button);
+    }
+
+    nodeLayout->addWidget(verticalRule(nodePage));
+
+    const auto nodeButton = [&](const QString &text, const QString &tip,
+                                const std::function<void()> &action) {
+        auto *button = new QToolButton(nodePage);
+        button->setText(text);
+        button->setToolTip(tip);
+        button->setAutoRaise(true);
+        connect(button, &QToolButton::clicked, this, action);
+        nodeLayout->addWidget(button);
+    };
+    nodeButton(QStringLiteral("Добавить"), QStringLiteral("Добавить узел после выбранного"),
+               [this]() { m_view->addNodeAtSelectedSegment(); });
+    nodeButton(QStringLiteral("Удалить"), QStringLiteral("Удалить выбранные узлы"),
+               [this]() { m_view->deleteSelectedNodes(); });
+    nodeButton(QStringLiteral("Замкнуть"), QStringLiteral("Замкнуть контур"),
+               [this]() { m_view->closeSelectedPath(); });
+    nodeButton(QStringLiteral("Разомкнуть"), QStringLiteral("Разомкнуть контур"),
+               [this]() { m_view->openSelectedPath(); });
+    nodeButton(QStringLiteral("Соединить"), QStringLiteral("Соединить две кривые"),
+               [this]() { m_view->joinSelectedEndpoints(); });
+    nodeButton(QStringLiteral("Разорвать"), QStringLiteral("Разорвать кривую в узле"),
+               [this]() { m_view->breakAtSelectedNode(); });
+
+    nodeLayout->addWidget(verticalRule(nodePage));
+    nodeLayout->addWidget(fieldLabel(QStringLiteral("Выровнять")));
+    const char *nodeAlignIcons[] = {"align-left", "align-hcenter", "align-right",
+                                   "align-top", "align-vcenter", "align-bottom"};
+    const char *nodeAlignTips[] = {"По левому краю", "По центру", "По правому краю",
+                                   "По верху", "По середине", "По низу"};
+    for (int i = 0; i < 6; ++i) {
+        auto *button = new QToolButton(nodePage);
+        button->setIcon(Icons::icon(QString::fromLatin1(nodeAlignIcons[i])));
+        button->setIconSize(QSize(18, 18));
+        button->setToolTip(QString::fromUtf8(nodeAlignTips[i]));
+        button->setAutoRaise(true);
+        connect(button, &QToolButton::clicked, this, [this, i]() {
+            m_view->alignSelectedNodes(i);
+        });
+        nodeLayout->addWidget(button);
+    }
+
+    nodeLayout->addWidget(verticalRule(nodePage));
+    auto *nodeHint = new QLabel(
+        QStringLiteral("Shift+клик — несколько узлов · двойной клик по сегменту — "
+                       "добавить узел · Ctrl — независимые направляющие"),
+        nodePage);
+    nodeHint->setStyleSheet(QStringLiteral("color:#757b85; font-size:11px;"));
+    nodeLayout->addWidget(nodeHint);
+    nodeLayout->addStretch(1);
+
+    m_propertyStack->addWidget(nodePage);      // 9
     m_propertyStack->setCurrentIndex(m_transformPageIndex);
 
     bar->addWidget(m_propertyStack);
@@ -1489,6 +1603,9 @@ void MainWindow::applyTool(Tool tool)
     case Tool::Bezier:
         page = m_bezierPageIndex;
         break;
+    case Tool::Node:
+        page = m_nodePageIndex;
+        break;
     case Tool::Text:
         page = m_textPageIndex;
         break;
@@ -1596,7 +1713,10 @@ void MainWindow::selectAllObjects()
 
 void MainWindow::deleteSelection()
 {
-    m_view->deleteSelectedObjects();
+    if (m_view->hasSelectedNodes())
+        m_view->deleteSelectedNodes();
+    else
+        m_view->deleteSelectedObjects();
 }
 
 // ---------------------------------------------------------------------------
@@ -1780,24 +1900,45 @@ void MainWindow::importFile()
     if (path.isEmpty())
         return;
 
-    QImage image;
     if (path.endsWith(QLatin1String(".svg"), Qt::CaseInsensitive)) {
-        QSvgRenderer renderer(path);
-        if (!renderer.isValid()) {
-            QMessageBox::critical(this, QStringLiteral("Импорт"),
-                                  QStringLiteral("Не удалось прочитать SVG-файл."));
+        Document imported;
+        QString error;
+        if (!importSvgFile(path, &imported, &error)) {
+            QMessageBox::critical(this, QStringLiteral("Импорт SVG"), error);
             return;
         }
-        QSize size = renderer.defaultSize();
-        if (size.isEmpty())
-            size = QSize(600, 600);
-        image = QImage(size * 2, QImage::Format_ARGB32_Premultiplied);
-        image.fill(Qt::transparent);
-        QPainter painter(&image);
-        renderer.render(&painter);
-    } else {
-        image.load(path);
+
+        const int layer = m_view->addLayer(
+            QFileInfo(path).completeBaseName().left(32));
+        QHash<int, int> groupMap;
+        for (const VectorGroup &group : imported.groups) {
+            const int parent = group.parent > 0 ? groupMap.value(group.parent, 0)
+                                                : 0;
+            groupMap.insert(group.id, m_view->addGroupRecord(parent));
+        }
+
+        beginEdit();
+        m_view->scene()->clearSelection();
+        int importedCount = 0;
+        for (VectorObject object : imported.objects) {
+            object.layer = layer;
+            object.group = groupMap.value(object.group, 0);
+            object.id = 0;
+            object.masterId = 0;
+            VectorItem *item = m_view->addVectorObject(object, false, false);
+            if (item) {
+                item->setSelected(true);
+                ++importedCount;
+            }
+        }
+        endEdit();
+        statusBar()->showMessage(
+            QStringLiteral("Импортировано объектов SVG: %1").arg(importedCount), 5000);
+        return;
     }
+
+    QImage image;
+    image.load(path);
 
     if (image.isNull()) {
         QMessageBox::critical(this, QStringLiteral("Импорт"),
@@ -2343,6 +2484,8 @@ void MainWindow::showShortcuts()
         "<td><b>Клик по первому узлу</b></td><td>замкнуть кривую</td></tr>"
         "<tr><td><b>Enter</b> / двойной клик</td><td>завершить</td>"
         "<td><b>Esc</b></td><td>отменить кривую</td></tr>"
+        "<tr><td><b>Ctrl+Q</b></td><td>текст в кривые</td>"
+        "<td><b>Ctrl+Enter</b></td><td>применить текст на холсте</td></tr>"
         "</table>"
         "<h3 style='color:#e3e7ee'>Файл и правка</h3>"
         "<table cellspacing='6'>"
@@ -2358,6 +2501,8 @@ void MainWindow::showShortcuts()
         "<table cellspacing='6'>"
         "<tr><td><b>Alt+клик</b></td><td>объект под верхним</td>"
         "<td><b>Ctrl+клик</b></td><td>объект внутри группы</td></tr>"
+        "<tr><td><b>Shift+клик</b></td><td>несколько узлов (Форма)</td>"
+        "<td><b>Двойной клик</b></td><td>добавить узел на сегменте</td></tr>"
         "<tr><td><b>Tab</b></td><td>следующий объект</td>"
         "<td><b>Ctrl+перетаскивание</b></td><td>центр вращения</td></tr>"
         "</table>"
@@ -2380,7 +2525,7 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("О программе"),
         QStringLiteral(
-            "<h3>Vectora 0.1.8</h3>"
+            "<h3>Vectora 0.1.9</h3>"
             "<p>Кроссплатформенный векторный редактор на C++ и Qt 6.</p>"
             "<p>Работают: документы .vct, экспорт PNG/SVG/PDF, печать, "
             "рисование фигур и кривых, Bezier с типами узлов, докеры "

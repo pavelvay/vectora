@@ -1,6 +1,8 @@
 #include "VectorItem.h"
 
 #include <QGraphicsScene>
+
+#include "CanvasView.h"
 #include <QGraphicsSceneMouseEvent>
 #include <QPainter>
 #include <QPainterPathStroker>
@@ -175,13 +177,34 @@ void VectorItem::setObject(const VectorObject &object)
 void VectorItem::setText(const QString &text)
 {
     m_object.text = text;
+    updateTextBoxHeight();
+}
+
+void VectorItem::updateTextBoxHeight()
+{
     QFontMetricsF metrics(m_object.font);
     const qreal width = m_object.textBox.width() > 0 ? m_object.textBox.width() : 300.0;
     const QRectF needed = metrics.boundingRect(QRectF(0, 0, width, 10000),
-                                               Qt::TextWordWrap | Qt::AlignLeft, text);
+                                               Qt::TextWordWrap | Qt::AlignLeft,
+                                               m_object.text);
     prepareGeometryChange();
-    m_object.textBox.setHeight(qMax(metrics.height(), needed.height() + 4.0));
+    m_object.textBox.setHeight(
+        qMax(metrics.height(), needed.height() + 4.0)
+        * qMax<qreal>(0.5, m_object.lineSpacing));
+    updateOrigin();
     update();
+}
+
+void VectorItem::setLetterSpacing(qreal spacing)
+{
+    m_object.letterSpacing = qBound(-50.0, spacing, 200.0);
+    updateTextBoxHeight();
+}
+
+void VectorItem::setLineSpacing(qreal spacing)
+{
+    m_object.lineSpacing = qBound(0.5, spacing, 5.0);
+    updateTextBoxHeight();
 }
 
 void VectorItem::setFillColor(const QColor &color)
@@ -280,15 +303,7 @@ void VectorItem::setFrameSize(const QSizeF &size)
 void VectorItem::setTextFont(const QFont &font)
 {
     m_object.font = font;
-    QFontMetricsF metrics(m_object.font);
-    const qreal width = m_object.textBox.width() > 0 ? m_object.textBox.width() : 300.0;
-    const QRectF needed = metrics.boundingRect(QRectF(0, 0, width, 10000),
-                                               Qt::TextWordWrap | Qt::AlignLeft,
-                                               m_object.text);
-    prepareGeometryChange();
-    m_object.textBox.setHeight(qMax(metrics.height(), needed.height() + 4.0));
-    updateOrigin();
-    update();
+    updateTextBoxHeight();
 }
 
 void VectorItem::setTextAlignment(int align)
@@ -592,58 +607,105 @@ void VectorItem::mouseMoveEvent(QGraphicsSceneMouseEvent *event)
 
 void VectorItem::setSnapSettings(bool enabled, qreal step,
                                  const QVector<qreal> &guidesX,
-                                 const QVector<qreal> &guidesY)
+                                 const QVector<qreal> &guidesY, qreal threshold)
 {
     m_snapEnabled = enabled;
     m_snapStep = qMax<qreal>(1.0, step);
     m_snapGuidesX = guidesX;
     m_snapGuidesY = guidesY;
+    m_snapThreshold = qMax<qreal>(1.0, threshold);
 }
 
 void VectorItem::applySnapping()
 {
-    const QRectF visual = mapRectToScene(m_object.localBounds());
-    constexpr qreal threshold = 6.0;
+    if (!m_snapEnabled || !scene())
+        return;
 
-    const auto bestOffset = [threshold](const QVector<qreal> &edges,
-                                        const QVector<qreal> &targets, qreal step) {
-        qreal best = 0.0;
-        qreal bestDistance = threshold + 1.0;
+    const QRectF visual = mapRectToScene(m_object.localBounds());
+    QVector<qreal> xTargets = m_snapGuidesX;
+    QVector<qreal> yTargets = m_snapGuidesY;
+
+    const QRectF page = scene()->property("pageRect").toRectF();
+    if (page.isValid()) {
+        xTargets << page.left() << page.center().x() << page.right();
+        yTargets << page.top() << page.center().y() << page.bottom();
+    }
+
+    const QList<QGraphicsItem *> selected = scene()->selectedItems();
+    for (QGraphicsItem *graphicsItem : scene()->items()) {
+        if (graphicsItem->type() != VectorItem::ItemType
+            || !graphicsItem->isVisible() || selected.contains(graphicsItem))
+            continue;
+        auto *other = static_cast<VectorItem *>(graphicsItem);
+        const QRectF bounds = other->mapRectToScene(other->localBounds());
+        xTargets << bounds.left() << bounds.center().x() << bounds.right();
+        yTargets << bounds.top() << bounds.center().y() << bounds.bottom();
+    }
+
+    struct SnapResult {
+        qreal offset = 0.0;
+        qreal target = 0.0;
+        bool found = false;
+    };
+    const auto bestOffset = [this](const QVector<qreal> &edges,
+                                   const QVector<qreal> &targets,
+                                   qreal step) {
+        SnapResult result;
+        qreal bestDistance = m_snapThreshold + 1.0;
         for (qreal edge : edges) {
             const qreal grid = qRound(edge / step) * step;
             const qreal gridDistance = qAbs(grid - edge);
             if (gridDistance < bestDistance) {
                 bestDistance = gridDistance;
-                best = grid - edge;
+                result.offset = grid - edge;
+                result.target = grid;
+                result.found = true;
             }
             for (qreal target : targets) {
                 const qreal distance = qAbs(target - edge);
                 if (distance < bestDistance) {
                     bestDistance = distance;
-                    best = target - edge;
+                    result.offset = target - edge;
+                    result.target = target;
+                    result.found = true;
                 }
             }
         }
-        return bestDistance <= threshold ? best : 0.0;
+        if (bestDistance > m_snapThreshold) {
+            result.offset = 0.0;
+            result.found = false;
+        }
+        return result;
     };
 
     const QVector<qreal> xEdges = {visual.left(), visual.center().x(),
                                    visual.right()};
     const QVector<qreal> yEdges = {visual.top(), visual.center().y(),
                                    visual.bottom()};
-    const qreal dx = bestOffset(xEdges, m_snapGuidesX, m_snapStep);
-    const qreal dy = bestOffset(yEdges, m_snapGuidesY, m_snapStep);
+    const SnapResult x = bestOffset(xEdges, xTargets, m_snapStep);
+    const SnapResult y = bestOffset(yEdges, yTargets, m_snapStep);
+
+    QVector<QLineF> lines;
+    const QRectF area = scene()->sceneRect();
+    if (x.found)
+        lines.append(QLineF(x.target, area.top(), x.target, area.bottom()));
+    if (y.found)
+        lines.append(QLineF(area.left(), y.target, area.right(), y.target));
+
+    if (auto *view = qobject_cast<CanvasView *>(scene()->views().value(0)))
+        view->setSmartGuides(lines);
+
+    const qreal dx = x.offset;
+    const qreal dy = y.offset;
     if (qFuzzyIsNull(dx) && qFuzzyIsNull(dy))
         return;
 
     moveBy(dx, dy);
-    if (scene()) {
-        for (QGraphicsItem *other : scene()->selectedItems()) {
-            if (other == this)
-                continue;
-            if (other->flags() & QGraphicsItem::ItemIsMovable)
-                other->moveBy(dx, dy);
-        }
+    for (QGraphicsItem *other : selected) {
+        if (other == this)
+            continue;
+        if (other->flags() & QGraphicsItem::ItemIsMovable)
+            other->moveBy(dx, dy);
     }
 }
 

@@ -63,6 +63,8 @@ struct VectorObject {
 
     QString text;
     QFont font;
+    qreal letterSpacing = 0.0;   // pixels
+    qreal lineSpacing = 1.0;     // multiplier
     QRectF textBox;             // text / image frame in local coordinates
     int textAlign = 0;          // 0 = left, 1 = centre, 2 = right
     QImage image;
@@ -113,3 +115,4 @@ QPainterPath buildRectanglePath(const QRectF &bounds, qreal cornerRadius);
 QPainterPath buildPolygonPath(const QRectF &bounds, int sides);
 QPainterPath buildStarPath(const QRectF &bounds, int points, qreal ratio);
 QPainterPath buildSpiralPath(const QRectF &bounds, qreal turns);
+QPainterPath buildTextPath(const VectorObject &object);

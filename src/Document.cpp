@@ -307,6 +307,92 @@ void Document::clear()
     objects.clear();
 }
 
+namespace {
+
+QFont textFont(const VectorObject &object)
+{
+    QFont font = object.font;
+    if (qAbs(object.letterSpacing) > 0.01)
+        font.setLetterSpacing(QFont::AbsoluteSpacing, object.letterSpacing);
+    return font;
+}
+
+QStringList wrapTextLines(const QString &text, const QFontMetricsF &metrics,
+                          qreal width)
+{
+    QStringList result;
+    const QStringList paragraphs = text.split(QLatin1Char('\n'));
+    for (const QString &paragraph : paragraphs) {
+        if (paragraph.isEmpty()) {
+            result.append(QString());
+            continue;
+        }
+        const QStringList words = paragraph.split(QLatin1Char(' '));
+        QString line;
+        for (const QString &word : words) {
+            const QString candidate = line.isEmpty() ? word : line + QLatin1Char(' ') + word;
+            if (!line.isEmpty() && metrics.horizontalAdvance(candidate) > width) {
+                result.append(line);
+                line = word;
+            } else {
+                line = candidate;
+            }
+        }
+        result.append(line);
+    }
+    while (result.size() > 1 && result.last().isEmpty())
+        result.removeLast();
+    return result;
+}
+
+void drawTextLines(QPainter *painter, const VectorObject &object,
+                   const QBrush &brush, const QPointF &offset)
+{
+    QFont font = textFont(object);
+    QFontMetricsF metrics(font);
+    const QStringList lines = wrapTextLines(object.text, metrics,
+                                            object.textBox.width());
+    const qreal lineHeight = metrics.height() * qMax<qreal>(0.5, object.lineSpacing);
+    qreal y = object.textBox.top() + metrics.ascent() + offset.y();
+    painter->setFont(font);
+    painter->setPen(QPen(brush, 1.0));
+    for (const QString &line : lines) {
+        qreal x = object.textBox.left() + offset.x();
+        const qreal width = metrics.horizontalAdvance(line);
+        if (object.textAlign == 1)
+            x += (object.textBox.width() - width) / 2.0;
+        else if (object.textAlign == 2)
+            x += object.textBox.width() - width;
+        painter->drawText(QPointF(x, y), line);
+        y += lineHeight;
+    }
+}
+
+} // namespace
+
+QPainterPath buildTextPath(const VectorObject &object)
+{
+    QPainterPath path;
+    QFont font = textFont(object);
+    QFontMetricsF metrics(font);
+    const QStringList lines = wrapTextLines(object.text, metrics,
+                                            object.textBox.width());
+    const qreal lineHeight = metrics.height() * qMax<qreal>(0.5, object.lineSpacing);
+    qreal y = object.textBox.top() + metrics.ascent();
+    for (const QString &line : lines) {
+        qreal x = object.textBox.left();
+        const qreal width = metrics.horizontalAdvance(line);
+        if (object.textAlign == 1)
+            x += (object.textBox.width() - width) / 2.0;
+        else if (object.textAlign == 2)
+            x += object.textBox.width() - width;
+        if (!line.isEmpty())
+            path.addText(QPointF(x, y), font, line);
+        y += lineHeight;
+    }
+    return path;
+}
+
 void Document::paintObject(QPainter *painter, const VectorObject &object)
 {
     painter->save();
@@ -324,11 +410,8 @@ void Document::paintObject(QPainter *painter, const VectorObject &object)
             painter->drawPath(object.path);
         }
         if (object.type == ShapeType::Text && !object.text.isEmpty()) {
-            painter->setPen(shadowColor);
-            painter->setFont(object.font);
-            painter->drawText(object.textBox, textAlignment(object.textAlign)
-                                                  | Qt::TextWordWrap,
-                             object.text);
+            QColor color = shadowColor;
+            drawTextLines(painter, object, QBrush(color), object.shadowOffset);
         }
         painter->restore();
     }
@@ -350,14 +433,8 @@ void Document::paintObject(QPainter *painter, const VectorObject &object)
     }
 
     if (object.type == ShapeType::Text && !object.text.isEmpty()) {
-        if (object.fillStyle != 0)
-            painter->setPen(QPen(fillBrush(object, object.textBox), 1.0));
-        else
-            painter->setPen(object.fill);
-        painter->setFont(object.font);
-        painter->drawText(object.textBox,
-                          textAlignment(object.textAlign) | Qt::TextWordWrap,
-                          object.text);
+        QBrush brush = fillBrush(object, object.textBox);
+        drawTextLines(painter, object, brush, QPointF());
     }
 
     if (object.type == ShapeType::Image && !object.image.isNull())
@@ -537,6 +614,8 @@ QJsonObject Document::toJson() const
                          QJsonArray{object.textBox.x(), object.textBox.y(),
                                     object.textBox.width(), object.textBox.height()});
             entry.insert(QStringLiteral("textAlign"), object.textAlign);
+            entry.insert(QStringLiteral("letterSpacing"), object.letterSpacing);
+            entry.insert(QStringLiteral("lineSpacing"), object.lineSpacing);
         }
         if (object.type == ShapeType::Image) {
             entry.insert(QStringLiteral("textBox"),
@@ -667,6 +746,8 @@ Document Document::fromJson(const QJsonObject &json, QString *error)
         if (object.type == ShapeType::Text) {
             object.text = entry.value(QStringLiteral("text")).toString();
             object.font = fontFromJson(entry.value(QStringLiteral("font")).toObject());
+            object.letterSpacing = entry.value(QStringLiteral("letterSpacing")).toDouble(0.0);
+            object.lineSpacing = entry.value(QStringLiteral("lineSpacing")).toDouble(1.0);
             const QJsonArray box = entry.value(QStringLiteral("textBox")).toArray();
             if (box.size() >= 4)
                 object.textBox = QRectF(box.at(0).toDouble(), box.at(1).toDouble(),
@@ -859,7 +940,8 @@ QString Document::toSvg() const
         if (object.type == ShapeType::Text && !object.text.isEmpty()) {
             const QStringList lines = object.text.split(QLatin1Char('\n'));
             QFontMetricsF metrics(object.font);
-            const qreal lineHeight = metrics.lineSpacing();
+            const qreal lineHeight = metrics.lineSpacing()
+                                     * qMax<qreal>(0.5, object.lineSpacing);
             const qreal ascent = metrics.ascent();
             const QString anchor = object.textAlign == 1
                                        ? QStringLiteral("middle")
@@ -878,7 +960,8 @@ QString Document::toSvg() const
                                              : object.fill.name(QColor::HexRgb);
                 svg += QStringLiteral("    <text x=\"%1\" y=\"%2\" fill=\"%3\" "
                                       "font-family=\"%4\" font-size=\"%5\" "
-                                      "font-weight=\"%6\" text-anchor=\"%7\"%8>%9</text>\n")
+                                      "font-weight=\"%6\" text-anchor=\"%7\" "
+                                      "letter-spacing=\"%10\"%8>%9</text>\n")
                            .arg(num(x), num(ascent + i * lineHeight),
                                 textFill,
                                 xmlEscape(object.font.family()),
@@ -887,7 +970,8 @@ QString Document::toSvg() const
                                         : 18.0),
                                 object.font.bold() ? QStringLiteral("bold")
                                                    : QStringLiteral("normal"),
-                                anchor, textOpacity, xmlEscape(lines.at(i)));
+                                anchor, textOpacity, xmlEscape(lines.at(i)),
+                                num(object.letterSpacing));
             }
         }
 

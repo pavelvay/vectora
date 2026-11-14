@@ -35,6 +35,8 @@ public:
     void setFrameSize(const QSizeF &size);
     void setTextFont(const QFont &font);
     void setTextAlignment(int align);
+    void setLetterSpacing(qreal spacing);
+    void setLineSpacing(qreal spacing);
     void setRotationAngle(qreal degrees);
     void setCornerRadius(qreal radius);
     void setSides(int sides);
@@ -47,7 +49,7 @@ public:
     void setPivot(const QPointF &normalised);
     QPointF pivotPoint() const;
     void setSnapSettings(bool enabled, qreal step, const QVector<qreal> &guidesX,
-                         const QVector<qreal> &guidesY);
+                         const QVector<qreal> &guidesY, qreal threshold);
     bool isLocked() const { return m_object.locked; }
     int shapeTypeValue() const { return int(m_object.type); }
     void setPath(const QPainterPath &path);
@@ -80,10 +82,12 @@ private:
     void updateOrigin();
     void drawSelection(QPainter *painter) const;
     void applySnapping();
+    void updateTextBoxHeight();
 
     VectorObject m_object;
     bool m_snapEnabled = false;
     qreal m_snapStep = 20.0;
+    qreal m_snapThreshold = 6.0;
     QVector<qreal> m_snapGuidesX;
     QVector<qreal> m_snapGuidesY;
     Interaction m_interaction = Interaction::None;

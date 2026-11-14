@@ -112,6 +112,7 @@ QString vectorName(const VectorObject &object)
 
 constexpr int kLayerRole = Qt::UserRole + 1;
 constexpr int kItemRole = Qt::UserRole + 2;
+constexpr int kGroupRole = Qt::UserRole + 3;
 
 class ObjectsTree : public QTreeWidget
 {
@@ -441,6 +442,16 @@ void DockPanels::buildObjectsDocker()
         if (!item)
             return;
 
+        if (item->data(0, kGroupRole).isValid()) {
+            if (item->parent())
+                m_view->setActiveLayer(item->parent()->data(0, kLayerRole).toInt());
+            m_view->selectGroupItems(item->data(0, kGroupRole).toInt());
+            refreshProperties();
+            refreshEffects();
+            refreshText();
+            return;
+        }
+
         if (!item->data(0, kItemRole).isValid()) {
             const int layer = item->data(0, kLayerRole).toInt();
             m_view->setActiveLayer(layer);
@@ -537,7 +548,6 @@ void DockPanels::refreshTree()
     if (!m_tree)
         return;
 
-    const QList<VectorItem *> items = m_view->vectorItems();
     const QStringList layers = m_view->layers();
     const int scrollPosition = m_tree->verticalScrollBar()->value();
 
@@ -575,9 +585,70 @@ void DockPanels::refreshTree()
         if (!visible)
             layerItem->setForeground(0, QBrush(QColor(0x6f, 0x76, 0x81)));
 
-        const QList<VectorItem *> layerItems = m_view->itemsInLayer(layer);
-        for (int i = layerItems.size() - 1; i >= 0; --i) {
-            VectorItem *vectorItem = layerItems.at(i);
+        std::function<void(QTreeWidgetItem *, int)> addGroup =
+            [this, layer, &addGroup, &objectSelected](QTreeWidgetItem *parent,
+                                                       int groupId) {
+                QTreeWidgetItem *groupItem =
+                    new QTreeWidgetItem(parent, {QStringLiteral("Группа %1").arg(groupId)});
+                groupItem->setData(0, kGroupRole, groupId);
+                groupItem->setIcon(0, Icons::icon(QStringLiteral("group")));
+                groupItem->setFlags(groupItem->flags() | Qt::ItemIsDropEnabled);
+                QFont groupFont = m_tree->font();
+                groupFont.setBold(true);
+                groupItem->setFont(0, groupFont);
+
+                const QList<VectorItem *> direct = m_view->itemsDirectlyInGroup(groupId);
+                QList<VectorItem *> inLayer;
+                for (VectorItem *item : direct) {
+                    if (item->object().layer == layer)
+                        inLayer.append(item);
+                }
+                for (int i = inLayer.size() - 1; i >= 0; --i) {
+                    VectorItem *vectorItem = inLayer.at(i);
+                    auto *entry = new QTreeWidgetItem(
+                        groupItem, {vectorName(vectorItem->object())});
+                    entry->setData(0, kItemRole,
+                                   QVariant::fromValue<quintptr>(
+                                       reinterpret_cast<quintptr>(vectorItem)));
+                    entry->setFlags(entry->flags() | Qt::ItemIsDragEnabled
+                                    | Qt::ItemIsSelectable | Qt::ItemIsEnabled);
+                    if (!m_view->layerVisible(layer))
+                        entry->setForeground(0, QBrush(QColor(0x6f, 0x76, 0x81)));
+                    entry->setIcon(2, Icons::icon(vectorItem->isLocked()
+                                                      ? QStringLiteral("lock")
+                                                      : QStringLiteral("unlock")));
+                    entry->setToolTip(2, vectorItem->isLocked()
+                                              ? QStringLiteral("Разблокировать объект")
+                                              : QStringLiteral("Заблокировать объект"));
+                    if (vectorItem->isLocked())
+                        entry->setForeground(0, QBrush(QColor(0x7c, 0x83, 0x8e)));
+                    if (vectorItem->isSelected()) {
+                        entry->setSelected(true);
+                        m_tree->setCurrentItem(entry);
+                        objectSelected = true;
+                    }
+                }
+
+                for (int child : m_view->childGroupsOf(groupId))
+                    addGroup(groupItem, child);
+                groupItem->setExpanded(true);
+            };
+
+        QSet<int> layerGroups;
+        for (VectorItem *item : m_view->itemsInLayer(layer)) {
+            if (item->groupIndex() > 0) {
+                int top = m_view->topGroupOf(item->groupIndex());
+                layerGroups.insert(top);
+            }
+        }
+        for (int group : layerGroups)
+            addGroup(layerItem, group);
+
+        const QList<VectorItem *> layerItems2 = m_view->itemsInLayer(layer);
+        for (int i = layerItems2.size() - 1; i >= 0; --i) {
+            VectorItem *vectorItem = layerItems2.at(i);
+            if (vectorItem->groupIndex() > 0)
+                continue;
             auto *entry = new QTreeWidgetItem(layerItem,
                                               {vectorName(vectorItem->object())});
             entry->setData(0, kItemRole,
@@ -1628,6 +1699,18 @@ void DockPanels::buildTextDocker()
     sizeRow->addStretch(1);
     layout->addLayout(sizeRow);
 
+    auto *spacingRow = new QHBoxLayout;
+    spacingRow->addWidget(fieldLabel(QStringLiteral("Межбукв."), m_textContent));
+    m_letterSpacing = spinField(m_textContent, -20, 100, 0, QStringLiteral(" px"), 1, 64);
+    spacingRow->addWidget(m_letterSpacing);
+    spacingRow->addSpacing(6);
+    spacingRow->addWidget(fieldLabel(QStringLiteral("Межстроч."), m_textContent));
+    m_lineSpacing = spinField(m_textContent, 0.5, 5.0, 1.0, QString(), 2, 64);
+    m_lineSpacing->setSingleStep(0.1);
+    spacingRow->addWidget(m_lineSpacing);
+    spacingRow->addStretch(1);
+    layout->addLayout(spacingRow);
+
     auto *styleRow = new QHBoxLayout;
     QFont boldFont = m_host->font();
     boldFont.setBold(true);
@@ -1697,6 +1780,14 @@ void DockPanels::buildTextDocker()
         if (!m_updating)
             applyText();
     });
+    connect(m_letterSpacing, &QDoubleSpinBox::editingFinished, this, [this]() {
+        if (!m_updating)
+            applyText();
+    });
+    connect(m_lineSpacing, &QDoubleSpinBox::editingFinished, this, [this]() {
+        if (!m_updating)
+            applyText();
+    });
     connect(m_boldButton, &QToolButton::clicked, this, [this]() {
         if (!m_updating)
             applyText();
@@ -1730,6 +1821,8 @@ void DockPanels::refreshText()
         m_fontCombo->setCurrentFont(QFont(object.font.family()));
         m_fontSize->setValue(object.font.pixelSize() > 0 ? object.font.pixelSize()
                                                          : 24);
+        m_letterSpacing->setValue(object.letterSpacing);
+        m_lineSpacing->setValue(object.lineSpacing);
         m_boldButton->setChecked(object.font.bold());
         m_italicButton->setChecked(object.font.italic());
         m_underlineButton->setChecked(object.font.underline());
@@ -1758,6 +1851,8 @@ void DockPanels::applyText()
             continue;
         item->setTextFont(font);
         item->setTextAlignment(m_textAlign);
+        item->setLetterSpacing(m_letterSpacing->value());
+        item->setLineSpacing(m_lineSpacing->value());
         any = true;
     }
     emit endEdit();

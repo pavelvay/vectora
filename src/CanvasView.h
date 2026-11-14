@@ -8,6 +8,8 @@
 #include "Tools.h"
 
 class VectorItem;
+class QTextEdit;
+class QShortcut;
 
 class CanvasView : public QGraphicsView
 {
@@ -69,9 +71,16 @@ public:
     void setGuidesVisible(bool visible);
     bool snapEnabled() const { return m_snapEnabled; }
     void setSnapEnabled(bool enabled);
+    int gridStep() const { return m_gridStep; }
+    void setGridStep(int step);
+    qreal snapThreshold() const { return m_snapThreshold; }
+    void setSnapThreshold(qreal threshold);
+    void setSmartGuides(const QVector<QLineF> &lines);
+    QPointF snapNodePoint(const QPointF &scenePos, VectorItem *exclude) const;
     int activeLayer() const { return m_activeLayer; }
     void setActiveLayer(int index);
     int addLayer(const QString &name = QString());
+    int addGroupRecord(int parentGroup);
     void removeLayer(int index);
     void renameLayer(int index, const QString &name);
     void moveLayer(int from, int to);
@@ -104,6 +113,17 @@ public:
     void setItemLocked(VectorItem *item, bool locked);
     void syncClones();
     void scaleSelectionTo(const QRectF &targetBounds, qreal opacity = -1.0);
+    bool hasSelectedNodes() const { return !m_selectedNodeElements.isEmpty(); }
+    int selectedNodeElement() const { return m_nodeElement; }
+    void addNodeAtSelectedSegment();
+    void deleteSelectedNodes();
+    void closeSelectedPath();
+    void openSelectedPath();
+    void joinSelectedEndpoints();
+    void breakAtSelectedNode();
+    void setSelectedNodeType(int type);
+    void convertTextToCurves();
+    void alignSelectedNodes(int mode);
     void duplicateSelection(int count, const QPointF &offset);
     void cloneSelection(const QPointF &offset = QPointF(24.0, 24.0));
     void skewSelection(qreal angleX, qreal angleY);
@@ -113,6 +133,9 @@ public:
     void ungroupAll();
     int topGroupOf(int group) const;
     QList<VectorItem *> itemsInGroup(int topGroup) const;
+    QList<int> childGroupsOf(int parentGroup) const;
+    QList<VectorItem *> itemsDirectlyInGroup(int group) const;
+    void selectGroupItems(int group);
 
     void finishBezier();
     void closeBezier();
@@ -143,6 +166,7 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void keyReleaseEvent(QKeyEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     enum class DrawMode {
@@ -168,6 +192,7 @@ private:
 
     void updateCursor();
     void cycleSelection();
+    void finishTextEditing(bool cancel);
     void normalizeZOrder();
     void updateSnapSettings();
     void applyLayerState(int layer);
@@ -188,6 +213,7 @@ private:
     QPainterPath buildFreehandPath(const QVector<QPointF> &points) const;
 
     bool nodePress(const QPointF &scenePos);
+    void insertNodeAt(const QPointF &scenePos, bool nearestSegment);
     void drawNodeOverlay(QPainter *painter);
     void drawPreview(QPainter *painter);
 
@@ -222,6 +248,8 @@ private:
     bool m_nodeDragging = false;
     VectorItem *m_nodeItem = nullptr;
     int m_nodeElement = -1;
+    QSet<int> m_selectedNodeElements;
+    QPointF m_nodeLastScene;
 
     bool m_transparencyDragging = false;
     VectorItem *m_transparencyItem = nullptr;
@@ -229,6 +257,11 @@ private:
     qreal m_transparencyStartX = 0.0;
 
     qreal m_nextZ = 1.0;
+    QTextEdit *m_textEditor = nullptr;
+    VectorItem *m_textItem = nullptr;
+    QString m_textOriginal;
+    QShortcut *m_tabShortcut = nullptr;
+
     QStringList m_layers = {QStringLiteral("Слой 1")};
     QVector<bool> m_layerVisible = {true};
     QVector<bool> m_layerLocked = {false};
@@ -254,6 +287,9 @@ private:
     QVector<qreal> m_guidesX;
     QVector<qreal> m_guidesY;
     bool m_snapEnabled = true;
+    int m_gridStep = 20;
+    qreal m_snapThreshold = 6.0;
+    QVector<QLineF> m_smartGuides;
     bool m_guidePreview = false;
     bool m_guidesVisible = true;
     Qt::Orientation m_guideOrientation = Qt::Horizontal;

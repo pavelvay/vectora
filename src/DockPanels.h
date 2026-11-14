@@ -121,6 +121,8 @@ private:
     QWidget *m_textContent = nullptr;
     QFontComboBox *m_fontCombo = nullptr;
     QDoubleSpinBox *m_fontSize = nullptr;
+    QDoubleSpinBox *m_letterSpacing = nullptr;
+    QDoubleSpinBox *m_lineSpacing = nullptr;
     QToolButton *m_boldButton = nullptr;
     QToolButton *m_italicButton = nullptr;
     QToolButton *m_underlineButton = nullptr;

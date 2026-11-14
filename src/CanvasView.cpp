@@ -10,8 +10,12 @@
 #include <QPainter>
 #include <QScrollBar>
 #include <QShortcut>
+#include <QTextCursor>
+#include <QTextEdit>
+#include <QGraphicsScene>
 #include <QWheelEvent>
 #include <QtMath>
+#include <QSet>
 
 #include <algorithm>
 
@@ -23,6 +27,47 @@ constexpr qreal kMinZoom = 0.02;
 constexpr qreal kMaxZoom = 32.0;
 constexpr qreal kPxPerMm = 3.7795275591;
 constexpr qreal kPi = 3.14159265358979323846;
+
+bool isCurveEndpoint(const QVector<QPainterPath::Element> &elements, int index)
+{
+    return index >= 2
+           && elements.at(index).type == QPainterPath::CurveToDataElement
+           && elements.at(index - 2).type == QPainterPath::CurveToElement;
+}
+
+bool isAnchorElement(const QVector<QPainterPath::Element> &elements, int index)
+{
+    if (index < 0 || index >= elements.size())
+        return false;
+    const auto type = elements.at(index).type;
+    return type == QPainterPath::MoveToElement || type == QPainterPath::LineToElement
+           || isCurveEndpoint(elements, index);
+}
+
+int anchorForElement(const QVector<QPainterPath::Element> &elements, int index)
+{
+    if (index < 0 || index >= elements.size())
+        return -1;
+    if (isAnchorElement(elements, index))
+        return index;
+    if (elements.at(index).type == QPainterPath::CurveToElement)
+        return index + 2 < elements.size() ? index + 2 : -1;
+    if (elements.at(index).type == QPainterPath::CurveToDataElement) {
+        if (isCurveEndpoint(elements, index))
+            return index;
+        if (index + 1 < elements.size() && isCurveEndpoint(elements, index + 1))
+            return index + 1;
+    }
+    return -1;
+}
+
+QPointF bezierPoint(const QPointF &p0, const QPointF &c1, const QPointF &c2,
+                    const QPointF &p3, qreal t)
+{
+    const qreal u = 1.0 - t;
+    return p0 * (u * u * u) + c1 * (3.0 * u * u * t)
+           + c2 * (3.0 * u * t * t) + p3 * (t * t * t);
+}
 
 QPen previewPen()
 {
@@ -53,8 +98,12 @@ CanvasView::CanvasView(QWidget *parent)
     setFocusPolicy(Qt::StrongFocus);
 
     connect(graphicsScene, &QGraphicsScene::selectionChanged, this, [this]() {
-        if (selectedVectorItems().isEmpty())
+        if (selectedVectorItems().isEmpty()) {
             m_insideGroup = false;
+            m_selectedNodeElements.clear();
+            m_nodeItem = nullptr;
+            m_nodeElement = -1;
+        }
         if (!m_syncingSelection && !m_insideGroup) {
             QSet<int> roots;
             for (VectorItem *item : selectedVectorItems()) {
@@ -94,9 +143,9 @@ CanvasView::CanvasView(QWidget *parent)
         emit selectionChanged(count);
     });
 
-    auto *tabShortcut = new QShortcut(QKeySequence(Qt::Key_Tab), this);
-    tabShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(tabShortcut, &QShortcut::activated, this, &CanvasView::cycleSelection);
+    m_tabShortcut = new QShortcut(QKeySequence(Qt::Key_Tab), this);
+    m_tabShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(m_tabShortcut, &QShortcut::activated, this, &CanvasView::cycleSelection);
 
     updateCursor();
 }
@@ -119,6 +168,8 @@ void CanvasView::setPageSize(const QSizeF &size)
     m_pageSize = size;
     setSceneRect(-kMargin, -kMargin, size.width() + 2 * kMargin,
                  size.height() + 2 * kMargin);
+    if (scene())
+        scene()->setProperty("pageRect", QRectF(0, 0, size.width(), size.height()));
     viewport()->update();
 }
 
@@ -214,6 +265,11 @@ void CanvasView::setShowGrid(bool on)
 
 void CanvasView::setActiveTool(Tool tool)
 {
+    if (tool != Tool::Node) {
+        m_selectedNodeElements.clear();
+        m_nodeItem = nullptr;
+        m_nodeElement = -1;
+    }
     if (m_bezierActive && tool != Tool::Bezier)
         finishBezier();
     m_drawing = false;
@@ -300,7 +356,7 @@ void CanvasView::drawBackground(QPainter *painter, const QRectF &rect)
 
     if (m_grid) {
         painter->setPen(QPen(QColor(0x4f, 0x7c, 0xc0, 26), 1.0));
-        constexpr qreal step = 20.0;
+        const qreal step = qMax<qreal>(1.0, m_gridStep);
         for (qreal x = page.left() + step; x < page.right(); x += step)
             painter->drawLine(QPointF(x, page.top()), QPointF(x, page.bottom()));
         for (qreal y = page.top() + step; y < page.bottom(); y += step)
@@ -343,6 +399,13 @@ void CanvasView::drawForeground(QPainter *painter, const QRectF &rect)
         else
             painter->drawLine(QPointF(area.left(), m_guidePosition),
                               QPointF(area.right(), m_guidePosition));
+    }
+    if (!m_smartGuides.isEmpty()) {
+        QPen smart(QColor(0xff, 0x66, 0x99), 0.0);
+        smart.setStyle(Qt::DashLine);
+        painter->setPen(smart);
+        for (const QLineF &line : m_smartGuides)
+            painter->drawLine(line);
     }
     painter->restore();
 
@@ -517,7 +580,9 @@ void CanvasView::drawNodeOverlay(QPainter *painter)
                 || e.type == QPainterPath::LineToElement) {
                 const QPointF p = item->mapToScene(QPointF(e.x, e.y));
                 painter->setPen(QPen(QColor(0x7f, 0xae, 0xf7), 1.2));
-                painter->setBrush(QColor(0xffffff));
+                painter->setBrush(m_selectedNodeElements.contains(i)
+                                      ? QColor(0xff, 0xb3, 0x47)
+                                      : QColor(0xffffff));
                 painter->drawRect(QRectF(p - QPointF(size / 2, size / 2),
                                          QSizeF(size, size)));
                 ++i;
@@ -538,7 +603,9 @@ void CanvasView::drawNodeOverlay(QPainter *painter)
                 painter->drawEllipse(c2, controlSize, controlSize);
 
                 painter->setPen(QPen(QColor(0x7f, 0xae, 0xf7), 1.2));
-                painter->setBrush(QColor(0xffffff));
+                painter->setBrush(m_selectedNodeElements.contains(i + 2)
+                                      ? QColor(0xff, 0xb3, 0x47)
+                                      : QColor(0xffffff));
                 painter->drawRect(QRectF(anchor - QPointF(size / 2, size / 2),
                                          QSizeF(size, size)));
                 i += 3;
@@ -653,6 +720,8 @@ VectorItem *CanvasView::addVectorObject(const VectorObject &object, bool record,
 
 void CanvasView::setDocument(const Document &document)
 {
+    if (m_textEditor)
+        finishTextEditing(false);
     scene()->clear();
     m_nextZ = 1.0;
     m_bezierActive = false;
@@ -704,6 +773,8 @@ QVector<VectorObject> CanvasView::objects() const
 
 void CanvasView::deleteSelectedObjects()
 {
+    if (m_textEditor)
+        finishTextEditing(false);
     const QList<VectorItem *> items = selectedVectorItems();
     if (items.isEmpty()) {
         emit statusHint(QStringLiteral("Нет выделенных объектов."));
@@ -806,6 +877,13 @@ int CanvasView::layerOf(VectorItem *item) const
 void CanvasView::setActiveLayer(int index)
 {
     m_activeLayer = qBound(0, index, qMax(0, m_layers.size() - 1));
+}
+
+int CanvasView::addGroupRecord(int parentGroup)
+{
+    const int id = m_nextGroupId++;
+    m_groups.append({id, parentGroup});
+    return id;
 }
 
 int CanvasView::addLayer(const QString &name)
@@ -1356,17 +1434,137 @@ void CanvasView::editTextItem(VectorItem *item)
     if (!item || item->object().type != ShapeType::Text)
         return;
 
-    bool ok = false;
-    const QString text = QInputDialog::getMultiLineText(
-        this, QStringLiteral("Текст"), QStringLiteral("Введите текст:"),
-        item->object().text, &ok);
-    if (!ok)
-        return;
+    if (m_textEditor)
+        finishTextEditing(false);
 
     emit beginEdit();
-    item->setText(text);
+    m_textItem = item;
+    m_textOriginal = item->object().text;
+
+    auto *editor = new QTextEdit(viewport());
+    m_textEditor = editor;
+    editor->setPlainText(m_textOriginal);
+    editor->setFont(item->object().font);
+    editor->setAlignment(item->object().textAlign == 1
+                             ? Qt::AlignHCenter
+                             : (item->object().textAlign == 2 ? Qt::AlignRight
+                                                              : Qt::AlignLeft));
+    editor->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    editor->setStyleSheet(QStringLiteral(
+        "QTextEdit { background: rgba(27,29,33,235); color:#f2f5fa;"
+        " border:1px solid #6f9ee8; border-radius:4px; padding:3px;"
+        " selection-background-color:#35507d; }"));
+
+    const QRectF sceneRect = item->mapRectToScene(item->localBounds());
+    const QPoint topLeft = mapFromScene(sceneRect.topLeft());
+    const QPoint bottomRight = mapFromScene(sceneRect.bottomRight());
+    QRect geometry(topLeft, bottomRight);
+    geometry.setWidth(qMax(240, geometry.width()));
+    geometry.setHeight(qMax(80, geometry.height()));
+    geometry.moveLeft(qBound(0, geometry.left(), viewport()->width() - 80));
+    geometry.moveTop(qBound(0, geometry.top(), viewport()->height() - 40));
+    editor->setGeometry(geometry);
+
+    editor->installEventFilter(this);
+    connect(editor, &QTextEdit::textChanged, this, [this, item, editor]() {
+        if (m_textItem == item && m_textEditor == editor)
+            item->setText(editor->toPlainText());
+    });
+    if (m_tabShortcut)
+        m_tabShortcut->setEnabled(false);
+    editor->show();
+    editor->setFocus();
+    editor->moveCursor(QTextCursor::End);
+}
+
+void CanvasView::finishTextEditing(bool cancel)
+{
+    if (!m_textEditor)
+        return;
+
+    QTextEdit *editor = m_textEditor;
+    VectorItem *item = m_textItem;
+    const QString original = m_textOriginal;
+    const QString text = editor->toPlainText();
+    m_textEditor = nullptr;
+    m_textItem = nullptr;
+    editor->removeEventFilter(this);
+    editor->hide();
+    editor->deleteLater();
+    if (m_tabShortcut)
+        m_tabShortcut->setEnabled(true);
+
+    if (item) {
+        if (cancel)
+            item->setText(original);
+        else
+            item->setText(text);
+    }
     emit endEdit();
-    emit statusHint(QStringLiteral("Текст обновлён."));
+    if (!cancel)
+        emit statusHint(QStringLiteral("Текст обновлён."));
+}
+
+bool CanvasView::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_textEditor) {
+        if (event->type() == QEvent::FocusOut) {
+            finishTextEditing(false);
+            return false;
+        }
+        if (event->type() == QEvent::KeyPress) {
+            auto *keyEvent = static_cast<QKeyEvent *>(event);
+            if (keyEvent->key() == Qt::Key_Escape) {
+                finishTextEditing(true);
+                return true;
+            }
+            if ((keyEvent->key() == Qt::Key_Return
+                 || keyEvent->key() == Qt::Key_Enter)
+                && (keyEvent->modifiers() & Qt::ControlModifier)) {
+                finishTextEditing(false);
+                return true;
+            }
+        }
+    }
+    return QGraphicsView::eventFilter(watched, event);
+}
+
+void CanvasView::convertTextToCurves()
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty()) {
+        emit statusHint(QStringLiteral("Выберите текст для перевода в кривые."));
+        return;
+    }
+
+    emit beginEdit();
+    int converted = 0;
+    for (VectorItem *item : selected) {
+        if (item->object().type != ShapeType::Text)
+            continue;
+        VectorObject object = item->object();
+        const QPainterPath path = buildTextPath(object);
+        if (path.isEmpty())
+            continue;
+
+        object.type = ShapeType::Bezier;
+        object.path = path;
+        object.text.clear();
+        object.id = 0;
+        object.masterId = 0;
+        object.cornerRadius = 0;
+
+        scene()->removeItem(item);
+        delete item;
+        VectorItem *curve = addVectorObject(object, false, true);
+        if (curve)
+            curve->setSelected(true);
+        ++converted;
+    }
+    emit endEdit();
+    emit statusHint(converted > 0
+                        ? QStringLiteral("Текст переведён в кривые: %1").arg(converted)
+                        : QStringLiteral("Среди выделенных нет текста."));
 }
 
 void CanvasView::applyFillAt(const QPointF &scenePos)
@@ -1630,10 +1828,96 @@ void CanvasView::setSnapEnabled(bool enabled)
     updateSnapSettings();
 }
 
+void CanvasView::setGridStep(int step)
+{
+    m_gridStep = qBound(2, step, 400);
+    updateSnapSettings();
+    viewport()->update();
+}
+
+void CanvasView::setSnapThreshold(qreal threshold)
+{
+    m_snapThreshold = qBound(1.0, threshold, 60.0);
+    updateSnapSettings();
+}
+
+void CanvasView::setSmartGuides(const QVector<QLineF> &lines)
+{
+    m_smartGuides = lines;
+    viewport()->update();
+}
+
+QPointF CanvasView::snapNodePoint(const QPointF &scenePos, VectorItem *exclude) const
+{
+    if (!m_snapEnabled)
+        return scenePos;
+
+    QVector<qreal> xs = m_guidesX;
+    QVector<qreal> ys = m_guidesY;
+    const QRectF page = scene()->property("pageRect").toRectF();
+    xs << page.left() << page.center().x() << page.right();
+    ys << page.top() << page.center().y() << page.bottom();
+
+    for (VectorItem *item : vectorItems()) {
+        if (item == exclude || !item->isVisible())
+            continue;
+        const QRectF bounds = item->mapRectToScene(item->localBounds());
+        xs << bounds.left() << bounds.center().x() << bounds.right();
+        ys << bounds.top() << bounds.center().y() << bounds.bottom();
+        const QVector<QPainterPath::Element> elements = item->pathElements();
+        for (const auto &element : elements) {
+            const QPointF node = item->mapToScene(QPointF(element.x, element.y));
+            xs << node.x();
+            ys << node.y();
+        }
+    }
+
+    qreal bestX = scenePos.x();
+    qreal bestY = scenePos.y();
+    qreal bestDx = m_snapThreshold + 1.0;
+    qreal bestDy = m_snapThreshold + 1.0;
+    const qreal grid = qMax<qreal>(1.0, m_gridStep);
+
+    const qreal gridX = qRound(scenePos.x() / grid) * grid;
+    if (qAbs(gridX - scenePos.x()) < bestDx) {
+        bestDx = qAbs(gridX - scenePos.x());
+        bestX = gridX;
+    }
+    const qreal gridY = qRound(scenePos.y() / grid) * grid;
+    if (qAbs(gridY - scenePos.y()) < bestDy) {
+        bestDy = qAbs(gridY - scenePos.y());
+        bestY = gridY;
+    }
+    for (qreal target : xs) {
+        if (qAbs(target - scenePos.x()) < bestDx) {
+            bestDx = qAbs(target - scenePos.x());
+            bestX = target;
+        }
+    }
+    for (qreal target : ys) {
+        if (qAbs(target - scenePos.y()) < bestDy) {
+            bestDy = qAbs(target - scenePos.y());
+            bestY = target;
+        }
+    }
+
+    QVector<QLineF> lines;
+    const QRectF area = sceneRect();
+    if (bestDx <= m_snapThreshold)
+        lines.append(QLineF(bestX, area.top(), bestX, area.bottom()));
+    if (bestDy <= m_snapThreshold)
+        lines.append(QLineF(area.left(), bestY, area.right(), bestY));
+    const_cast<CanvasView *>(this)->setSmartGuides(lines);
+
+    return QPointF(bestDx <= m_snapThreshold ? bestX : scenePos.x(),
+                   bestDy <= m_snapThreshold ? bestY : scenePos.y());
+}
+
 void CanvasView::updateSnapSettings()
 {
     for (VectorItem *item : vectorItems())
-        item->setSnapSettings(m_snapEnabled, 20.0, m_guidesX, m_guidesY);
+        item->setSnapSettings(m_snapEnabled, m_gridStep, m_guidesX, m_guidesY,
+                              m_snapThreshold);
 }
 
 void CanvasView::setItemLocked(VectorItem *item, bool locked)
@@ -1828,6 +2112,42 @@ void CanvasView::skewSelection(qreal angleX, qreal angleY)
     emit statusHint(skewed > 0
                         ? QStringLiteral("Наклонено объектов: %1").arg(skewed)
                         : QStringLiteral("Текст пока не наклоняется."));
+}
+
+QList<int> CanvasView::childGroupsOf(int parentGroup) const
+{
+    QList<int> result;
+    for (const VectorGroup &group : m_groups) {
+        if (group.parent == parentGroup)
+            result.append(group.id);
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+QList<VectorItem *> CanvasView::itemsDirectlyInGroup(int group) const
+{
+    QList<VectorItem *> result;
+    for (VectorItem *item : vectorItems()) {
+        if (item->groupIndex() == group)
+            result.append(item);
+    }
+    return result;
+}
+
+void CanvasView::selectGroupItems(int group)
+{
+    if (group <= 0)
+        return;
+    const int top = topGroupOf(group);
+    m_insideGroup = false;
+    m_syncingSelection = true;
+    scene()->clearSelection();
+    for (VectorItem *item : itemsInGroup(top))
+        item->setSelected(true);
+    m_syncingSelection = false;
+    emit selectionChanged(selectedVectorItems().size());
+    emit statusHint(QStringLiteral("Выбрана группа."));
 }
 
 void CanvasView::groupSelection()
@@ -2054,15 +2374,597 @@ bool CanvasView::nodePress(const QPointF &scenePos)
             const QPointF point = item->mapToScene(
                 QPointF(elements.at(i).x, elements.at(i).y));
             if (QLineF(point, scenePos).length() <= tolerance) {
+                if (m_nodeItem != item) {
+                    m_selectedNodeElements.clear();
+                    m_nodeItem = item;
+                }
+                if (QGuiApplication::keyboardModifiers() & Qt::ShiftModifier) {
+                    if (m_selectedNodeElements.contains(i))
+                        m_selectedNodeElements.remove(i);
+                    else
+                        m_selectedNodeElements.insert(i);
+                } else {
+                    m_selectedNodeElements.clear();
+                    m_selectedNodeElements.insert(i);
+                }
+                m_nodeElement = i;
+                m_nodeLastScene = scenePos;
+                if (m_selectedNodeElements.isEmpty())
+                    return true;
                 emit beginEdit();
                 m_nodeDragging = true;
-                m_nodeItem = item;
-                m_nodeElement = i;
                 return true;
             }
         }
     }
     return false;
+}
+
+void CanvasView::insertNodeAt(const QPointF &scenePos, bool nearestSegment)
+{
+    VectorItem *item = m_nodeItem;
+    if (!item) {
+        const QList<VectorItem *> selected = selectedVectorItems();
+        for (VectorItem *candidate : selected) {
+            if (candidate->hasPath()) {
+                item = candidate;
+                break;
+            }
+        }
+    }
+    if (!item) {
+        emit statusHint(QStringLiteral("Выберите объект с контуром."));
+        return;
+    }
+
+    QVector<QPainterPath::Element> elements = item->pathElements();
+    if (elements.size() < 2)
+        return;
+
+    const QPointF local = item->mapFromScene(scenePos);
+    int insertIndex = -1;
+    qreal bestT = 0.5;
+    qreal bestDistance = 1e9;
+
+    const auto consider = [&](qreal distance, int index, qreal t) {
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            insertIndex = index;
+            bestT = t;
+        }
+    };
+
+    if (!nearestSegment && !m_selectedNodeElements.isEmpty()) {
+        int anchor = anchorForElement(elements, *m_selectedNodeElements.begin());
+        if (anchor >= 0) {
+            if (anchor + 1 < elements.size()
+                && elements.at(anchor + 1).type == QPainterPath::LineToElement) {
+                insertIndex = anchor + 1;
+                bestT = 0.5;
+            } else if (anchor + 3 < elements.size()
+                       && elements.at(anchor + 1).type
+                              == QPainterPath::CurveToElement) {
+                insertIndex = anchor + 3;
+                bestT = 0.5;
+            }
+        }
+    }
+
+    if (insertIndex < 0) {
+        int anchorIndex = -1;
+        for (int i = 0; i < elements.size(); ++i) {
+            const auto &element = elements.at(i);
+            if (element.type == QPainterPath::MoveToElement) {
+                anchorIndex = i;
+                continue;
+            }
+            if (element.type == QPainterPath::LineToElement && anchorIndex >= 0) {
+                const QPointF p0(elements.at(anchorIndex).x, elements.at(anchorIndex).y);
+                const QPointF p3(element.x, element.y);
+                for (int step = 0; step <= 16; ++step) {
+                    const qreal t = step / 16.0;
+                    const QPointF point = p0 + (p3 - p0) * t;
+                    consider(QLineF(item->mapToScene(point), scenePos).length(), i, t);
+                }
+                anchorIndex = i;
+            } else if (element.type == QPainterPath::CurveToElement
+                       && i + 2 < elements.size()) {
+                const QPointF p0(elements.at(anchorIndex).x, elements.at(anchorIndex).y);
+                const QPointF c1(element.x, element.y);
+                const QPointF c2(elements.at(i + 1).x, elements.at(i + 1).y);
+                const QPointF p3(elements.at(i + 2).x, elements.at(i + 2).y);
+                for (int step = 0; step <= 24; ++step) {
+                    const qreal t = step / 24.0;
+                    consider(QLineF(item->mapToScene(bezierPoint(p0, c1, c2, p3, t)),
+                                    scenePos).length(),
+                             i + 2, t);
+                }
+                anchorIndex = i + 2;
+                i += 2;
+            }
+        }
+    }
+
+    if (insertIndex < 0 || insertIndex >= elements.size()) {
+        emit statusHint(QStringLiteral("Рядом нет сегмента контура."));
+        return;
+    }
+
+    int newAnchor = -1;
+    emit beginEdit();
+    if (elements.at(insertIndex).type == QPainterPath::LineToElement) {
+        const QPointF end(elements.at(insertIndex).x, elements.at(insertIndex).y);
+        int startIndex = insertIndex - 1;
+        while (startIndex > 0
+               && elements.at(startIndex).type == QPainterPath::CurveToDataElement)
+            --startIndex;
+        const QPointF start(elements.at(startIndex).x, elements.at(startIndex).y);
+        const QPointF mid = start + (end - start) * bestT;
+        QPainterPath::Element node;
+        node.x = mid.x();
+        node.y = mid.y();
+        node.type = QPainterPath::LineToElement;
+        elements.insert(insertIndex, node);
+        newAnchor = insertIndex;
+    } else if (insertIndex >= 2
+               && elements.at(insertIndex - 2).type
+                      == QPainterPath::CurveToElement) {
+        const int start = insertIndex - 2;
+        const QPointF p0 = start > 0
+                               ? QPointF(elements.at(start - 1).x,
+                                         elements.at(start - 1).y)
+                               : QPointF(elements.at(start).x, elements.at(start).y);
+        const QPointF c1(elements.at(start).x, elements.at(start).y);
+        const QPointF c2(elements.at(start + 1).x, elements.at(start + 1).y);
+        const QPointF p3(elements.at(start + 2).x, elements.at(start + 2).y);
+        const qreal t = bestT;
+        const QPointF a = p0 + (c1 - p0) * t;
+        const QPointF b = c1 + (c2 - c1) * t;
+        const QPointF c = c2 + (p3 - c2) * t;
+        const QPointF d = a + (b - a) * t;
+        const QPointF e = b + (c - b) * t;
+        const QPointF middle = d + (e - d) * t;
+
+        QVector<QPainterPath::Element> replacement;
+        const auto makeElement = [](qreal x, qreal y, QPainterPath::ElementType type) {
+            QPainterPath::Element element;
+            element.x = x;
+            element.y = y;
+            element.type = type;
+            return element;
+        };
+        replacement.append(makeElement(a.x(), a.y(), QPainterPath::CurveToElement));
+        replacement.append(makeElement(d.x(), d.y(), QPainterPath::CurveToDataElement));
+        replacement.append(makeElement(middle.x(), middle.y(),
+                                       QPainterPath::CurveToDataElement));
+        replacement.append(makeElement(e.x(), e.y(), QPainterPath::CurveToElement));
+        replacement.append(makeElement(c.x(), c.y(), QPainterPath::CurveToDataElement));
+        replacement.append(makeElement(p3.x(), p3.y(),
+                                       QPainterPath::CurveToDataElement));
+
+        elements.removeAt(start);
+        elements.removeAt(start);
+        elements.removeAt(start);
+        for (int i = replacement.size() - 1; i >= 0; --i)
+            elements.insert(start, replacement.at(i));
+        newAnchor = start + 2;
+    }
+
+    if (newAnchor >= 0) {
+        item->setPathElements(elements);
+        m_nodeItem = item;
+        m_selectedNodeElements.clear();
+        m_selectedNodeElements.insert(newAnchor);
+        m_nodeElement = newAnchor;
+        emit statusHint(QStringLiteral("Узел добавлен."));
+    }
+    emit endEdit();
+}
+
+void CanvasView::addNodeAtSelectedSegment()
+{
+    insertNodeAt(QPointF(), false);
+}
+
+void CanvasView::deleteSelectedNodes()
+{
+    if (!m_nodeItem || m_selectedNodeElements.isEmpty())
+        return;
+    QVector<QPainterPath::Element> elements = m_nodeItem->pathElements();
+
+    QSet<int> anchors;
+    for (int index : m_selectedNodeElements) {
+        const int anchor = anchorForElement(elements, index);
+        if (anchor >= 2 && isCurveEndpoint(elements, anchor))
+            anchors.insert(anchor);
+        else if (anchor >= 0)
+            anchors.insert(anchor);
+    }
+
+    QList<int> sorted = anchors.values();
+    std::sort(sorted.begin(), sorted.end(), std::greater<int>());
+    if (sorted.isEmpty())
+        return;
+
+    emit beginEdit();
+    for (int anchor : sorted) {
+        if (anchor < 0 || anchor >= elements.size())
+            continue;
+        if (isCurveEndpoint(elements, anchor)) {
+            elements.removeAt(anchor);
+            elements.removeAt(anchor - 1);
+            elements.removeAt(anchor - 2);
+        } else {
+            elements.removeAt(anchor);
+        }
+    }
+
+    if (!elements.isEmpty()
+        && elements.first().type != QPainterPath::MoveToElement) {
+        QPainterPath::Element move = elements.first();
+        move.type = QPainterPath::MoveToElement;
+        elements.prepend(move);
+    }
+
+    m_nodeItem->setPathElements(elements);
+    m_selectedNodeElements.clear();
+    m_nodeElement = -1;
+    emit endEdit();
+    emit statusHint(QStringLiteral("Узлы удалены."));
+}
+
+void CanvasView::closeSelectedPath()
+{
+    VectorItem *item = m_nodeItem;
+    if (!item) {
+        const QList<VectorItem *> selected = selectedVectorItems();
+        for (VectorItem *candidate : selected) {
+            if (candidate->hasPath()) {
+                item = candidate;
+                break;
+            }
+        }
+    }
+    if (!item || !item->hasPath())
+        return;
+
+    QVector<QPainterPath::Element> elements = item->pathElements();
+    if (elements.size() < 2)
+        return;
+    const QPointF first(elements.first().x, elements.first().y);
+    const QPointF last(elements.last().x, elements.last().y);
+    if (QLineF(first, last).length() < 0.1) {
+        emit statusHint(QStringLiteral("Контур уже замкнут."));
+        return;
+    }
+
+    emit beginEdit();
+    QPainterPath::Element node;
+    node.x = first.x();
+    node.y = first.y();
+    node.type = QPainterPath::LineToElement;
+    elements.append(node);
+    item->setPathElements(elements);
+    m_selectedNodeElements.clear();
+    emit endEdit();
+    emit statusHint(QStringLiteral("Контур замкнут."));
+}
+
+void CanvasView::openSelectedPath()
+{
+    VectorItem *item = m_nodeItem;
+    if (!item) {
+        const QList<VectorItem *> selected = selectedVectorItems();
+        for (VectorItem *candidate : selected) {
+            if (candidate->hasPath()) {
+                item = candidate;
+                break;
+            }
+        }
+    }
+    if (!item || !item->hasPath())
+        return;
+
+    QVector<QPainterPath::Element> elements = item->pathElements();
+    if (elements.size() < 2)
+        return;
+    const QPointF first(elements.first().x, elements.first().y);
+    const QPointF last(elements.last().x, elements.last().y);
+    if (QLineF(first, last).length() > 0.1) {
+        emit statusHint(QStringLiteral("Контур уже разомкнут."));
+        return;
+    }
+
+    emit beginEdit();
+    if (elements.last().type == QPainterPath::LineToElement) {
+        elements.removeLast();
+    } else if (elements.size() >= 3
+               && elements.last().type == QPainterPath::CurveToDataElement
+               && elements.at(elements.size() - 3).type
+                      == QPainterPath::CurveToElement) {
+        elements.removeLast();
+        elements.removeLast();
+        elements.removeLast();
+    } else {
+        elements.removeLast();
+    }
+    item->setPathElements(elements);
+    m_selectedNodeElements.clear();
+    emit endEdit();
+    emit statusHint(QStringLiteral("Контур разомкнут."));
+}
+
+void CanvasView::joinSelectedEndpoints()
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.size() == 1) {
+        closeSelectedPath();
+        return;
+    }
+    if (selected.size() != 2) {
+        emit statusHint(QStringLiteral("Для соединения выберите одну или две кривые."));
+        return;
+    }
+
+    VectorItem *first = selected.at(0);
+    VectorItem *second = selected.at(1);
+    if (!first->hasPath() || !second->hasPath())
+        return;
+
+    const QPainterPath firstScene = first->mapToScene(first->object().path);
+    const QPainterPath secondScene = second->mapToScene(second->object().path);
+    if (firstScene.isEmpty() || secondScene.isEmpty())
+        return;
+
+    QVector<QPainterPath::Element> a;
+    QVector<QPainterPath::Element> b;
+    for (int i = 0; i < firstScene.elementCount(); ++i)
+        a.append(firstScene.elementAt(i));
+    for (int i = 0; i < secondScene.elementCount(); ++i)
+        b.append(secondScene.elementAt(i));
+    if (a.isEmpty() || b.isEmpty())
+        return;
+
+    QPainterPath merged;
+    merged.moveTo(a.first().x, a.first().y);
+    int i = 1;
+    while (i < a.size()) {
+        if (a.at(i).type == QPainterPath::LineToElement) {
+            merged.lineTo(a.at(i).x, a.at(i).y);
+            ++i;
+        } else if (a.at(i).type == QPainterPath::CurveToElement && i + 2 < a.size()) {
+            merged.cubicTo(a.at(i).x, a.at(i).y, a.at(i + 1).x, a.at(i + 1).y,
+                           a.at(i + 2).x, a.at(i + 2).y);
+            i += 3;
+        } else {
+            ++i;
+        }
+    }
+    merged.lineTo(b.first().x, b.first().y);
+    i = 1;
+    while (i < b.size()) {
+        if (b.at(i).type == QPainterPath::LineToElement) {
+            merged.lineTo(b.at(i).x, b.at(i).y);
+            ++i;
+        } else if (b.at(i).type == QPainterPath::CurveToElement && i + 2 < b.size()) {
+            merged.cubicTo(b.at(i).x, b.at(i).y, b.at(i + 1).x, b.at(i + 1).y,
+                           b.at(i + 2).x, b.at(i + 2).y);
+            i += 3;
+        } else {
+            ++i;
+        }
+    }
+
+    VectorObject object = first->object();
+    object.type = ShapeType::Bezier;
+    object.path = merged;
+    object.pos = QPointF(0, 0);
+    object.rotation = 0;
+    object.id = 0;
+    object.masterId = 0;
+    object.group = 0;
+
+    emit beginEdit();
+    scene()->removeItem(first);
+    delete first;
+    scene()->removeItem(second);
+    delete second;
+    VectorItem *joined = addVectorObject(object, false, true);
+    if (joined)
+        joined->setSelected(true);
+    emit endEdit();
+    emit statusHint(QStringLiteral("Кривые соединены."));
+}
+
+void CanvasView::breakAtSelectedNode()
+{
+    if (!m_nodeItem || m_selectedNodeElements.isEmpty()) {
+        emit statusHint(QStringLiteral("Выберите узел для разрыва."));
+        return;
+    }
+
+    QVector<QPainterPath::Element> elements = m_nodeItem->pathElements();
+    int anchor = anchorForElement(elements, *m_selectedNodeElements.begin());
+    if (anchor <= 0 || anchor >= elements.size() - 1) {
+        emit statusHint(QStringLiteral("Разорвать можно только внутренний узел."));
+        return;
+    }
+
+    QVector<QPainterPath::Element> prefix;
+    for (int i = 0; i <= anchor; ++i)
+        prefix.append(elements.at(i));
+    QVector<QPainterPath::Element> suffix;
+    QPainterPath::Element move = elements.at(anchor);
+    move.type = QPainterPath::MoveToElement;
+    suffix.append(move);
+    for (int i = anchor + 1; i < elements.size(); ++i)
+        suffix.append(elements.at(i));
+
+    VectorObject object = m_nodeItem->object();
+    object.id = 0;
+    object.masterId = 0;
+    object.group = 0;
+
+    VectorObject prefixObject = object;
+    QPainterPath prefixPath;
+    for (int i = 0; i < prefix.size();) {
+        if (prefix.at(i).type == QPainterPath::MoveToElement) {
+            prefixPath.moveTo(prefix.at(i).x, prefix.at(i).y);
+            ++i;
+        } else if (prefix.at(i).type == QPainterPath::LineToElement) {
+            prefixPath.lineTo(prefix.at(i).x, prefix.at(i).y);
+            ++i;
+        } else if (prefix.at(i).type == QPainterPath::CurveToElement
+                   && i + 2 < prefix.size()) {
+            prefixPath.cubicTo(prefix.at(i).x, prefix.at(i).y,
+                               prefix.at(i + 1).x, prefix.at(i + 1).y,
+                               prefix.at(i + 2).x, prefix.at(i + 2).y);
+            i += 3;
+        } else {
+            ++i;
+        }
+    }
+    prefixObject.path = prefixPath;
+    prefixObject.type = ShapeType::Bezier;
+    prefixObject.pos = m_nodeItem->pos();
+    prefixObject.rotation = m_nodeItem->rotation();
+    prefixObject.cornerRadius = 0;
+
+    VectorObject suffixObject = prefixObject;
+    QPainterPath suffixPath;
+    for (int i = 0; i < suffix.size();) {
+        if (suffix.at(i).type == QPainterPath::MoveToElement) {
+            suffixPath.moveTo(suffix.at(i).x, suffix.at(i).y);
+            ++i;
+        } else if (suffix.at(i).type == QPainterPath::LineToElement) {
+            suffixPath.lineTo(suffix.at(i).x, suffix.at(i).y);
+            ++i;
+        } else if (suffix.at(i).type == QPainterPath::CurveToElement
+                   && i + 2 < suffix.size()) {
+            suffixPath.cubicTo(suffix.at(i).x, suffix.at(i).y,
+                               suffix.at(i + 1).x, suffix.at(i + 1).y,
+                               suffix.at(i + 2).x, suffix.at(i + 2).y);
+            i += 3;
+        } else {
+            ++i;
+        }
+    }
+    suffixObject.path = suffixPath;
+
+    emit beginEdit();
+    VectorItem *original = m_nodeItem;
+    scene()->removeItem(original);
+    delete original;
+    m_nodeItem = nullptr;
+    m_selectedNodeElements.clear();
+    addVectorObject(prefixObject, false, true);
+    addVectorObject(suffixObject, false, true);
+    emit endEdit();
+    emit statusHint(QStringLiteral("Кривая разорвана на два объекта."));
+}
+
+void CanvasView::setSelectedNodeType(int type)
+{
+    if (!m_nodeItem || m_selectedNodeElements.isEmpty())
+        return;
+    QVector<QPainterPath::Element> elements = m_nodeItem->pathElements();
+    const int anchor = anchorForElement(elements, *m_selectedNodeElements.begin());
+    if (anchor < 0) {
+        emit statusHint(QStringLiteral("Выберите узел."));
+        return;
+    }
+
+    const bool hasIncoming = anchor >= 2
+                             && elements.at(anchor - 2).type
+                                    == QPainterPath::CurveToElement
+                             && isCurveEndpoint(elements, anchor);
+    const bool hasOutgoing = anchor + 3 < elements.size()
+                             && elements.at(anchor + 1).type
+                                    == QPainterPath::CurveToElement;
+    if (!hasIncoming || !hasOutgoing) {
+        emit statusHint(QStringLiteral("У узла нет двух направляющих."));
+        return;
+    }
+
+    const QPointF a(elements.at(anchor).x, elements.at(anchor).y);
+    int inIndex = anchor - 1;
+    int outIndex = anchor + 1;
+    QPointF inPoint(elements.at(inIndex).x, elements.at(inIndex).y);
+    QPointF outPoint(elements.at(outIndex).x, elements.at(outIndex).y);
+
+    if (type == 0)
+        return; // cusp — handles keep their independent positions
+
+    QPointF direction = outPoint - a;
+    if (QLineF(QPointF(), direction).length() < 0.01)
+        direction = a - inPoint;
+    const qreal length = QLineF(QPointF(), direction).length();
+    if (length < 0.01) {
+        emit statusHint(QStringLiteral("Направляющие слишком короткие."));
+        return;
+    }
+    const QPointF unit = direction / length;
+    const qreal outLength = type == 2 ? length
+                                      : QLineF(a, outPoint).length();
+    const qreal inLength = type == 2 ? length
+                                     : QLineF(a, inPoint).length();
+
+    emit beginEdit();
+    elements[outIndex].x = a.x() + unit.x() * outLength;
+    elements[outIndex].y = a.y() + unit.y() * outLength;
+    elements[inIndex].x = a.x() - unit.x() * inLength;
+    elements[inIndex].y = a.y() - unit.y() * inLength;
+    m_nodeItem->setPathElements(elements);
+    emit endEdit();
+    emit statusHint(type == 1 ? QStringLiteral("Узел сглажен.")
+                              : QStringLiteral("Узел симметричен."));
+}
+
+void CanvasView::alignSelectedNodes(int mode)
+{
+    if (!m_nodeItem || m_selectedNodeElements.isEmpty())
+        return;
+    QVector<QPainterPath::Element> elements = m_nodeItem->pathElements();
+    QSet<int> anchors;
+    for (int index : m_selectedNodeElements) {
+        const int anchor = anchorForElement(elements, index);
+        if (anchor >= 0)
+            anchors.insert(anchor);
+    }
+    if (anchors.size() < 2) {
+        emit statusHint(QStringLiteral("Shift+клик: выберите минимум два узла."));
+        return;
+    }
+
+    qreal minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+    for (int anchor : anchors) {
+        minX = qMin(minX, elements.at(anchor).x);
+        maxX = qMax(maxX, elements.at(anchor).x);
+        minY = qMin(minY, elements.at(anchor).y);
+        maxY = qMax(maxY, elements.at(anchor).y);
+    }
+
+    qreal target = 0.0;
+    switch (mode) {
+    case 0: target = minX; break;
+    case 1: target = (minX + maxX) / 2.0; break;
+    case 2: target = maxX; break;
+    case 3: target = minY; break;
+    case 4: target = (minY + maxY) / 2.0; break;
+    case 5: target = maxY; break;
+    default: return;
+    }
+
+    emit beginEdit();
+    for (int anchor : anchors) {
+        if (mode <= 2)
+            elements[anchor].x = target;
+        else
+            elements[anchor].y = target;
+    }
+    m_nodeItem->setPathElements(elements);
+    emit endEdit();
+    emit statusHint(QStringLiteral("Узлы выровнены."));
 }
 
 void CanvasView::mousePressEvent(QMouseEvent *event)
@@ -2280,14 +3182,36 @@ void CanvasView::mouseMoveEvent(QMouseEvent *event)
         viewport()->update();
     }
 
-    if (m_nodeDragging && m_nodeItem && m_nodeElement >= 0) {
-        const QPointF local = m_nodeItem->mapFromScene(scenePos);
+    if (m_nodeDragging && m_nodeItem && !m_selectedNodeElements.isEmpty()) {
+        const QPointF currentLocal = m_nodeItem->mapFromScene(scenePos);
+        const QPointF lastLocal = m_nodeItem->mapFromScene(m_nodeLastScene);
+        const QPointF delta = currentLocal - lastLocal;
+        m_nodeLastScene = scenePos;
         QVector<QPainterPath::Element> elements = m_nodeItem->pathElements();
-        if (m_nodeElement < elements.size()) {
-            elements[m_nodeElement].x = local.x();
-            elements[m_nodeElement].y = local.y();
-            m_nodeItem->setPathElements(elements);
+        QPointF adjustedDelta = delta;
+        if (m_snapEnabled && !m_selectedNodeElements.isEmpty()) {
+            const int primary = m_nodeElement >= 0 ? m_nodeElement
+                                                   : *m_selectedNodeElements.begin();
+            if (primary >= 0 && primary < elements.size()) {
+                const QPointF proposed(elements.at(primary).x + delta.x(),
+                                       elements.at(primary).y + delta.y());
+                const QPointF scenePoint = m_nodeItem->mapToScene(proposed);
+                const QPointF snapped = snapNodePoint(scenePoint, m_nodeItem);
+                const QPointF adjustment =
+                    m_nodeItem->mapFromScene(snapped + (scenePoint - scenePoint))
+                    - m_nodeItem->mapFromScene(scenePoint);
+                adjustedDelta += adjustment;
+            }
+        } else {
+            setSmartGuides({});
         }
+        for (int index : m_selectedNodeElements) {
+            if (index >= 0 && index < elements.size()) {
+                elements[index].x += adjustedDelta.x();
+                elements[index].y += adjustedDelta.y();
+            }
+        }
+        m_nodeItem->setPathElements(elements);
         emit scenePosChanged(scenePos);
         return;
     }
@@ -2377,12 +3301,13 @@ void CanvasView::mouseReleaseEvent(QMouseEvent *event)
 
     if (m_nodeDragging) {
         m_nodeDragging = false;
-        m_nodeItem = nullptr;
-        m_nodeElement = -1;
+        setSmartGuides({});
         emit endEdit();
         event->accept();
         return;
     }
+
+    setSmartGuides({});
 
     if (m_transparencyDragging) {
         m_transparencyDragging = false;
@@ -2418,6 +3343,20 @@ void CanvasView::mouseReleaseEvent(QMouseEvent *event)
 
 void CanvasView::mouseDoubleClickEvent(QMouseEvent *event)
 {
+    if (m_tool == Tool::Node) {
+        const QPointF scenePos = mapToScene(event->pos());
+        VectorItem *item = itemAtScene(scenePos);
+        if (item && item->hasPath()) {
+            scene()->clearSelection();
+            item->setSelected(true);
+            m_nodeItem = item;
+            m_selectedNodeElements.clear();
+            insertNodeAt(scenePos, true);
+            event->accept();
+            return;
+        }
+    }
+
     if (m_tool == Tool::Bezier && m_bezierActive) {
         if (m_bezierNodes.size() >= 2) {
             const BezierNode last = m_bezierNodes.last();
@@ -2437,6 +3376,12 @@ void CanvasView::keyPressEvent(QKeyEvent *event)
     if (event->key() == Qt::Key_Space && !m_spaceHeld) {
         m_spaceHeld = true;
         updateCursor();
+        event->accept();
+        return;
+    }
+    if ((event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace)
+        && m_tool == Tool::Node && !m_selectedNodeElements.isEmpty()) {
+        deleteSelectedNodes();
         event->accept();
         return;
     }
