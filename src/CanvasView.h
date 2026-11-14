@@ -17,6 +17,7 @@ class CanvasView : public QGraphicsView
 
 public:
     enum class BezierNodeMode { Cusp, Smooth, Symmetric };
+    enum class BooleanOperation { Union, Difference, Intersection, Exclude, Divide, Trim };
 
     explicit CanvasView(QWidget *parent = nullptr);
     ~CanvasView() override;
@@ -114,6 +115,12 @@ public:
     void setItemLocked(VectorItem *item, bool locked);
     void syncClones();
     void scaleSelectionTo(const QRectF &targetBounds, qreal opacity = -1.0);
+    void applyBooleanOperation(BooleanOperation operation);
+    void applyKnifeCut(const QLineF &cut);
+    void applyEraserStroke(const QVector<QPointF> &points);
+    void convertSelectionToCurves();
+    void simplifySelectedPath();
+    void convertStrokeToPath();
     bool hasSelectedNodes() const { return !m_selectedNodeElements.isEmpty(); }
     int selectedNodeElement() const { return m_nodeElement; }
     void addNodeAtSelectedSegment();
@@ -294,6 +301,12 @@ private:
     int m_gridStep = 20;
     qreal m_snapThreshold = 6.0;
     QVector<QLineF> m_smartGuides;
+    bool m_knifeActive = false;
+    QPointF m_knifeStart;
+    QPointF m_knifeCurrent;
+    bool m_eraserActive = false;
+    QVector<QPointF> m_eraserPoints;
+
     bool m_guidePreview = false;
     bool m_guidesVisible = true;
     Qt::Orientation m_guideOrientation = Qt::Horizontal;

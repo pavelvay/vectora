@@ -940,6 +940,113 @@ int SelfTest::run(const QString &directory)
                          == ShapeType::Bezier,
               QStringLiteral("text converted to curves"));
 
+        // Boolean operations and geometry tools.
+        const auto resetTwoRects = [&view]() {
+            view.setDocument(Document());
+            VectorObject first;
+            first.type = ShapeType::Rectangle;
+            first.path.addRect(QRectF(0, 0, 100, 100));
+            first.pos = QPointF(100, 100);
+            VectorObject second = first;
+            second.pos = QPointF(150, 100);
+            VectorItem *a = view.addVectorObject(first, false, false);
+            VectorItem *b = view.addVectorObject(second, false, false);
+            view.scene()->clearSelection();
+            a->setSelected(true);
+            b->setSelected(true);
+            return QPair<VectorItem *, VectorItem *>(a, b);
+        };
+
+        resetTwoRects();
+        view.applyBooleanOperation(CanvasView::BooleanOperation::Union);
+        check(view.vectorItems().size() == 1
+                  && qAbs(view.vectorItems().first()->object().localBounds().width() - 150.0) < 1.0,
+              QStringLiteral("boolean union"));
+
+        resetTwoRects();
+        view.applyBooleanOperation(CanvasView::BooleanOperation::Difference);
+        check(view.vectorItems().size() == 1,
+              QStringLiteral("boolean difference"));
+
+        resetTwoRects();
+        view.applyBooleanOperation(CanvasView::BooleanOperation::Intersection);
+        check(view.vectorItems().size() == 1
+                  && qAbs(view.vectorItems().first()->object().localBounds().width() - 50.0) < 1.0,
+              QStringLiteral("boolean intersection"));
+
+        resetTwoRects();
+        view.applyBooleanOperation(CanvasView::BooleanOperation::Exclude);
+        check(view.vectorItems().size() == 1,
+              QStringLiteral("boolean exclude"));
+
+        resetTwoRects();
+        view.applyBooleanOperation(CanvasView::BooleanOperation::Divide);
+        check(view.vectorItems().size() == 3,
+              QStringLiteral("boolean divide into 3 regions"));
+
+        resetTwoRects();
+        view.applyBooleanOperation(CanvasView::BooleanOperation::Trim);
+        check(view.vectorItems().size() == 2,
+              QStringLiteral("boolean trim"));
+
+        // Knife and eraser.
+        view.setDocument(Document());
+        VectorObject knifeRect;
+        knifeRect.type = ShapeType::Rectangle;
+        knifeRect.path.addRect(QRectF(0, 0, 100, 100));
+        knifeRect.pos = QPointF(100, 100);
+        VectorItem *knifeItem = view.addVectorObject(knifeRect, false, false);
+        view.scene()->clearSelection();
+        knifeItem->setSelected(true);
+        view.applyKnifeCut(QLineF(150, 50, 150, 250));
+        check(view.vectorItems().size() == 2,
+              QStringLiteral("knife splits a rectangle"));
+
+        view.setDocument(Document());
+        VectorObject eraserRect = knifeRect;
+        VectorItem *eraserItem = view.addVectorObject(eraserRect, false, false);
+        view.scene()->clearSelection();
+        eraserItem->setSelected(true);
+        view.applyEraserStroke({QPointF(150, 80), QPointF(150, 220)});
+        check(view.vectorItems().size() == 1
+                  && view.vectorItems().first()->object().path.toSubpathPolygons().size() >= 2,
+              QStringLiteral("eraser splits the filled area"));
+
+        // Stroke styling and stroke-to-path.
+        view.setDocument(Document());
+        VectorObject strokeRect;
+        strokeRect.type = ShapeType::Rectangle;
+        strokeRect.path.addRect(QRectF(0, 0, 80, 60));
+        strokeRect.pos = QPointF(100, 100);
+        strokeRect.stroke = QColor("#ff0000");
+        strokeRect.strokeWidth = 4;
+        VectorItem *strokeItem = view.addVectorObject(strokeRect, false, false);
+        strokeItem->setStrokeStyle(1, 1, 6.0, {3.0, 1.5});
+        check(strokeItem->object().capStyle == 1
+                  && strokeItem->object().joinStyle == 1
+                  && strokeItem->object().dashPattern.size() == 2,
+              QStringLiteral("stroke cap/join/dash applied"));
+        view.scene()->clearSelection();
+        strokeItem->setSelected(true);
+        view.convertStrokeToPath();
+        check(view.vectorItems().size() == 1
+                  && view.vectorItems().first()->object().type == ShapeType::Bezier
+                  && view.vectorItems().first()->object().hasFill,
+              QStringLiteral("stroke converted to a filled outline"));
+
+        // Convert a primitive to curves.
+        view.setDocument(Document());
+        VectorObject primitive;
+        primitive.type = ShapeType::Ellipse;
+        primitive.path.addEllipse(QRectF(0, 0, 80, 60));
+        VectorItem *primitiveItem = view.addVectorObject(primitive, false, false);
+        view.scene()->clearSelection();
+        primitiveItem->setSelected(true);
+        view.convertSelectionToCurves();
+        check(view.vectorItems().size() == 1
+                  && view.vectorItems().first()->object().type == ShapeType::Bezier,
+              QStringLiteral("primitive converted to curves"));
+
         // Node editor: add/delete, close/open, break and align.
         view.setDocument(Document());
         VectorObject nodeShape;

@@ -27,6 +27,8 @@ public:
     void setGradientFill(int style, const QColor &second, qreal angle);
     void setStrokeColor(const QColor &color);
     void setStrokeWidth(qreal width);
+    void setStrokeStyle(int capStyle, int joinStyle, qreal miterLimit,
+                        const QVector<qreal> &dashPattern);
     void setObjectOpacity(qreal opacity);
     void setShadowEnabled(bool on);
     void setShadowOffset(const QPointF &offset);

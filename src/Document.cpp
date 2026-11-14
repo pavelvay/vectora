@@ -424,8 +424,17 @@ void Document::paintObject(QPainter *painter, const VectorObject &object)
         }
         if (object.hasStroke && object.strokeWidth > 0.0 && object.stroke.alpha() > 0) {
             QPen pen(object.stroke, object.strokeWidth);
-            pen.setJoinStyle(Qt::RoundJoin);
-            pen.setCapStyle(Qt::RoundCap);
+            pen.setCapStyle(object.capStyle == 0 ? Qt::FlatCap
+                                                 : (object.capStyle == 1
+                                                        ? Qt::SquareCap
+                                                        : Qt::RoundCap));
+            pen.setJoinStyle(object.joinStyle == 0 ? Qt::MiterJoin
+                                                   : (object.joinStyle == 1
+                                                          ? Qt::BevelJoin
+                                                          : Qt::RoundJoin));
+            pen.setMiterLimit(object.miterLimit);
+            if (!object.dashPattern.isEmpty())
+                pen.setDashPattern(object.dashPattern);
             painter->setPen(pen);
             painter->setBrush(Qt::NoBrush);
             painter->drawPath(object.path);
@@ -598,6 +607,13 @@ QJsonObject Document::toJson() const
         entry.insert(QStringLiteral("pivotY"), object.pivot.y());
         entry.insert(QStringLiteral("stroke"), colorToJson(object.stroke, object.hasStroke));
         entry.insert(QStringLiteral("strokeWidth"), object.strokeWidth);
+        entry.insert(QStringLiteral("capStyle"), object.capStyle);
+        entry.insert(QStringLiteral("joinStyle"), object.joinStyle);
+        entry.insert(QStringLiteral("miterLimit"), object.miterLimit);
+        QJsonArray dashArray;
+        for (qreal dash : object.dashPattern)
+            dashArray.append(dash);
+        entry.insert(QStringLiteral("dashPattern"), dashArray);
         entry.insert(QStringLiteral("opacity"), object.opacity);
         entry.insert(QStringLiteral("shadow"), object.shadow);
         entry.insert(QStringLiteral("locked"), object.locked);
@@ -729,6 +745,11 @@ Document Document::fromJson(const QJsonObject &json, QString *error)
         object.stroke = colorFromJson(entry.value(QStringLiteral("stroke")), &object.hasStroke,
                                       QColor("#1d2127"));
         object.strokeWidth = entry.value(QStringLiteral("strokeWidth")).toDouble(2.0);
+        object.capStyle = entry.value(QStringLiteral("capStyle")).toInt(2);
+        object.joinStyle = entry.value(QStringLiteral("joinStyle")).toInt(2);
+        object.miterLimit = entry.value(QStringLiteral("miterLimit")).toDouble(2.0);
+        for (const QJsonValue &value : entry.value(QStringLiteral("dashPattern")).toArray())
+            object.dashPattern.append(value.toDouble());
         object.opacity = entry.value(QStringLiteral("opacity")).toDouble(1.0);
         object.shadow = entry.value(QStringLiteral("shadow")).toBool(false);
         object.locked = entry.value(QStringLiteral("locked")).toBool(false);
@@ -930,11 +951,29 @@ QString Document::toSvg() const
                 opacityAttributes += QStringLiteral(" stroke-opacity=\"%1\"")
                                          .arg(num(object.stroke.alphaF()));
 
+            const QString lineCap = object.capStyle == 0
+                                        ? QStringLiteral("butt")
+                                        : (object.capStyle == 1 ? QStringLiteral("square")
+                                                                : QStringLiteral("round"));
+            const QString lineJoin = object.joinStyle == 0
+                                         ? QStringLiteral("miter")
+                                         : (object.joinStyle == 1
+                                                ? QStringLiteral("bevel")
+                                                : QStringLiteral("round"));
+            QString dashAttributes;
+            if (!object.dashPattern.isEmpty()) {
+                QStringList dashes;
+                for (qreal dash : object.dashPattern)
+                    dashes << num(dash * object.strokeWidth);
+                dashAttributes = QStringLiteral(" stroke-dasharray=\"%1\"")
+                                     .arg(dashes.join(QLatin1Char(' ')));
+            }
             svg += QStringLiteral("    <path d=\"%1\" fill=\"%2\" stroke=\"%3\" "
-                                  "stroke-width=\"%4\" stroke-linejoin=\"round\" "
-                                  "stroke-linecap=\"round\"%5/>\n")
+                                  "stroke-width=\"%4\" stroke-linejoin=\"%5\" "
+                                  "stroke-linecap=\"%6\" stroke-miterlimit=\"%7\"%8%9/>\n")
                        .arg(svgPathData(object.path), fill, stroke,
-                            num(object.strokeWidth), opacityAttributes);
+                            num(object.strokeWidth), lineJoin, lineCap,
+                            num(object.miterLimit), dashAttributes, opacityAttributes);
         }
 
         if (object.type == ShapeType::Text && !object.text.isEmpty()) {

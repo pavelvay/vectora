@@ -896,6 +896,13 @@ void DockPanels::refreshProperties()
         m_outlineColor = firstObject.hasStroke ? firstObject.stroke : m_outlineColor;
         colorButtonIcon(m_outlineColorButton, m_outlineColor);
         m_outlineWidth->setValue(firstObject.strokeWidth);
+        m_capCombo->setCurrentIndex(qBound(0, firstObject.capStyle, 2));
+        m_joinCombo->setCurrentIndex(qBound(0, firstObject.joinStyle, 2));
+        m_miterSpin->setValue(firstObject.miterLimit);
+        QStringList dashParts;
+        for (qreal dash : firstObject.dashPattern)
+            dashParts << QString::number(dash, 'g', 4);
+        m_dashEdit->setText(dashParts.join(QLatin1Char(' ')));
     }
 
     m_updating = false;
@@ -1622,10 +1629,45 @@ void DockPanels::buildOutlineDocker()
     widthRow->addStretch(1);
     layout->addLayout(widthRow);
 
+    auto *capRow = new QHBoxLayout;
+    capRow->addWidget(fieldLabel(QStringLiteral("Окончание"), content));
+    m_capCombo = new QComboBox(content);
+    m_capCombo->addItems({QStringLiteral("Плоское"), QStringLiteral("Квадратное"),
+                          QStringLiteral("Круглое")});
+    capRow->addWidget(m_capCombo, 1);
+    layout->addLayout(capRow);
+
+    auto *joinRow = new QHBoxLayout;
+    joinRow->addWidget(fieldLabel(QStringLiteral("Соединение"), content));
+    m_joinCombo = new QComboBox(content);
+    m_joinCombo->addItems({QStringLiteral("Угол"), QStringLiteral("Срез"),
+                           QStringLiteral("Круг")});
+    joinRow->addWidget(m_joinCombo, 1);
+    layout->addLayout(joinRow);
+
+    auto *miterRow = new QHBoxLayout;
+    miterRow->addWidget(fieldLabel(QStringLiteral("Предел среза"), content));
+    m_miterSpin = spinField(content, 1, 20, 2, QString(), 1, 70);
+    miterRow->addWidget(m_miterSpin);
+    miterRow->addStretch(1);
+    layout->addLayout(miterRow);
+
+    auto *dashRow = new QHBoxLayout;
+    dashRow->addWidget(fieldLabel(QStringLiteral("Штрихи"), content));
+    m_dashEdit = new QLineEdit(content);
+    m_dashEdit->setPlaceholderText(QStringLiteral("например 6 3 (пусто — сплошная)"));
+    dashRow->addWidget(m_dashEdit, 1);
+    layout->addLayout(dashRow);
+
     auto *apply = new QToolButton(content);
     apply->setText(QStringLiteral("Применить обводку"));
     apply->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     layout->addWidget(apply);
+
+    auto *toCurve = new QToolButton(content);
+    toCurve->setText(QStringLiteral("Обводка в кривую"));
+    toCurve->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    layout->addWidget(toCurve);
 
     auto *remove = new QToolButton(content);
     remove->setText(QStringLiteral("Убрать обводку"));
@@ -1649,14 +1691,30 @@ void DockPanels::buildOutlineDocker()
             emit status(QStringLiteral("Сначала выберите объекты."));
             return;
         }
+        QVector<qreal> dashes;
+        const QString dashText = m_dashEdit->text();
+        static const QRegularExpression dashNumber(
+            QStringLiteral("[-+]?(?:\\d*\\.\\d+|\\d+\\.?)"));
+        auto it = dashNumber.globalMatch(dashText);
+        while (it.hasNext())
+            dashes.append(it.next().captured(0).toDouble());
+
         emit beginEdit();
         for (VectorItem *item : selected) {
             item->setStrokeColor(m_outlineColor);
             item->setStrokeWidth(m_outlineWidth->value());
+            item->setStrokeStyle(m_capCombo->currentIndex(),
+                                 m_joinCombo->currentIndex(),
+                                 m_miterSpin->value(), dashes);
         }
         emit endEdit();
         refreshProperties();
         emit status(QStringLiteral("Обводка применена."));
+    });
+
+    connect(toCurve, &QToolButton::clicked, this, [this]() {
+        m_view->convertStrokeToPath();
+        refresh();
     });
 
     connect(remove, &QToolButton::clicked, this, [this]() {

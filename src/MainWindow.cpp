@@ -358,6 +358,18 @@ void MainWindow::createActions()
                QKeySequence(), QStringLiteral("Повернуть объект на 90 градусов"), false);
     makeAction(QStringLiteral("skew"), QStringLiteral("Наклонить…"),
                QKeySequence(), QStringLiteral("Наклонить объект по горизонтали и вертикали"), false);
+    makeAction(QStringLiteral("bool-union"), QStringLiteral("Объединение"),
+               QKeySequence(), QStringLiteral("Логическое объединение контуров"), false);
+    makeAction(QStringLiteral("bool-difference"), QStringLiteral("Вычитание"),
+               QKeySequence(), QStringLiteral("Вычесть верхние объекты из нижнего"), false);
+    makeAction(QStringLiteral("bool-intersection"), QStringLiteral("Пересечение"),
+               QKeySequence(), QStringLiteral("Оставить общую область контуров"), false);
+    makeAction(QStringLiteral("bool-exclude"), QStringLiteral("Исключение"),
+               QKeySequence(), QStringLiteral("Убрать пересекающиеся области"), false);
+    makeAction(QStringLiteral("bool-divide"), QStringLiteral("Разделение"),
+               QKeySequence(), QStringLiteral("Разделить пересечения на отдельные области"), false);
+    makeAction(QStringLiteral("bool-trim"), QStringLiteral("Обрезка"),
+               QKeySequence(), QStringLiteral("Обрезать объекты верхним контуром"), false);
     makeAction(QStringLiteral("convert-curves"), QStringLiteral("Преобразовать в кривые"),
                QKeySequence(QStringLiteral("Ctrl+Q")), QStringLiteral("Преобразовать текст в редактируемые кривые"), false);
     makeAction(QStringLiteral("lock"), QStringLiteral("Заблокировать"),
@@ -502,7 +514,17 @@ void MainWindow::createActions()
             m_view->skewSelection(ax->value(), ay->value());
     });
     connect(action(QStringLiteral("convert-curves")), &QAction::triggered, this,
-            [this]() { m_view->convertTextToCurves(); });
+            [this]() { m_view->convertSelectionToCurves(); });
+    for (const auto &entry : {
+             std::make_pair(QStringLiteral("bool-union"), CanvasView::BooleanOperation::Union),
+             std::make_pair(QStringLiteral("bool-difference"), CanvasView::BooleanOperation::Difference),
+             std::make_pair(QStringLiteral("bool-intersection"), CanvasView::BooleanOperation::Intersection),
+             std::make_pair(QStringLiteral("bool-exclude"), CanvasView::BooleanOperation::Exclude),
+             std::make_pair(QStringLiteral("bool-divide"), CanvasView::BooleanOperation::Divide),
+             std::make_pair(QStringLiteral("bool-trim"), CanvasView::BooleanOperation::Trim)}) {
+        connect(action(entry.first), &QAction::triggered, this,
+                [this, op = entry.second]() { m_view->applyBooleanOperation(op); });
+    }
     connect(action(QStringLiteral("group")), &QAction::triggered, this,
             [this]() { m_view->groupSelection(); });
     connect(action(QStringLiteral("ungroup")), &QAction::triggered, this,
@@ -708,6 +730,13 @@ void MainWindow::createMenus()
     objectMenu->addAction(action(QStringLiteral("rotate")));
     objectMenu->addAction(action(QStringLiteral("skew")));
     objectMenu->addSeparator();
+    auto *booleanMenu = objectMenu->addMenu(QStringLiteral("Логические операции"));
+    booleanMenu->addAction(action(QStringLiteral("bool-union")));
+    booleanMenu->addAction(action(QStringLiteral("bool-difference")));
+    booleanMenu->addAction(action(QStringLiteral("bool-intersection")));
+    booleanMenu->addAction(action(QStringLiteral("bool-exclude")));
+    booleanMenu->addAction(action(QStringLiteral("bool-divide")));
+    booleanMenu->addAction(action(QStringLiteral("bool-trim")));
     objectMenu->addAction(action(QStringLiteral("convert-curves")));
     objectMenu->addAction(action(QStringLiteral("lock")));
 
@@ -1393,6 +1422,8 @@ void MainWindow::createPropertyBar()
                [this]() { m_view->joinSelectedEndpoints(); });
     nodeButton(QStringLiteral("Разорвать"), QStringLiteral("Разорвать кривую в узле"),
                [this]() { m_view->breakAtSelectedNode(); });
+    nodeButton(QStringLiteral("Оптимизировать"), QStringLiteral("Удалить лишние узлы"),
+               [this]() { m_view->simplifySelectedPath(); });
 
     nodeLayout->addWidget(verticalRule(nodePage));
     nodeLayout->addWidget(fieldLabel(QStringLiteral("Выровнять")));
@@ -2646,7 +2677,8 @@ void MainWindow::showShortcuts()
         "<tr><td><b>O</b></td><td>Обводка</td><td><b>Shift+T</b></td><td>Прозрачность</td></tr>"
         "<tr><td><b>Shift+D</b></td><td>Тень</td><td><b>Shift+B</b></td><td>Перетекание</td></tr>"
         "<tr><td><b>Z</b></td><td>Масштаб</td><td><b>H</b></td><td>Панорама</td></tr>"
-        "<tr><td><b>C</b></td><td>Обрезка</td><td><b>Пробел</b></td><td>Панорама (удерживать)</td></tr>"
+        "<tr><td><b>C</b></td><td>Обрезка</td><td><b>K</b></td><td>Нож</td></tr>"
+        "<tr><td><b>X</b></td><td>Ластик</td><td><b>Пробел</b></td><td>Панорама (удерживать)</td></tr>"
         "</table>"
         "<h3 style='color:#e3e7ee'>Кривая Безье</h3>"
         "<table cellspacing='6'>"

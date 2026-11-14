@@ -239,6 +239,16 @@ void VectorItem::setStrokeWidth(qreal width)
     update();
 }
 
+void VectorItem::setStrokeStyle(int capStyle, int joinStyle, qreal miterLimit,
+                                const QVector<qreal> &dashPattern)
+{
+    m_object.capStyle = qBound(0, capStyle, 2);
+    m_object.joinStyle = qBound(0, joinStyle, 2);
+    m_object.miterLimit = qMax<qreal>(1.0, miterLimit);
+    m_object.dashPattern = dashPattern;
+    update();
+}
+
 void VectorItem::setObjectOpacity(qreal opacity)
 {
     m_object.opacity = qBound(0.0, opacity, 1.0);

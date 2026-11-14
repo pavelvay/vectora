@@ -116,6 +116,10 @@ private:
 
     QToolButton *m_outlineColorButton = nullptr;
     QDoubleSpinBox *m_outlineWidth = nullptr;
+    QComboBox *m_capCombo = nullptr;
+    QComboBox *m_joinCombo = nullptr;
+    QDoubleSpinBox *m_miterSpin = nullptr;
+    QLineEdit *m_dashEdit = nullptr;
     QColor m_outlineColor = QColor(0x1d, 0x21, 0x27);
 
     QWidget *m_textContent = nullptr;

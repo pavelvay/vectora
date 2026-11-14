@@ -45,6 +45,10 @@ struct VectorObject {
     QPointF pivot = QPointF(0.5, 0.5); // normalised rotation centre inside bounds
     QColor stroke = QColor("#1d2127");
     qreal strokeWidth = 2.0;
+    int capStyle = 2;            // 0 butt, 1 square, 2 round
+    int joinStyle = 2;           // 0 miter, 1 bevel, 2 round
+    qreal miterLimit = 2.0;
+    QVector<qreal> dashPattern;  // empty = solid; values are pen-width units
     bool hasFill = true;
     bool hasStroke = true;
     qreal opacity = 1.0;

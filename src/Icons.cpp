@@ -103,6 +103,25 @@ void paintTool(QPainter &p, const QString &id, const QColor &c)
         p.drawLine(QPointF(6.5, 15.0), QPointF(18.5, 15.0));
         p.drawLine(QPointF(3.0, 6.5), QPointF(15.0, 6.5));
         p.drawLine(QPointF(15.0, 6.5), QPointF(15.0, 18.5));
+    } else if (id == QLatin1String("knife")) {
+        QPainterPath blade;
+        blade.moveTo(5.0, 19.0);
+        blade.lineTo(9.0, 15.0);
+        blade.lineTo(18.5, 5.0);
+        blade.lineTo(20.0, 6.5);
+        blade.lineTo(10.5, 16.0);
+        blade.closeSubpath();
+        p.drawPath(blade);
+        p.setPen(stroke(c, 2.2));
+        p.drawLine(QPointF(4.0, 20.0), QPointF(7.0, 17.0));
+    } else if (id == QLatin1String("eraser")) {
+        p.save();
+        p.translate(12.0, 12.0);
+        p.rotate(-40.0);
+        p.drawRoundedRect(QRectF(-7.5, -4.0, 15.0, 8.0), 2.0, 2.0);
+        p.setBrush(c);
+        p.drawRect(QRectF(-7.5, 0.5, 7.0, 3.5));
+        p.restore();
     } else if (id == QLatin1String("rect")) {
         p.drawRoundedRect(QRectF(3.8, 6.0, 16.4, 12.0), 1.6, 1.6);
     } else if (id == QLatin1String("ellipse")) {

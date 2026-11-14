@@ -282,6 +282,9 @@ void CanvasView::setActiveTool(Tool tool)
     m_drawing = false;
     m_drawMode = DrawMode::None;
     m_freehandPoints.clear();
+    m_knifeActive = false;
+    m_eraserActive = false;
+    m_eraserPoints.clear();
 
     m_tool = tool;
     setDragMode(tool == Tool::Select ? QGraphicsView::RubberBandDrag
@@ -495,6 +498,29 @@ void CanvasView::drawPreview(QPainter *painter)
 
         painter->restore();
         return;
+    }
+
+    if (m_knifeActive) {
+        painter->save();
+        painter->setPen(previewPen());
+        painter->setBrush(Qt::NoBrush);
+        painter->drawLine(m_knifeStart, m_knifeCurrent);
+        painter->setBrush(QColor(0xff, 0xb3, 0x47));
+        painter->setPen(Qt::NoPen);
+        painter->drawEllipse(m_knifeStart, 3, 3);
+        painter->drawEllipse(m_knifeCurrent, 3, 3);
+        painter->restore();
+    }
+
+    if (m_eraserActive && m_eraserPoints.size() >= 2) {
+        painter->save();
+        QPen eraser(QColor(0xff, 0x66, 0x99, 170), 16.0);
+        eraser.setCapStyle(Qt::RoundCap);
+        eraser.setJoinStyle(Qt::RoundJoin);
+        painter->setPen(eraser);
+        painter->setBrush(Qt::NoBrush);
+        painter->drawPath(buildFreehandPath(m_eraserPoints));
+        painter->restore();
     }
 
     if (!m_drawing)
@@ -2186,6 +2212,438 @@ void CanvasView::selectGroupItems(int group)
     emit statusHint(QStringLiteral("Выбрана группа."));
 }
 
+void CanvasView::applyBooleanOperation(BooleanOperation operation)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    struct Source {
+        VectorItem *item = nullptr;
+        QPainterPath path;
+        VectorObject object;
+    };
+    QVector<Source> sources;
+    for (VectorItem *item : selected) {
+        const VectorObject object = item->object();
+        QPainterPath path;
+        if (object.type == ShapeType::Text) {
+            path = item->mapToScene(buildTextPath(object));
+        } else if (!object.path.isEmpty()) {
+            path = item->mapToScene(object.path);
+        } else {
+            continue;
+        }
+        if (path.isEmpty())
+            continue;
+        sources.append({item, path, object});
+    }
+
+    if (sources.size() < 2) {
+        emit statusHint(QStringLiteral("Для логической операции нужно минимум два контура."));
+        return;
+    }
+
+    QVector<QPainterPath> results;
+    switch (operation) {
+    case BooleanOperation::Union: {
+        QPainterPath result = sources.first().path;
+        for (int i = 1; i < sources.size(); ++i)
+            result = result.united(sources.at(i).path);
+        results.append(result);
+        break;
+    }
+    case BooleanOperation::Difference: {
+        QPainterPath result = sources.first().path;
+        for (int i = 1; i < sources.size(); ++i)
+            result = result.subtracted(sources.at(i).path);
+        results.append(result);
+        break;
+    }
+    case BooleanOperation::Intersection: {
+        QPainterPath result = sources.first().path;
+        for (int i = 1; i < sources.size(); ++i)
+            result = result.intersected(sources.at(i).path);
+        results.append(result);
+        break;
+    }
+    case BooleanOperation::Exclude: {
+        QPainterPath result = sources.first().path;
+        for (int i = 1; i < sources.size(); ++i) {
+            const QPainterPath other = sources.at(i).path;
+            const QPainterPath overlap = result.intersected(other);
+            result = result.united(other).subtracted(overlap);
+        }
+        results.append(result);
+        break;
+    }
+    case BooleanOperation::Divide: {
+        QVector<QPainterPath> regions;
+        for (const Source &source : sources) {
+            if (regions.isEmpty()) {
+                regions.append(source.path);
+                continue;
+            }
+            QVector<QPainterPath> next;
+            QPainterPath remaining = source.path;
+            for (const QPainterPath &region : regions) {
+                const QPainterPath outside = region.subtracted(source.path);
+                const QPainterPath inside = region.intersected(source.path);
+                if (!outside.isEmpty())
+                    next.append(outside);
+                if (!inside.isEmpty())
+                    next.append(inside);
+                remaining = remaining.subtracted(region);
+            }
+            if (!remaining.isEmpty())
+                next.append(remaining);
+            regions = next;
+        }
+        results = regions;
+        break;
+    }
+    case BooleanOperation::Trim: {
+        const QPainterPath top = sources.last().path;
+        for (int i = 0; i < sources.size(); ++i) {
+            QPainterPath result = sources.at(i).path;
+            if (i != sources.size() - 1)
+                result = result.subtracted(top);
+            if (!result.isEmpty())
+                results.append(result);
+        }
+        break;
+    }
+    }
+
+    if (results.isEmpty()) {
+        emit statusHint(QStringLiteral("Операция не дала результата."));
+        return;
+    }
+
+    VectorObject baseObject = sources.first().object;
+    const int layer = baseObject.layer;
+
+    emit beginEdit();
+    scene()->clearSelection();
+    for (const Source &source : sources) {
+        scene()->removeItem(source.item);
+        delete source.item;
+    }
+
+    for (const QPainterPath &path : results) {
+        if (path.isEmpty())
+            continue;
+        VectorObject object = baseObject;
+        object.type = ShapeType::Bezier;
+        object.path = path;
+        object.pos = QPointF(0, 0);
+        object.rotation = 0;
+        object.text.clear();
+        object.id = 0;
+        object.masterId = 0;
+        object.group = 0;
+        object.locked = false;
+        object.layer = layer;
+        VectorItem *item = addVectorObject(object, false, true);
+        if (item)
+            item->setSelected(true);
+    }
+    emit endEdit();
+    emit statusHint(QStringLiteral("Логическая операция выполнена: объектов %1")
+                        .arg(results.size()));
+}
+
+void CanvasView::convertSelectionToCurves()
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty()) {
+        emit statusHint(QStringLiteral("Выберите объекты для преобразования."));
+        return;
+    }
+
+    emit beginEdit();
+    int converted = 0;
+    for (VectorItem *item : selected) {
+        VectorObject object = item->object();
+        if (object.type == ShapeType::Image)
+            continue;
+
+        if (object.type == ShapeType::Text) {
+            const QPainterPath textPath = buildTextPath(object);
+            if (textPath.isEmpty())
+                continue;
+            object.path = textPath;
+            object.text.clear();
+        } else if (!object.path.isEmpty()) {
+            // Already a path, but strip shape parameters so it is a free curve.
+            object.cornerRadius = 0;
+        } else {
+            continue;
+        }
+
+        object.type = ShapeType::Bezier;
+        object.id = 0;
+        object.masterId = 0;
+        scene()->removeItem(item);
+        delete item;
+        VectorItem *curve = addVectorObject(object, false, true);
+        if (curve)
+            curve->setSelected(true);
+        ++converted;
+    }
+    emit endEdit();
+    emit statusHint(QStringLiteral("Преобразовано в кривые: %1").arg(converted));
+}
+
+void CanvasView::simplifySelectedPath()
+{
+    if (!m_nodeItem || !m_nodeItem->hasPath()) {
+        const QList<VectorItem *> selected = selectedVectorItems();
+        for (VectorItem *item : selected) {
+            if (item->hasPath()) {
+                m_nodeItem = item;
+                break;
+            }
+        }
+    }
+    if (!m_nodeItem)
+        return;
+
+    QVector<QPainterPath::Element> elements = m_nodeItem->pathElements();
+    if (elements.size() < 3)
+        return;
+
+    QVector<QPainterPath::Element> simplified;
+    for (int i = 0; i < elements.size(); ++i) {
+        const auto &element = elements.at(i);
+        if (!simplified.isEmpty()) {
+            const auto &previous = simplified.last();
+            const qreal distance = QLineF(previous.x, previous.y,
+                                          element.x, element.y).length();
+            if (distance < 0.05
+                && element.type != QPainterPath::CurveToElement)
+                continue;
+        }
+        simplified.append(element);
+    }
+
+    // Remove collinear line anchors.
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int i = 1; i + 1 < simplified.size(); ++i) {
+            if (simplified.at(i).type != QPainterPath::LineToElement
+                || simplified.at(i + 1).type != QPainterPath::LineToElement)
+                continue;
+            const QPointF a(simplified.at(i - 1).x, simplified.at(i - 1).y);
+            const QPointF b(simplified.at(i).x, simplified.at(i).y);
+            const QPointF c(simplified.at(i + 1).x, simplified.at(i + 1).y);
+            const QPointF ab = b - a;
+            const QPointF ac = c - a;
+            const qreal cross = qAbs(ab.x() * ac.y() - ab.y() * ac.x());
+            if (cross < 0.5 * QLineF(a, c).length()) {
+                simplified.removeAt(i);
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    if (simplified.size() == elements.size()) {
+        emit statusHint(QStringLiteral("Лишних узлов не найдено."));
+        return;
+    }
+
+    emit beginEdit();
+    m_nodeItem->setPathElements(simplified);
+    m_selectedNodeElements.clear();
+    emit endEdit();
+    emit statusHint(QStringLiteral("Удалено узлов: %1")
+                        .arg(elements.size() - simplified.size()));
+}
+
+void CanvasView::applyKnifeCut(const QLineF &cut)
+{
+    if (QLineF(cut.p1(), cut.p2()).length() < 2.0)
+        return;
+
+    QList<VectorItem *> targets = selectedVectorItems();
+    if (targets.isEmpty())
+        targets = vectorItems();
+
+    const QPointF d = (cut.p2() - cut.p1()) / cut.length();
+    const QPointF n(-d.y(), d.x());
+    const qreal huge = qMax(pageSize().width(), pageSize().height()) * 8.0 + 2000.0;
+    const QPointF a = cut.p1() - d * huge;
+    const QPointF b = cut.p2() + d * huge;
+
+    QPainterPath clipA;
+    QPolygonF polyA;
+    polyA << a + n * huge << b + n * huge << b << a;
+    clipA.addPolygon(polyA);
+    clipA.closeSubpath();
+
+    QPainterPath clipB;
+    QPolygonF polyB;
+    polyB << a - n * huge << b - n * huge << b << a;
+    clipB.addPolygon(polyB);
+    clipB.closeSubpath();
+
+    int cutCount = 0;
+    emit beginEdit();
+    for (VectorItem *item : targets) {
+        const VectorObject object = item->object();
+        if (object.type == ShapeType::Text || object.type == ShapeType::Image
+            || object.path.isEmpty())
+            continue;
+
+        const QPainterPath scenePath = item->mapToScene(object.path);
+        if (!scenePath.boundingRect().adjusted(-10, -10, 10, 10).intersects(
+                QRectF(cut.p1(), cut.p2()).normalized().adjusted(-1, -1, 1, 1)))
+            continue;
+
+        const QPainterPath partA = scenePath.intersected(clipA);
+        const QPainterPath partB = scenePath.intersected(clipB);
+        if (partA.isEmpty() || partB.isEmpty())
+            continue;
+
+        VectorObject first = object;
+        first.type = ShapeType::Bezier;
+        first.path = partA;
+        first.pos = QPointF(0, 0);
+        first.rotation = 0;
+        first.text.clear();
+        first.id = 0;
+        first.masterId = 0;
+        first.group = 0;
+        VectorObject second = first;
+        second.path = partB;
+
+        scene()->removeItem(item);
+        delete item;
+        addVectorObject(first, false, true);
+        addVectorObject(second, false, true);
+        ++cutCount;
+    }
+    emit endEdit();
+    emit statusHint(cutCount > 0
+                        ? QStringLiteral("Разрезано объектов: %1").arg(cutCount)
+                        : QStringLiteral("Линия ножа не пересекла замкнутые контуры."));
+}
+
+void CanvasView::applyEraserStroke(const QVector<QPointF> &points)
+{
+    if (points.size() < 2)
+        return;
+
+    QPainterPath stroke = buildFreehandPath(points);
+    QPainterPathStroker stroker;
+    stroker.setWidth(18.0);
+    stroker.setCapStyle(Qt::RoundCap);
+    stroker.setJoinStyle(Qt::RoundJoin);
+    const QPainterPath brush = stroker.createStroke(stroke);
+
+    QList<VectorItem *> targets = selectedVectorItems();
+    if (targets.isEmpty())
+        targets = vectorItems();
+
+    int erased = 0;
+    emit beginEdit();
+    for (VectorItem *item : targets) {
+        const VectorObject object = item->object();
+        if (object.type == ShapeType::Text || object.type == ShapeType::Image
+            || object.path.isEmpty())
+            continue;
+        const QPainterPath scenePath = item->mapToScene(object.path);
+        if (!scenePath.boundingRect().intersects(brush.boundingRect()))
+            continue;
+
+        const QPainterPath result = scenePath.subtracted(brush);
+        scene()->removeItem(item);
+        delete item;
+        if (result.isEmpty())
+            continue;
+
+        VectorObject updated = object;
+        updated.type = ShapeType::Bezier;
+        updated.path = result;
+        updated.pos = QPointF(0, 0);
+        updated.rotation = 0;
+        updated.text.clear();
+        updated.id = 0;
+        updated.masterId = 0;
+        updated.group = 0;
+        addVectorObject(updated, false, true);
+        ++erased;
+    }
+    emit endEdit();
+    emit statusHint(erased > 0
+                        ? QStringLiteral("Стёрто объектов: %1").arg(erased)
+                        : QStringLiteral("Под ластиком нет замкнутых контуров."));
+}
+
+void CanvasView::convertStrokeToPath()
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty()) {
+        emit statusHint(QStringLiteral("Выберите объекты с обводкой."));
+        return;
+    }
+
+    emit beginEdit();
+    int converted = 0;
+    for (VectorItem *item : selected) {
+        VectorObject object = item->object();
+        if (object.type == ShapeType::Image || object.strokeWidth <= 0.0
+            || !object.hasStroke)
+            continue;
+
+        QPainterPath source = object.path;
+        if (object.type == ShapeType::Text)
+            source = buildTextPath(object);
+        if (source.isEmpty())
+            continue;
+
+        QPainterPathStroker stroker;
+        stroker.setWidth(object.strokeWidth);
+        stroker.setCapStyle(object.capStyle == 0 ? Qt::FlatCap
+                                                  : (object.capStyle == 1
+                                                         ? Qt::SquareCap
+                                                         : Qt::RoundCap));
+        stroker.setJoinStyle(object.joinStyle == 0 ? Qt::MiterJoin
+                                                    : (object.joinStyle == 1
+                                                           ? Qt::BevelJoin
+                                                           : Qt::RoundJoin));
+        stroker.setMiterLimit(object.miterLimit);
+        if (!object.dashPattern.isEmpty())
+            stroker.setDashPattern(object.dashPattern);
+
+        const QPainterPath outline = stroker.createStroke(source);
+        if (outline.isEmpty())
+            continue;
+
+        object.type = ShapeType::Bezier;
+        object.path = outline;
+        object.fill = object.stroke;
+        object.hasFill = true;
+        object.fillStyle = 0;
+        object.hasStroke = false;
+        object.strokeWidth = 0;
+        object.dashPattern.clear();
+        object.text.clear();
+        object.id = 0;
+        object.masterId = 0;
+
+        scene()->removeItem(item);
+        delete item;
+        VectorItem *convertedItem = addVectorObject(object, false, true);
+        if (convertedItem)
+            convertedItem->setSelected(true);
+        ++converted;
+    }
+    emit endEdit();
+    emit statusHint(converted > 0
+                        ? QStringLiteral("Обводка преобразована: %1").arg(converted)
+                        : QStringLiteral("Нет объектов с обводкой."));
+}
+
 void CanvasView::groupSelection()
 {
     const QList<VectorItem *> selected = selectedVectorItems();
@@ -3101,6 +3559,17 @@ void CanvasView::mousePressEvent(QMouseEvent *event)
         if (!nodePress(scenePos))
             QGraphicsView::mousePressEvent(event);
         break;
+    case Tool::Knife:
+        m_knifeActive = true;
+        m_knifeStart = scenePos;
+        m_knifeCurrent = scenePos;
+        viewport()->update();
+        break;
+    case Tool::Eraser:
+        m_eraserActive = true;
+        m_eraserPoints = {scenePos};
+        viewport()->update();
+        break;
     case Tool::Rectangle:
         startDrawing(DrawMode::Rectangle, scenePos);
         break;
@@ -3306,6 +3775,22 @@ void CanvasView::mouseMoveEvent(QMouseEvent *event)
         }
     }
 
+    if (m_knifeActive) {
+        m_knifeCurrent = scenePos;
+        viewport()->update();
+        emit scenePosChanged(scenePos);
+        return;
+    }
+
+    if (m_eraserActive) {
+        if (m_eraserPoints.isEmpty()
+            || QLineF(m_eraserPoints.last(), scenePos).length() > 1.0)
+            m_eraserPoints.append(scenePos);
+        viewport()->update();
+        emit scenePosChanged(scenePos);
+        return;
+    }
+
     if (m_drawing) {
         m_drawCurrent = scenePos;
         if ((m_drawMode == DrawMode::Freehand || m_drawMode == DrawMode::Artistic)
@@ -3363,6 +3848,28 @@ void CanvasView::mouseReleaseEvent(QMouseEvent *event)
         }
         m_bezierDragging = false;
         m_bezierDragMoved = false;
+        viewport()->update();
+        event->accept();
+        return;
+    }
+
+    if (m_knifeActive) {
+        m_knifeCurrent = mapToScene(event->pos());
+        m_knifeActive = false;
+        applyKnifeCut(QLineF(m_knifeStart, m_knifeCurrent));
+        viewport()->update();
+        event->accept();
+        return;
+    }
+
+    if (m_eraserActive) {
+        const QPointF last = mapToScene(event->pos());
+        if (m_eraserPoints.isEmpty()
+            || QLineF(m_eraserPoints.last(), last).length() > 1.0)
+            m_eraserPoints.append(last);
+        m_eraserActive = false;
+        applyEraserStroke(m_eraserPoints);
+        m_eraserPoints.clear();
         viewport()->update();
         event->accept();
         return;
