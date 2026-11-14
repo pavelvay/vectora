@@ -50,10 +50,8 @@ int main(int argc, char *argv[])
 
     // Development helper: select the n-th object (bottom to top).
     const int selectIndex = args.indexOf(QStringLiteral("--select"));
-    qWarning("selectIndex=%d args=%d", selectIndex, int(args.size()));
     if (selectIndex > 0 && selectIndex + 1 < args.size()) {
         auto *canvas = window.findChild<CanvasView *>();
-        qWarning("canvas=%p", static_cast<void *>(canvas));
         if (canvas) {
             const QList<VectorItem *> items = canvas->vectorItems();
             const int index = args.at(selectIndex + 1).toInt();
