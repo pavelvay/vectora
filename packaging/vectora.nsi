@@ -6,6 +6,9 @@
 !ifndef DIST
 !define DIST "dist"
 !endif
+!ifndef ICON
+!define ICON "..\resources\vectora.ico"
+!endif
 
 Name "Vectora ${VERSION}"
 OutFile "Vectora-${VERSION}-Setup.exe"
@@ -15,10 +18,10 @@ RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 
 !define MUI_ABORTWARNING
-!define MUI_ICON "resources\vectora.ico"
-!define MUI_UNICON "resources\vectora.ico"
-Icon "resources\vectora.ico"
-UninstallIcon "resources\vectora.ico"
+!define MUI_ICON "${ICON}"
+!define MUI_UNICON "${ICON}"
+Icon "${ICON}"
+UninstallIcon "${ICON}"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
