@@ -1,6 +1,6 @@
 # Maintainer: pavelvay
 pkgname=vectora
-pkgver=0.1.11
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Cross-platform vector graphics editor"
 arch=('x86_64')
