@@ -12,6 +12,7 @@ public:
     explicit Ruler(Qt::Orientation orientation, QWidget *parent = nullptr);
 
     void setView(CanvasView *view);
+    void setUnit(const QString &unit, qreal pixelsPerUnit);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -23,6 +24,8 @@ private:
     qreal sceneCoordinate() const;
     Qt::Orientation m_orientation;
     CanvasView *m_view = nullptr;
+    QString m_unit = QStringLiteral("мм");
+    qreal m_pixelsPerUnit = 3.7795275591;
     bool m_dragging = false;
     bool m_moved = false;
     QPoint m_pressGlobal;

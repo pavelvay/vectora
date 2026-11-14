@@ -8,16 +8,32 @@
 #include "CanvasView.h"
 
 namespace {
-constexpr qreal kPxPerMm = 3.7795275591; // 96 dpi
-
-qreal pickStep(qreal pxPerMm)
+qreal pickStep(qreal pixelsPerUnit, const QString &unit)
 {
-    static const qreal candidates[] = {1, 2, 5, 10, 20, 50, 100, 200, 500};
+    QVector<qreal> candidates;
+    if (unit == QLatin1String("px"))
+        candidates = {10, 20, 50, 100, 200, 500, 1000};
+    else if (unit == QLatin1String("см"))
+        candidates = {0.5, 1, 2, 5, 10, 20};
+    else if (unit == QLatin1String("in"))
+        candidates = {0.25, 0.5, 1, 2, 5, 10};
+    else
+        candidates = {1, 2, 5, 10, 20, 50, 100};
+
     for (qreal step : candidates) {
-        if (step * pxPerMm >= 44.0)
+        if (step * pixelsPerUnit >= 44.0)
             return step;
     }
-    return 1000.0;
+    return candidates.last() * 10.0;
+}
+
+QString formatTick(qreal value)
+{
+    if (qAbs(value) < 0.001)
+        return QStringLiteral("0");
+    if (qAbs(value - qRound(value)) < 0.001)
+        return QString::number(qRound(value));
+    return QString::number(value, 'f', 2);
 }
 } // namespace
 
@@ -35,6 +51,13 @@ Ruler::Ruler(Qt::Orientation orientation, QWidget *parent)
 void Ruler::setView(CanvasView *view)
 {
     m_view = view;
+    update();
+}
+
+void Ruler::setUnit(const QString &unit, qreal pixelsPerUnit)
+{
+    m_unit = unit;
+    m_pixelsPerUnit = pixelsPerUnit > 0.0 ? pixelsPerUnit : 1.0;
     update();
 }
 
@@ -105,12 +128,12 @@ void Ruler::paintEvent(QPaintEvent *)
         return;
 
     const qreal zoom = m_view->zoom();
-    const qreal pxPerMm = kPxPerMm * zoom;
-    if (pxPerMm <= 0.0)
+    const qreal pxPerUnit = m_pixelsPerUnit * zoom;
+    if (pxPerUnit <= 0.0)
         return;
 
     const QPoint origin = m_view->mapFromScene(QPointF(0.0, 0.0));
-    const qreal major = pickStep(pxPerMm);
+    const qreal major = pickStep(pxPerUnit, m_unit);
     const qreal minor = major / 5.0;
 
     QFont f = font();
@@ -121,10 +144,10 @@ void Ruler::paintEvent(QPaintEvent *)
     const QColor labelColor(0x9b, 0xa2, 0xad);
 
     if (m_orientation == Qt::Horizontal) {
-        const int first = int(std::floor((0.0 - origin.x()) / (minor * pxPerMm))) - 1;
+        const int first = int(std::floor((0.0 - origin.x()) / (minor * pxPerUnit))) - 1;
         for (int i = first;; ++i) {
-            const qreal mm = i * minor;
-            const qreal x = origin.x() + mm * pxPerMm;
+            const qreal value = i * minor;
+            const qreal x = origin.x() + value * pxPerUnit;
             if (x > width() + 2.0)
                 break;
             if (x < -2.0)
@@ -137,14 +160,14 @@ void Ruler::paintEvent(QPaintEvent *)
                 p.setPen(labelColor);
                 p.drawText(QRectF(x + 3.0, 0.0, 46.0, height() - 8.0),
                            Qt::AlignLeft | Qt::AlignVCenter,
-                           QString::number(qRound(mm)));
+                           formatTick(value));
             }
         }
     } else {
-        const int first = int(std::floor((0.0 - origin.y()) / (minor * pxPerMm))) - 1;
+        const int first = int(std::floor((0.0 - origin.y()) / (minor * pxPerUnit))) - 1;
         for (int i = first;; ++i) {
-            const qreal mm = i * minor;
-            const qreal y = origin.y() + mm * pxPerMm;
+            const qreal value = i * minor;
+            const qreal y = origin.y() + value * pxPerUnit;
             if (y > height() + 2.0)
                 break;
             if (y < -2.0)
@@ -158,7 +181,7 @@ void Ruler::paintEvent(QPaintEvent *)
                 p.setPen(labelColor);
                 p.translate(width() - 5.0, y - 3.0);
                 p.rotate(-90.0);
-                p.drawText(QPointF(0.0, 0.0), QString::number(qRound(mm)));
+                p.drawText(QPointF(0.0, 0.0), formatTick(value));
                 p.restore();
             }
         }

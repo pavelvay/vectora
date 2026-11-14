@@ -135,7 +135,7 @@ WelcomeWidget::WelcomeWidget(QWidget *parent)
 
     auto *newCard = new StartCard(QStringLiteral("new"),
                                   QStringLiteral("Новый документ"),
-                                  QStringLiteral("A4 · 210 × 297 мм\nПустая страница со слоем"),
+                                  QStringLiteral("A4, A3, A2, 1920 × 1080\nили свой размер"),
                                   this);
     newCard->onClick = [this]() { emit createRequested(); };
 
@@ -165,7 +165,7 @@ WelcomeWidget::WelcomeWidget(QWidget *parent)
 
     left->addStretch(1);
     left->addWidget(mutedLabel(
-        QStringLiteral("Vectora 0.1.9 · Linux · Windows · macOS · .vct, SVG, PNG, PDF"),
+        QStringLiteral("Vectora 0.1.10 · Linux · Windows · macOS · .vct, SVG, PNG, PDF"),
         this));
 
     root->addLayout(left, 1);

@@ -68,6 +68,7 @@
 #include "ColorPalette.h"
 #include "DockPanels.h"
 #include "Icons.h"
+#include "PageDialog.h"
 #include "Ruler.h"
 #include "SvgImporter.h"
 #include "Theme.h"
@@ -306,6 +307,13 @@ void MainWindow::createActions()
                QKeySequence(), QStringLiteral("Показать или скрыть направляющие"));
     makeAction(QStringLiteral("clear-guides"), QStringLiteral("Удалить направляющие"),
                QKeySequence(), QStringLiteral("Убрать все направляющие с холста"), false);
+    auto *printAreaAction = makeAction(QStringLiteral("print-area"),
+                                       QStringLiteral("Область печати"),
+                                       QKeySequence(),
+                                       QStringLiteral("Показать область печати"),
+                                       false);
+    printAreaAction->setCheckable(true);
+    printAreaAction->setChecked(false);
     makeAction(QStringLiteral("grid"), QStringLiteral("Сетка"),
                QKeySequence(QStringLiteral("Ctrl+Alt+G")), QStringLiteral("Показать или скрыть сетку"));
     makeAction(QStringLiteral("snap"), QStringLiteral("Привязка"),
@@ -534,7 +542,7 @@ void MainWindow::createActions()
 
     auto *gridAction = action(QStringLiteral("grid"));
     gridAction->setCheckable(true);
-    gridAction->setChecked(true);
+    gridAction->setChecked(false);
     connect(gridAction, &QAction::toggled, this, [this](bool on) {
         if (!m_view)
             return;
@@ -575,6 +583,10 @@ void MainWindow::createActions()
         if (!m_view)
             return;
         m_view->setGuidesVisible(on);
+    });
+    connect(printAreaAction, &QAction::toggled, this, [this](bool on) {
+        if (m_view)
+            m_view->setShowPrintableArea(on);
     });
 
     connect(action(QStringLiteral("clear-guides")), &QAction::triggered, this,
@@ -668,6 +680,7 @@ void MainWindow::createMenus()
     viewMenu->addAction(action(QStringLiteral("guides")));
     viewMenu->addAction(action(QStringLiteral("clear-guides")));
     viewMenu->addAction(action(QStringLiteral("grid")));
+    viewMenu->addAction(action(QStringLiteral("print-area")));
     viewMenu->addAction(action(QStringLiteral("snap")));
     viewMenu->addAction(action(QStringLiteral("snap-settings")));
     viewMenu->addSeparator();
@@ -746,6 +759,7 @@ void MainWindow::createCanvas()
     grid->setSpacing(0);
 
     auto *corner = new QLabel(QStringLiteral("мм"), m_editorPage);
+    m_rulerCorner = corner;
     corner->setAlignment(Qt::AlignCenter);
     corner->setFixedSize(22, 22);
     corner->setStyleSheet(QStringLiteral(
@@ -792,6 +806,8 @@ void MainWindow::createCanvas()
     connect(m_view, &CanvasView::endEdit, this, &MainWindow::endEdit);
     connect(m_view, &CanvasView::selectionChanged, this,
             &MainWindow::onSelectionChanged);
+    connect(m_view, &CanvasView::contextMenuRequested, this,
+            &MainWindow::showCanvasContextMenu);
     connect(m_view, &CanvasView::colorPicked, this, [this](const QColor &color) {
         m_view->setFillColor(color);
         m_toolPalette->setFillColor(color);
@@ -979,9 +995,10 @@ void MainWindow::createMainToolBar()
     spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     bar->addWidget(spacer);
 
-    auto *pageBadge = new QLabel(QStringLiteral("A4  ·  210 × 297 мм"), bar);
-    pageBadge->setStyleSheet(QStringLiteral("color:#8b929d; font-size:11px; padding-right:8px;"));
-    bar->addWidget(pageBadge);
+    m_pageBadge = new QLabel(bar);
+    m_pageBadge->setStyleSheet(QStringLiteral("color:#8b929d; font-size:11px; padding-right:8px;"));
+    bar->addWidget(m_pageBadge);
+    updatePageBadge();
 }
 
 void MainWindow::createPropertyBar()
@@ -1434,7 +1451,8 @@ void MainWindow::createStatusBar()
     statusBar()->addPermanentWidget(m_pageLabel);
 
     m_unitsCombo = new QComboBox(this);
-    m_unitsCombo->addItems({QStringLiteral("px"), QStringLiteral("мм"), QStringLiteral("см")});
+    m_unitsCombo->addItems({QStringLiteral("px"), QStringLiteral("мм"),
+                            QStringLiteral("см"), QStringLiteral("in")});
     m_unitsCombo->setCurrentText(QStringLiteral("мм"));
     m_unitsCombo->setFixedWidth(62);
     m_unitsCombo->setToolTip(QStringLiteral("Единицы измерения"));
@@ -1457,9 +1475,23 @@ void MainWindow::createStatusBar()
     connect(m_zoomCombo->lineEdit(), &QLineEdit::editingFinished, this, [this]() {
         applyZoomText(m_zoomCombo->currentText());
     });
-    connect(m_unitsCombo, &QComboBox::currentTextChanged, this, [this](const QString &) {
-        updateCoordinates(m_cursorScenePos);
-    });
+    connect(m_unitsCombo, &QComboBox::currentTextChanged, this,
+            [this](const QString &unit) {
+                qreal pixelsPerUnit = 1.0;
+                if (unit == QLatin1String("мм"))
+                    pixelsPerUnit = 3.7795275591;
+                else if (unit == QLatin1String("см"))
+                    pixelsPerUnit = 37.795275591;
+                else if (unit == QLatin1String("in"))
+                    pixelsPerUnit = 96.0;
+                if (m_hRuler)
+                    m_hRuler->setUnit(unit, pixelsPerUnit);
+                if (m_vRuler)
+                    m_vRuler->setUnit(unit, pixelsPerUnit);
+                if (m_rulerCorner)
+                    m_rulerCorner->setText(unit);
+                updateCoordinates(m_cursorScenePos);
+            });
 }
 
 // ---------------------------------------------------------------------------
@@ -1515,6 +1547,97 @@ void MainWindow::showEditor()
             dock->show();
     }
     statusBar()->show();
+}
+
+void MainWindow::showCanvasContextMenu(const QPoint &globalPos, VectorItem *item)
+{
+    QMenu menu(this);
+
+    if (item) {
+        if (item->isLocked()) {
+            QAction *unlock = menu.addAction(QStringLiteral("Разблокировать объект"));
+            connect(unlock, &QAction::triggered, this, [this, item]() {
+                m_view->setItemLocked(item, false);
+            });
+            menu.addSeparator();
+            QAction *properties = menu.addAction(QStringLiteral("Свойства"));
+            connect(properties, &QAction::triggered, this, [this]() {
+                showDockerTab(QStringLiteral("Свойства"), 0);
+            });
+        } else {
+            menu.addAction(action(QStringLiteral("cut")));
+            menu.addAction(action(QStringLiteral("copy")));
+            menu.addAction(action(QStringLiteral("duplicate")));
+            menu.addAction(action(QStringLiteral("clone")));
+            menu.addSeparator();
+            menu.addAction(action(QStringLiteral("delete")));
+            menu.addSeparator();
+            menu.addAction(action(QStringLiteral("group")));
+            menu.addAction(action(QStringLiteral("ungroup")));
+            menu.addAction(action(QStringLiteral("ungroup-all")));
+
+            QMenu *order = menu.addMenu(QStringLiteral("Порядок"));
+            order->addAction(action(QStringLiteral("order-front")));
+            order->addAction(action(QStringLiteral("order-forward")));
+            order->addAction(action(QStringLiteral("order-backward")));
+            order->addAction(action(QStringLiteral("order-back")));
+
+            menu.addSeparator();
+            menu.addAction(action(QStringLiteral("flip-h")));
+            menu.addAction(action(QStringLiteral("flip-v")));
+            menu.addAction(action(QStringLiteral("rotate")));
+            menu.addAction(action(QStringLiteral("skew")));
+            menu.addAction(action(QStringLiteral("convert-curves")));
+            menu.addSeparator();
+
+            QAction *lock = menu.addAction(QStringLiteral("Заблокировать объект"));
+            connect(lock, &QAction::triggered, this, [this, item]() {
+                m_view->setItemLocked(item, true);
+            });
+            QAction *properties = menu.addAction(QStringLiteral("Свойства"));
+            connect(properties, &QAction::triggered, this, [this]() {
+                showDockerTab(QStringLiteral("Свойства"), 0);
+            });
+        }
+    } else {
+        menu.addAction(action(QStringLiteral("undo")));
+        menu.addAction(action(QStringLiteral("redo")));
+        menu.addSeparator();
+        menu.addAction(action(QStringLiteral("paste")));
+        menu.addAction(action(QStringLiteral("select-all")));
+        menu.addSeparator();
+        menu.addAction(action(QStringLiteral("grid")));
+        menu.addAction(action(QStringLiteral("guides")));
+        menu.addAction(action(QStringLiteral("print-area")));
+        menu.addAction(action(QStringLiteral("snap")));
+        menu.addAction(action(QStringLiteral("rulers")));
+        menu.addSeparator();
+        menu.addAction(action(QStringLiteral("fit")));
+        menu.addAction(action(QStringLiteral("actual")));
+        menu.addSeparator();
+        menu.addAction(action(QStringLiteral("snap-settings")));
+        QAction *pageSize = menu.addAction(QStringLiteral("Размер страницы…"));
+        connect(pageSize, &QAction::triggered, this, &MainWindow::changePageSize);
+    }
+
+    menu.exec(globalPos);
+}
+
+void MainWindow::changePageSize()
+{
+    PageDialog dialog(this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    beginEdit();
+    m_view->setPageSize(dialog.pageSizePx());
+    endEdit();
+    m_view->fitPage();
+    updatePageBadge();
+    statusBar()->showMessage(
+        QStringLiteral("Размер страницы: %1 × %2 px")
+            .arg(qRound(m_view->pageSize().width()))
+            .arg(qRound(m_view->pageSize().height())), 4000);
 }
 
 void MainWindow::showDockerTab(const QString &title, int tab)
@@ -1693,6 +1816,8 @@ void MainWindow::updateCoordinates(const QPointF &scenePos)
         unit = m_unitsCombo->currentText();
         if (unit == QLatin1String("px"))
             factor = 1.0;
+        else if (unit == QLatin1String("in"))
+            factor = 1.0 / 96.0;
         else if (unit == QLatin1String("см"))
             factor = 1.0 / (kPxPerMm * 10.0);
         else
@@ -1750,6 +1875,7 @@ void MainWindow::applyDocument(const Document &document)
     m_restoring = false;
     if (m_dockPanels)
         m_dockPanels->refresh();
+    updatePageBadge();
     updateHistoryActions();
 }
 
@@ -1794,14 +1920,62 @@ void MainWindow::newDocument()
 {
     if (!maybeSave())
         return;
-    applyDocument(Document());
+
+    PageDialog dialog(this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    Document document;
+    document.pageSize = dialog.pageSizePx();
+    applyDocument(document);
     m_filePath.clear();
     m_modified = false;
     resetHistory();
     updateTitle();
     showEditor();
     m_view->fitPage();
-    statusBar()->showMessage(QStringLiteral("Создан новый документ A4."), 4000);
+
+    m_view->setShowGrid(false);
+    if (QAction *gridAction = action(QStringLiteral("grid")))
+        gridAction->setChecked(false);
+    m_view->setShowPrintableArea(false);
+    if (QAction *printAction = action(QStringLiteral("print-area")))
+        printAction->setChecked(false);
+
+    if (m_unitsCombo) {
+        const int index = m_unitsCombo->findText(dialog.unitName());
+        if (index >= 0)
+            m_unitsCombo->setCurrentIndex(index);
+    }
+    updatePageBadge();
+    statusBar()->showMessage(
+        QStringLiteral("Создан документ %1 × %2 px")
+            .arg(qRound(document.pageSize.width()))
+            .arg(qRound(document.pageSize.height())), 4000);
+}
+
+void MainWindow::updatePageBadge()
+{
+    if (!m_pageBadge || !m_view)
+        return;
+    const QSizeF size = m_view->pageSize();
+    const qreal mmWidth = size.width() / 3.7795275591;
+    const qreal mmHeight = size.height() / 3.7795275591;
+    QString label;
+    const auto close = [](qreal a, qreal b) { return qAbs(a - b) < 2.0; };
+    if (close(mmWidth, 210.0) && close(mmHeight, 297.0))
+        label = QStringLiteral("A4  ·  210 × 297 мм");
+    else if (close(mmWidth, 297.0) && close(mmHeight, 420.0))
+        label = QStringLiteral("A3  ·  297 × 420 мм");
+    else if (close(mmWidth, 420.0) && close(mmHeight, 594.0))
+        label = QStringLiteral("A2  ·  420 × 594 мм");
+    else if (close(size.width(), 1920.0) && close(size.height(), 1080.0))
+        label = QStringLiteral("1920 × 1080 px");
+    else
+        label = QStringLiteral("%1 × %2 px")
+                    .arg(qRound(size.width()))
+                    .arg(qRound(size.height()));
+    m_pageBadge->setText(label);
 }
 
 void MainWindow::openDocument()
@@ -2525,7 +2699,7 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("О программе"),
         QStringLiteral(
-            "<h3>Vectora 0.1.9</h3>"
+            "<h3>Vectora 0.1.10</h3>"
             "<p>Кроссплатформенный векторный редактор на C++ и Qt 6.</p>"
             "<p>Работают: документы .vct, экспорт PNG/SVG/PDF, печать, "
             "рисование фигур и кривых, Bezier с типами узлов, докеры "

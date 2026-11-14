@@ -1,6 +1,7 @@
 #include "CanvasView.h"
 
 #include <QColorDialog>
+#include <QContextMenuEvent>
 #include <QGraphicsScene>
 #include <QGuiApplication>
 #include <QInputDialog>
@@ -263,6 +264,12 @@ void CanvasView::setShowGrid(bool on)
     viewport()->update();
 }
 
+void CanvasView::setShowPrintableArea(bool on)
+{
+    m_showPrintableArea = on;
+    viewport()->update();
+}
+
 void CanvasView::setActiveTool(Tool tool)
 {
     if (tool != Tool::Node) {
@@ -363,12 +370,14 @@ void CanvasView::drawBackground(QPainter *painter, const QRectF &rect)
             painter->drawLine(QPointF(page.left(), y), QPointF(page.right(), y));
     }
 
-    constexpr qreal margin = kPxPerMm * 10.0;
-    QPen marginPen(QColor(0x4f, 0x7c, 0xc0, 70), 1.0);
-    marginPen.setStyle(Qt::DashLine);
-    painter->setPen(marginPen);
-    painter->setBrush(Qt::NoBrush);
-    painter->drawRect(page.adjusted(margin, margin, -margin, -margin));
+    if (m_showPrintableArea) {
+        constexpr qreal margin = kPxPerMm * 10.0;
+        QPen marginPen(QColor(0x4f, 0x7c, 0xc0, 70), 1.0);
+        marginPen.setStyle(Qt::DashLine);
+        painter->setPen(marginPen);
+        painter->setBrush(Qt::NoBrush);
+        painter->drawRect(page.adjusted(margin, margin, -margin, -margin));
+    }
 
     painter->setPen(QPen(QColor(0xc8, 0xce, 0xd8), 1.0));
     painter->drawRect(page);
@@ -616,6 +625,33 @@ void CanvasView::drawNodeOverlay(QPainter *painter)
     }
 
     painter->restore();
+}
+
+void CanvasView::contextMenuEvent(QContextMenuEvent *event)
+{
+    if (m_tool == Tool::Zoom) {
+        event->ignore();
+        return;
+    }
+
+    const QPointF scenePos = mapToScene(event->pos());
+    VectorItem *item = itemAtScene(scenePos);
+    if (item && !item->isLocked()) {
+        if (!item->isSelected()) {
+            if (item->groupIndex() > 0)
+                selectGroupItems(item->groupIndex());
+            else {
+                scene()->clearSelection();
+                item->setSelected(true);
+                emit selectionChanged(1);
+            }
+        }
+    } else if (!item) {
+        scene()->clearSelection();
+    }
+
+    emit contextMenuRequested(event->globalPos(), item);
+    event->accept();
 }
 
 void CanvasView::wheelEvent(QWheelEvent *event)

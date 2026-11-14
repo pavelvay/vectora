@@ -25,6 +25,7 @@ class ColorPalette;
 class DockPanels;
 class Ruler;
 class ToolPalette;
+class VectorItem;
 class WelcomeWidget;
 
 class MainWindow : public QMainWindow
@@ -63,6 +64,7 @@ private:
     bool maybeSave();
     void setModified(bool modified);
     void updateTitle();
+    void updatePageBadge();
     void beginEdit();
     void endEdit();
     void undo();
@@ -75,6 +77,8 @@ private:
     void showWelcome();
     void showEditor();
     void showDockerTab(const QString &title, int tab);
+    void showCanvasContextMenu(const QPoint &globalPos, VectorItem *item);
+    void changePageSize();
     void loadSampleDocument();
     QStringList recentFiles() const;
     void addRecentFile(const QString &path);
@@ -126,6 +130,8 @@ private:
     QLabel *m_coordsLabel = nullptr;
     QLabel *m_hintLabel = nullptr;
     QLabel *m_pageLabel = nullptr;
+    QLabel *m_pageBadge = nullptr;
+    QLabel *m_rulerCorner = nullptr;
     QLabel *m_selectionLabel = nullptr;
     QDoubleSpinBox *m_quickX = nullptr;
     QDoubleSpinBox *m_quickY = nullptr;

@@ -37,6 +37,7 @@ public:
     void actualSize();
     void zoomToSelection();
     void setShowGrid(bool on);
+    void setShowPrintableArea(bool on);
     void setActiveTool(Tool tool);
 
     void setPageSize(const QSizeF &size);
@@ -155,6 +156,7 @@ signals:
     void endEdit();
     void selectionChanged(int count);
     void colorPicked(const QColor &color);
+    void contextMenuRequested(const QPoint &globalPos, VectorItem *item);
 
 protected:
     void drawBackground(QPainter *painter, const QRectF &rect) override;
@@ -166,6 +168,7 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void keyReleaseEvent(QKeyEvent *event) override;
+    void contextMenuEvent(QContextMenuEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
@@ -219,7 +222,8 @@ private:
 
     qreal m_zoom = 1.0;
     QSizeF m_pageSize = QSizeF(794.0, 1123.0);
-    bool m_grid = true;
+    bool m_grid = false;
+    bool m_showPrintableArea = false;
     bool m_spaceHeld = false;
     bool m_panning = false;
     QPoint m_panAnchor;

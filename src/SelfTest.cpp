@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QImage>
 #include <QDockWidget>
+#include <QContextMenuEvent>
 #include <QDoubleSpinBox>
 #include <QKeyEvent>
 #include <QSlider>
@@ -23,6 +24,7 @@
 #include "ColorPalette.h"
 #include "Document.h"
 #include "MainWindow.h"
+#include "PageDialog.h"
 #include "SvgImporter.h"
 #include "VectorItem.h"
 
@@ -1119,6 +1121,40 @@ int SelfTest::run(const QString &directory)
                                Qt::RightButton, Qt::RightButton, Qt::NoModifier);
         QApplication::sendEvent(&palette, &rightPress);
         check(outline, QStringLiteral("right click on palette picks outline colour"));
+    }
+
+    // Page dialog defaults and canvas context menu.
+    {
+        PageDialog pageDialog;
+        const QSizeF page = pageDialog.pageSizePx();
+        check(qAbs(page.width() - 793.7) < 2.0
+                  && qAbs(page.height() - 1122.5) < 2.0,
+              QStringLiteral("page dialog defaults to A4"));
+
+        view.setDocument(Document());
+        VectorObject contextObject;
+        contextObject.type = ShapeType::Rectangle;
+        contextObject.path.addRect(QRectF(0, 0, 120, 80));
+        contextObject.pos = QPointF(120, 120);
+        VectorItem *contextItem = view.addVectorObject(contextObject, false, false);
+        view.scene()->clearSelection();
+        VectorItem *menuItem = nullptr;
+        QObject::connect(&view, &CanvasView::contextMenuRequested,
+                         [&menuItem](const QPoint &, VectorItem *item) { menuItem = item; });
+        const QPoint itemPoint = view.mapFromScene(QPointF(180, 160));
+        QContextMenuEvent itemMenu(QContextMenuEvent::Mouse, itemPoint,
+                                   view.viewport()->mapToGlobal(itemPoint));
+        QApplication::sendEvent(view.viewport(), &itemMenu);
+        check(menuItem == contextItem && contextItem->isSelected(),
+              QStringLiteral("right click selects the object for menu"));
+
+        const QPoint emptyPoint = view.mapFromScene(QPointF(700, 900));
+        QContextMenuEvent emptyMenu(QContextMenuEvent::Mouse, emptyPoint,
+                                    view.viewport()->mapToGlobal(emptyPoint));
+        QApplication::sendEvent(view.viewport(), &emptyMenu);
+        check(menuItem == nullptr, QStringLiteral("empty right click reports no object"));
+        check(view.selectedVectorItems().isEmpty(),
+              QStringLiteral("empty right click clears selection"));
     }
 
     // Visual snapshot of the drawn scene with a selection frame.
