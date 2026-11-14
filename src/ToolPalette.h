@@ -21,8 +21,12 @@ public:
 
 signals:
     void toolSelected(Tool tool);
+    void toolDoubleClicked(Tool tool);
     void fillColorClicked();
     void strokeColorClicked();
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     QButtonGroup *m_group = nullptr;

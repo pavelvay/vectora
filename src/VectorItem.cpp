@@ -34,6 +34,8 @@ VectorItem::VectorItem(const VectorObject &object, QGraphicsItem *parent)
     setAcceptHoverEvents(true);
     setPos(m_object.pos);
     setRotation(m_object.rotation);
+    setFlag(ItemIsSelectable, !m_object.locked);
+    setFlag(ItemIsMovable, !m_object.locked);
     updateOrigin();
 }
 
@@ -150,6 +152,10 @@ void VectorItem::setObject(const VectorObject &object)
     m_object = object;
     setPos(object.pos);
     setRotation(object.rotation);
+    setFlag(ItemIsSelectable, !m_object.locked);
+    setFlag(ItemIsMovable, !m_object.locked);
+    if (m_object.locked)
+        setSelected(false);
     updateOrigin();
     update();
 }
@@ -354,6 +360,16 @@ void VectorItem::setSpiralTurns(qreal turns)
     update();
 }
 
+void VectorItem::setLocked(bool locked)
+{
+    m_object.locked = locked;
+    setFlag(ItemIsSelectable, !locked);
+    setFlag(ItemIsMovable, !locked);
+    if (locked)
+        setSelected(false);
+    update();
+}
+
 bool VectorItem::flip(bool horizontal)
 {
     if (m_object.path.isEmpty() || m_object.type == ShapeType::Text)
@@ -469,7 +485,9 @@ void VectorItem::mousePressEvent(QGraphicsSceneMouseEvent *event)
 void VectorItem::mouseMoveEvent(QGraphicsSceneMouseEvent *event)
 {
     if (m_interaction == Interaction::Resize) {
-        applyResize(event->pos());
+        applyResize(event->pos(),
+                    (m_handle < 4)
+                        && !(event->modifiers() & Qt::ShiftModifier));
         event->accept();
         return;
     }
@@ -478,7 +496,7 @@ void VectorItem::mouseMoveEvent(QGraphicsSceneMouseEvent *event)
         const qreal angle = std::atan2(event->scenePos().y() - m_rotateCenter.y(),
                                        event->scenePos().x() - m_rotateCenter.x());
         qreal degrees = m_startRotation + (angle - m_startAngle) * 180.0 / kPi;
-        if (event->modifiers() & Qt::ShiftModifier)
+        if (event->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
             degrees = qRound(degrees / 15.0) * 15.0;
         setRotation(degrees);
         m_object.rotation = degrees;
@@ -509,7 +527,7 @@ void VectorItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent *event)
     QGraphicsObject::mouseDoubleClickEvent(event);
 }
 
-void VectorItem::applyResize(const QPointF &pos)
+void VectorItem::applyResize(const QPointF &pos, bool keepAspect)
 {
     if (m_startBounds.width() < 0.5 || m_startBounds.height() < 0.5)
         return;
@@ -535,6 +553,48 @@ void VectorItem::applyResize(const QPointF &pos)
                   QPointF(qMax(x1, x2), qMax(y1, y2)));
     if (target.width() < 3.0 || target.height() < 3.0)
         return;
+
+    if (keepAspect && m_handle >= 0 && m_handle < 4
+        && m_startBounds.width() > 0.5 && m_startBounds.height() > 0.5) {
+        const qreal aspect = m_startBounds.width() / m_startBounds.height();
+        QSizeF size = target.size();
+        if (size.width() / m_startBounds.width()
+            >= size.height() / m_startBounds.height()) {
+            size.setHeight(size.width() / aspect);
+        } else {
+            size.setWidth(size.height() * aspect);
+        }
+
+        QPointF anchor;
+        switch (m_handle) {
+        case 0: anchor = m_startBounds.bottomRight(); break;
+        case 1: anchor = m_startBounds.bottomLeft(); break;
+        case 2: anchor = m_startBounds.topLeft(); break;
+        default: anchor = m_startBounds.topRight(); break;
+        }
+
+        QRectF adjusted;
+        switch (m_handle) {
+        case 0:
+            adjusted = QRectF(anchor.x() - size.width(),
+                              anchor.y() - size.height(),
+                              size.width(), size.height());
+            break;
+        case 1:
+            adjusted = QRectF(anchor.x(), anchor.y() - size.height(),
+                              size.width(), size.height());
+            break;
+        case 2:
+            adjusted = QRectF(anchor.x(), anchor.y(),
+                              size.width(), size.height());
+            break;
+        default:
+            adjusted = QRectF(anchor.x() - size.width(), anchor.y(),
+                              size.width(), size.height());
+            break;
+        }
+        target = adjusted.normalized();
+    }
 
     prepareGeometryChange();
 

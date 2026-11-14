@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/icons">
+    <file alias="vectora.svg">vectora.svg</file>
+  </qresource>
+</RCC>

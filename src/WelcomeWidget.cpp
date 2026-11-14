@@ -95,17 +95,19 @@ WelcomeWidget::WelcomeWidget(QWidget *parent)
     logoRow->setSpacing(14);
 
     auto *logo = new QLabel(this);
-    logo->setPixmap(Icons::appIcon().pixmap(52, 52));
+    logo->setPixmap(Icons::appIcon().pixmap(96, 96));
     logoRow->addWidget(logo);
 
     auto *nameColumn = new QVBoxLayout;
-    nameColumn->setSpacing(0);
-    auto *name = new QLabel(QStringLiteral("Vectora"), this);
-    name->setStyleSheet(QStringLiteral("color:#f2f5fa; font-size:28px; font-weight:700;"));
+    nameColumn->setSpacing(2);
     auto *tagline = new QLabel(QStringLiteral("векторный редактор"), this);
-    tagline->setStyleSheet(QStringLiteral("color:#7f8792; font-size:12px;"));
-    nameColumn->addWidget(name);
+    tagline->setStyleSheet(QStringLiteral("color:#aab2bd; font-size:14px;"));
+    auto *platform = new QLabel(QStringLiteral("Linux · Windows · macOS"), this);
+    platform->setStyleSheet(QStringLiteral("color:#6f7681; font-size:11px;"));
+    nameColumn->addStretch(1);
     nameColumn->addWidget(tagline);
+    nameColumn->addWidget(platform);
+    nameColumn->addStretch(1);
     logoRow->addLayout(nameColumn);
     logoRow->addStretch(1);
     left->addLayout(logoRow);
@@ -163,7 +165,7 @@ WelcomeWidget::WelcomeWidget(QWidget *parent)
 
     left->addStretch(1);
     left->addWidget(mutedLabel(
-        QStringLiteral("Vectora 0.1.6 · Linux · Windows · macOS · .vct, SVG, PNG, PDF"),
+        QStringLiteral("Vectora 0.1.7 · Linux · Windows · macOS · .vct, SVG, PNG, PDF"),
         this));
 
     root->addLayout(left, 1);

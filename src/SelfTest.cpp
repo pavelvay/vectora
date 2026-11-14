@@ -104,6 +104,7 @@ int SelfTest::run(const QString &directory)
         layered.layerVisible = {false, true};
         layered.layerLocked = {true, false};
         VectorObject circle;
+        circle.locked = true;
         circle.type = ShapeType::Ellipse;
         circle.layer = 1;
         circle.path.addEllipse(QRectF(0, 0, 40, 40));
@@ -122,6 +123,9 @@ int SelfTest::run(const QString &directory)
         check(!layeredLoaded.objects.isEmpty()
                   && layeredLoaded.objects.first().layer == 1,
               QStringLiteral("object layer preserved"));
+        check(!layeredLoaded.objects.isEmpty()
+                  && layeredLoaded.objects.first().locked,
+              QStringLiteral("object lock preserved"));
     }
 
     // --- Exports -------------------------------------------------------------
@@ -692,6 +696,70 @@ int SelfTest::run(const QString &directory)
         view.flipSelection(true);
         check(QLineF(center, created.first()->sceneBoundingRect().center()).length() < 1.0,
               QStringLiteral("flip keeps the centre"));
+
+        // Dragging one of several selected objects must move the whole selection.
+        view.setDocument(Document());
+        VectorObject left;
+        left.type = ShapeType::Rectangle;
+        left.path.addRect(QRectF(0, 0, 60, 60));
+        left.pos = QPointF(120, 120);
+        VectorObject right;
+        right.type = ShapeType::Rectangle;
+        right.path.addRect(QRectF(0, 0, 60, 60));
+        right.pos = QPointF(260, 120);
+        VectorItem *leftItem = view.addVectorObject(left, false, false);
+        VectorItem *rightItem = view.addVectorObject(right, false, false);
+        view.setActiveTool(Tool::Select);
+        view.scene()->clearSelection();
+        leftItem->setSelected(true);
+        rightItem->setSelected(true);
+        const QPointF leftBefore = leftItem->pos();
+        const QPointF rightBefore = rightItem->pos();
+        const QPoint startPoint = view.mapFromScene(leftItem->sceneBoundingRect().center());
+        drag(view, startPoint, startPoint + QPoint(40, 30));
+        const QPointF leftDelta = leftItem->pos() - leftBefore;
+        const QPointF rightDelta = rightItem->pos() - rightBefore;
+        check(qAbs(leftDelta.x() - 40.0) < 1.5 && qAbs(leftDelta.y() - 30.0) < 1.5,
+              QStringLiteral("dragged object follows the mouse (delta %1,%2)")
+                  .arg(leftDelta.x()).arg(leftDelta.y()));
+        check(qAbs(rightDelta.x() - leftDelta.x()) < 0.5
+                  && qAbs(rightDelta.y() - leftDelta.y()) < 0.5,
+              QStringLiteral("multi-selection moves together"));
+
+        // Object lock.
+        view.setItemLocked(leftItem, true);
+        check(leftItem->isLocked(), QStringLiteral("object is locked"));
+        check(!(leftItem->flags() & QGraphicsItem::ItemIsSelectable),
+              QStringLiteral("locked object cannot be selected"));
+        check(!(leftItem->flags() & QGraphicsItem::ItemIsMovable),
+              QStringLiteral("locked object cannot be moved"));
+        view.setItemLocked(leftItem, false);
+        check(leftItem->flags() & QGraphicsItem::ItemIsMovable,
+              QStringLiteral("unlocked object can be moved"));
+
+        // Alt+click selects the object below the topmost one.
+        view.setDocument(Document());
+        VectorObject lower;
+        lower.type = ShapeType::Rectangle;
+        lower.path.addRect(QRectF(0, 0, 120, 120));
+        lower.pos = QPointF(100, 100);
+        VectorObject upper = lower;
+        upper.pos = QPointF(140, 140);
+        VectorItem *lowerItem = view.addVectorObject(lower, false, false);
+        VectorItem *upperItem = view.addVectorObject(upper, false, false);
+        view.setActiveTool(Tool::Select);
+        view.scene()->clearSelection();
+        upperItem->setSelected(true);
+        const QPointF overlapScene(180, 180);
+        const QPoint overlap = view.mapFromScene(overlapScene);
+        QMouseEvent altClick(QEvent::MouseButtonPress, QPointF(overlap),
+                             view.viewport()->mapToGlobal(overlap),
+                             Qt::LeftButton, Qt::LeftButton, Qt::AltModifier);
+        QApplication::sendEvent(view.viewport(), &altClick);
+        QApplication::processEvents();
+        const QList<VectorItem *> altSelected = view.selectedVectorItems();
+        check(altSelected.size() == 1 && altSelected.first() == lowerItem,
+              QStringLiteral("Alt+click selects the object behind"));
     }
 
     // Colour palette: right button means outline.

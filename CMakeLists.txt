@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(Vectora VERSION 0.1.6 LANGUAGES CXX)
+project(Vectora VERSION 0.1.7 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,6 +41,7 @@ qt_add_executable(vectora
     src/DockPanels.h
     src/WelcomeWidget.cpp
     src/WelcomeWidget.h
+    resources/resources.qrc
 )
 
 target_link_libraries(vectora PRIVATE

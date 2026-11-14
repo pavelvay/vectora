@@ -122,13 +122,14 @@ public:
     std::function<void(int, int)> dropLayer;
     std::function<void(int)> toggleVisible;
     std::function<void(int)> toggleLocked;
+    std::function<void(VectorItem *)> toggleObjectLock;
 
 protected:
     void mousePressEvent(QMouseEvent *event) override
     {
         QTreeWidgetItem *item = itemAt(event->pos());
+        const int column = columnAt(int(event->position().x()));
         if (item && !item->data(0, kItemRole).isValid()) {
-            const int column = columnAt(int(event->position().x()));
             const int layer = item->data(0, kLayerRole).toInt();
             if (column == 1 && toggleVisible) {
                 toggleVisible(layer);
@@ -138,6 +139,13 @@ protected:
                 toggleLocked(layer);
                 return;
             }
+        }
+        if (item && item->data(0, kItemRole).isValid() && column == 2
+            && toggleObjectLock) {
+            auto *vectorItem = reinterpret_cast<VectorItem *>(
+                item->data(0, kItemRole).value<quintptr>());
+            toggleObjectLock(vectorItem);
+            return;
         }
         QTreeWidget::mousePressEvent(event);
     }
@@ -446,6 +454,10 @@ void DockPanels::buildObjectsDocker()
 
         auto *vectorItem = reinterpret_cast<VectorItem *>(
             item->data(0, kItemRole).value<quintptr>());
+        if (vectorItem && vectorItem->isLocked()) {
+            emit status(QStringLiteral("Объект заблокирован — снимите замок в списке."));
+            return;
+        }
         if (vectorItem) {
             m_updating = true;
             m_view->scene()->clearSelection();
@@ -503,6 +515,12 @@ void DockPanels::buildObjectsDocker()
         emit status(m_view->layerLocked(layer)
                         ? QStringLiteral("Слой «%1» заблокирован.").arg(m_view->layers().at(layer))
                         : QStringLiteral("Слой «%1» разблокирован.").arg(m_view->layers().at(layer)));
+    };
+    objectsTree->toggleObjectLock = [this](VectorItem *item) {
+        if (!item)
+            return;
+        m_view->setItemLocked(item, !item->isLocked());
+        refresh();
     };
 
     createDock(QStringLiteral("Объекты"), content);
@@ -563,6 +581,14 @@ void DockPanels::refreshTree()
                             | Qt::ItemIsSelectable | Qt::ItemIsEnabled);
             if (!m_view->layerVisible(layer))
                 entry->setForeground(0, QBrush(QColor(0x6f, 0x76, 0x81)));
+            entry->setIcon(2, Icons::icon(vectorItem->isLocked()
+                                              ? QStringLiteral("lock")
+                                              : QStringLiteral("unlock")));
+            entry->setToolTip(2, vectorItem->isLocked()
+                                     ? QStringLiteral("Разблокировать объект")
+                                     : QStringLiteral("Заблокировать объект"));
+            if (vectorItem->isLocked())
+                entry->setForeground(0, QBrush(QColor(0x7c, 0x83, 0x8e)));
             if (vectorItem->isSelected()) {
                 entry->setSelected(true);
                 m_tree->setCurrentItem(entry);

@@ -90,6 +90,7 @@ public:
     void sendBackward();
     void flipSelection(bool horizontal);
     void rotateSelection(qreal degrees);
+    void setItemLocked(VectorItem *item, bool locked);
 
     void finishBezier();
     void closeBezier();
@@ -144,6 +145,7 @@ private:
     };
 
     void updateCursor();
+    void cycleSelection();
     void normalizeZOrder();
     void applyLayerState(int layer);
     void applyLayerLayout(const QVector<QList<VectorItem *>> &perLayer);

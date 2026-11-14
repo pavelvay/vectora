@@ -5,6 +5,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QSvgRenderer>
 #include <QtMath>
 
 namespace {
@@ -563,6 +564,21 @@ void paintAction(QPainter &p, const QString &id, const QColor &c)
 
 QIcon Icons::appIcon()
 {
+    QSvgRenderer renderer(QStringLiteral(":/icons/vectora.svg"));
+    if (renderer.isValid()) {
+        QIcon icon;
+        for (int size : {16, 24, 32, 48, 64, 128, 256, 512}) {
+            QPixmap pixmap(size, size);
+            pixmap.fill(Qt::transparent);
+            QPainter painter(&pixmap);
+            painter.setRenderHint(QPainter::Antialiasing, true);
+            renderer.render(&painter, QRectF(0, 0, size, size));
+            painter.end();
+            icon.addPixmap(pixmap);
+        }
+        return icon;
+    }
+
     constexpr int size = 64;
     QPixmap pixmap(size * 2, size * 2);
     pixmap.setDevicePixelRatio(2.0);

@@ -679,6 +679,13 @@ void MainWindow::createDocks()
     m_toolsDock->setFixedWidth(54);
     addDockWidget(Qt::LeftDockWidgetArea, m_toolsDock);
     connect(m_toolPalette, &ToolPalette::toolSelected, this, &MainWindow::applyTool);
+    connect(m_toolPalette, &ToolPalette::toolDoubleClicked, this, [this](Tool tool) {
+        if (tool == Tool::Select) {
+            m_view->selectAllObjects();
+            statusBar()->showMessage(
+                QStringLiteral("Двойной клик по «Выделению»: выбраны все объекты."), 3000);
+        }
+    });
 
     // Right dockers, tabbed like CorelDRAW's docker group.
     m_dockPanels = new DockPanels(this, m_view, this);
@@ -1792,8 +1799,11 @@ void MainWindow::exportPdf()
         path += QStringLiteral(".pdf");
 
     const Document document = currentDocument();
+    const QSizeF millimeters(document.pageSize.width() * 25.4 / 96.0,
+                             document.pageSize.height() * 25.4 / 96.0);
     QPdfWriter writer(path);
-    writer.setPageSize(QPageSize(QPageSize::A4));
+    writer.setPageSize(QPageSize(millimeters, QPageSize::Millimeter,
+                                 QStringLiteral("Vectora")));
     writer.setResolution(96);
     writer.setPageMargins(QMarginsF(0, 0, 0, 0));
 
@@ -2153,7 +2163,6 @@ void MainWindow::pasteClipboard()
     beginEdit();
     m_view->scene()->clearSelection();
     for (VectorObject object : m_clipboard) {
-        object.pos += QPointF(18.0, 18.0);
         object.layer = m_view->activeLayer();
         VectorItem *item = m_view->addVectorObject(object, false, false);
         item->setSelected(true);
@@ -2233,7 +2242,7 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("О программе"),
         QStringLiteral(
-            "<h3>Vectora 0.1.6</h3>"
+            "<h3>Vectora 0.1.7</h3>"
             "<p>Кроссплатформенный векторный редактор на C++ и Qt 6.</p>"
             "<p>Работают: документы .vct, экспорт PNG/SVG/PDF, печать, "
             "рисование фигур и кривых, Bezier с типами узлов, докеры "

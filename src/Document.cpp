@@ -484,6 +484,7 @@ QJsonObject Document::toJson() const
         entry.insert(QStringLiteral("strokeWidth"), object.strokeWidth);
         entry.insert(QStringLiteral("opacity"), object.opacity);
         entry.insert(QStringLiteral("shadow"), object.shadow);
+        entry.insert(QStringLiteral("locked"), object.locked);
         entry.insert(QStringLiteral("shadowOffset"),
                      pointArray(object.shadowOffset));
         entry.insert(QStringLiteral("shadowOpacity"), object.shadowOpacity);
@@ -568,6 +569,7 @@ Document Document::fromJson(const QJsonObject &json, QString *error)
         object.strokeWidth = entry.value(QStringLiteral("strokeWidth")).toDouble(2.0);
         object.opacity = entry.value(QStringLiteral("opacity")).toDouble(1.0);
         object.shadow = entry.value(QStringLiteral("shadow")).toBool(false);
+        object.locked = entry.value(QStringLiteral("locked")).toBool(false);
         const QJsonArray shadowOffset = entry.value(QStringLiteral("shadowOffset")).toArray();
         if (shadowOffset.size() >= 2) {
             object.shadowOffset = QPointF(shadowOffset.at(0).toDouble(),

@@ -9,6 +9,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QScrollBar>
+#include <QShortcut>
 #include <QWheelEvent>
 #include <QtMath>
 
@@ -54,6 +55,10 @@ CanvasView::CanvasView(QWidget *parent)
     connect(graphicsScene, &QGraphicsScene::selectionChanged, this, [this]() {
         emit selectionChanged(selectedVectorItems().size());
     });
+
+    auto *tabShortcut = new QShortcut(QKeySequence(Qt::Key_Tab), this);
+    tabShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(tabShortcut, &QShortcut::activated, this, &CanvasView::cycleSelection);
 
     updateCursor();
 }
@@ -182,6 +187,33 @@ void CanvasView::setActiveTool(Tool tool)
                                      : QGraphicsView::NoDrag);
     updateCursor();
     viewport()->update();
+}
+
+void CanvasView::cycleSelection()
+{
+    QList<VectorItem *> items;
+    for (VectorItem *item : vectorItems()) {
+        if (item->isVisible()
+            && (item->flags() & QGraphicsItem::ItemIsSelectable))
+            items.append(item);
+    }
+    if (items.isEmpty()) {
+        emit statusHint(QStringLiteral("На холсте нет доступных объектов."));
+        return;
+    }
+
+    std::reverse(items.begin(), items.end());
+    const QList<VectorItem *> selected = selectedVectorItems();
+    VectorItem *current = selected.isEmpty() ? nullptr : selected.last();
+    const int index = items.indexOf(current);
+    VectorItem *next = items.value((index + 1) % items.size());
+
+    scene()->clearSelection();
+    if (next)
+        next->setSelected(true);
+    emit statusHint(QStringLiteral("Tab: следующий объект (%1 из %2)")
+                        .arg((index + 1) % items.size() + 1)
+                        .arg(items.size()));
 }
 
 void CanvasView::updateCursor()
@@ -882,10 +914,11 @@ void CanvasView::applyLayerState(int layer)
     const bool visible = m_layerVisible.value(layer, true);
     const bool locked = m_layerLocked.value(layer, false);
     for (VectorItem *item : itemsInLayer(layer)) {
+        const bool itemLocked = item->isLocked();
         item->setVisible(visible);
-        item->setFlag(QGraphicsItem::ItemIsSelectable, !locked);
-        item->setFlag(QGraphicsItem::ItemIsMovable, !locked);
-        if (locked)
+        item->setFlag(QGraphicsItem::ItemIsSelectable, !locked && !itemLocked);
+        item->setFlag(QGraphicsItem::ItemIsMovable, !locked && !itemLocked);
+        if (locked || itemLocked)
             item->setSelected(false);
     }
 }
@@ -899,9 +932,10 @@ void CanvasView::applyLayerLayout(const QVector<QList<VectorItem *>> &perLayer)
         for (VectorItem *item : perLayer.at(layer)) {
             item->setLayerIndex(layer);
             item->setZValue(z++);
+            const bool itemLocked = item->isLocked();
             item->setVisible(visible);
-            item->setFlag(QGraphicsItem::ItemIsSelectable, !locked);
-            item->setFlag(QGraphicsItem::ItemIsMovable, !locked);
+            item->setFlag(QGraphicsItem::ItemIsSelectable, !locked && !itemLocked);
+            item->setFlag(QGraphicsItem::ItemIsMovable, !locked && !itemLocked);
         }
     }
     m_nextZ = z;
@@ -1387,6 +1421,17 @@ void CanvasView::rotateSelection(qreal degrees)
     emit endEdit();
 }
 
+void CanvasView::setItemLocked(VectorItem *item, bool locked)
+{
+    if (!item)
+        return;
+    emit beginEdit();
+    item->setLocked(locked);
+    emit endEdit();
+    emit statusHint(locked ? QStringLiteral("Объект заблокирован.")
+                           : QStringLiteral("Объект разблокирован."));
+}
+
 void CanvasView::blendSelected(int steps)
 {
     steps = qBound(1, steps, 80);
@@ -1525,6 +1570,32 @@ void CanvasView::mousePressEvent(QMouseEvent *event)
 
     if (event->button() != Qt::LeftButton) {
         QGraphicsView::mousePressEvent(event);
+        return;
+    }
+
+    if (m_tool == Tool::Select && (event->modifiers() & Qt::AltModifier)) {
+        QList<VectorItem *> candidates;
+        for (QGraphicsItem *graphicsItem : scene()->items(scenePos)) {
+            if (graphicsItem->type() != VectorItem::ItemType)
+                continue;
+            auto *candidate = static_cast<VectorItem *>(graphicsItem);
+            if (candidate->isVisible()
+                && (candidate->flags() & QGraphicsItem::ItemIsSelectable))
+                candidates.append(candidate);
+        }
+        if (!candidates.isEmpty()) {
+            const QList<VectorItem *> selected = selectedVectorItems();
+            VectorItem *current = selected.isEmpty() ? nullptr : selected.last();
+            const int index = candidates.indexOf(current);
+            VectorItem *target = candidates.value(index + 1, candidates.first());
+            scene()->clearSelection();
+            target->setSelected(true);
+            emit statusHint(QStringLiteral("Alt+клик: выбран объект ниже (%1)")
+                                .arg(index + 2 <= candidates.size()
+                                         ? QStringLiteral("уровень %1").arg(index + 2)
+                                         : QStringLiteral("верхний")));
+        }
+        event->accept();
         return;
     }
 

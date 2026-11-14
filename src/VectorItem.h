@@ -41,6 +41,8 @@ public:
     void setStarRatio(qreal ratio);
     void setSpiralTurns(qreal turns);
     bool flip(bool horizontal);
+    void setLocked(bool locked);
+    bool isLocked() const { return m_object.locked; }
     int shapeTypeValue() const { return int(m_object.type); }
     void setPath(const QPainterPath &path);
 
@@ -66,7 +68,7 @@ private:
 
     int handleAt(const QPointF &pos) const;
     QVector<QPointF> handlePoints() const;
-    void applyResize(const QPointF &pos);
+    void applyResize(const QPointF &pos, bool keepAspect);
     void updateOrigin();
     void drawSelection(QPainter *painter) const;
 

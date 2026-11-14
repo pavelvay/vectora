@@ -2,6 +2,7 @@
 
 #include <QButtonGroup>
 #include <QFrame>
+#include <QEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QToolButton>
@@ -106,6 +107,8 @@ ToolPalette::ToolPalette(QWidget *parent)
         button->setAutoRaise(true);
         button->setToolTip(QStringLiteral("%1 (%2)\n%3")
                                .arg(info.name, info.shortcut, info.hint));
+        button->setProperty("toolId", int(info.tool));
+        button->installEventFilter(this);
 
         m_group->addButton(button, int(info.tool));
         layout->addWidget(button, 0, Qt::AlignHCenter);
@@ -130,6 +133,16 @@ void ToolPalette::setCurrentTool(Tool tool)
 {
     if (auto *button = m_group->button(int(tool)))
         button->setChecked(true);
+}
+
+bool ToolPalette::eventFilter(QObject *watched, QEvent *event)
+{
+    if (event->type() == QEvent::MouseButtonDblClick) {
+        const int id = watched->property("toolId").toInt();
+        emit toolDoubleClicked(static_cast<Tool>(id));
+        return true;
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void ToolPalette::setFillColor(const QColor &color)
