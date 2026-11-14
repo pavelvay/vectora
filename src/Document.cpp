@@ -366,6 +366,7 @@ void Document::clear()
 
 namespace {
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
 QFont::Tag makeFontTag(const QString &name)
 {
     char tag[5] = {0, 0, 0, 0, 0};
@@ -373,6 +374,7 @@ QFont::Tag makeFontTag(const QString &name)
         tag[i] = name.at(i).toLatin1();
     return QFont::Tag(tag);
 }
+#endif
 
 QFont textFont(const VectorObject &object)
 {
@@ -387,6 +389,7 @@ QFont textFont(const VectorObject &object)
         font.setUnderline(true);
     if (object.strikeOut)
         font.setStrikeOut(true);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
     for (const QString &feature : object.fontFeatures) {
         if (feature.size() == 4)
             font.setFeature(makeFontTag(feature), 1);
@@ -396,6 +399,7 @@ QFont textFont(const VectorObject &object)
         if (it.key().size() == 4)
             font.setVariableAxis(makeFontTag(it.key()), it.value());
     }
+#endif
     if (object.script == 1 || object.script == 2) {
         const qreal size = font.pixelSize() > 0 ? font.pixelSize() : 18.0;
         font.setPixelSize(qMax(1, qRound(size * 0.66)));

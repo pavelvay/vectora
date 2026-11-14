@@ -689,6 +689,7 @@ void MainWindow::createActions()
         layout->addWidget(axesLabel);
 
         QMap<QString, QDoubleSpinBox *> axisSpins;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
         const QList<QFontVariableAxis> axes =
             QFontInfo(first.font).variableAxes();
         if (axes.isEmpty()) {
@@ -714,6 +715,14 @@ void MainWindow::createActions()
             layout->addLayout(row);
             axisSpins.insert(tag, spin);
         }
+#else
+        auto *none = new QLabel(
+            QStringLiteral("Вариативные оси доступны в сборках на Qt 6.7 и новее."),
+            &dialog);
+        none->setWordWrap(true);
+        none->setStyleSheet(QStringLiteral("color:#8b929d; font-size:11px;"));
+        layout->addWidget(none);
+#endif
 
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok
                                                  | QDialogButtonBox::Cancel,
@@ -826,9 +835,11 @@ void MainWindow::createActions()
             for (const QString &style : QFontDatabase::styles(family))
                 styles->addItem(style);
             QStringList axes;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
             const auto variableAxes = QFontInfo(QFont(family)).variableAxes();
             for (const auto &axis : variableAxes)
                 axes << axis.name();
+#endif
             info->setText(QStringLiteral("Семейство: %1\nНачертаний: %2\n%3")
                               .arg(family)
                               .arg(QFontDatabase::styles(family).size())
