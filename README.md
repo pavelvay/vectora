@@ -35,11 +35,14 @@ AppImage и `.deb`, macOS DMG.
   «Подробнее» → «Выполнить в любом случае».
 - **Linux AppImage**: `chmod +x Vectora-0.1.11-x86_64.AppImage` и запустите.
   Если нет FUSE: `./Vectora-0.1.11-x86_64.AppImage --appimage-extract-and-run`.
+  AppImage использует X11/XWayland; при необходимости задайте
+  `QT_QPA_PLATFORM=xcb`.
 - **Debian/Ubuntu**: `sudo apt install ./Vectora-0.1.11-amd64.deb`.
 - **Arch/CachyOS**: `packaging/PKGBUILD` — `makepkg -si`.
-- **macOS**: откройте DMG и перетащите Vectora в Applications. Сборка не
-  подписана: правый клик → «Открыть» или
+- **macOS (Apple Silicon)**: откройте DMG и перетащите Vectora в Applications.
+  Сборка не подписана: правый клик → «Открыть» или
   `xattr -dr com.apple.quarantine /Applications/Vectora.app`.
+  DMG собран для arm64 (Apple Silicon); для Intel Mac нужна отдельная сборка.
 
 Сборки создаются автоматически в GitHub Actions.
 
