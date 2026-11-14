@@ -3,6 +3,9 @@
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QColorDialog>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QPushButton>
 #include <QComboBox>
 #include <QDropEvent>
 #include <QHeaderView>
@@ -415,6 +418,9 @@ void DockPanels::buildObjectsDocker()
         for (VectorItem *item : selected) {
             VectorObject copy = item->object();
             copy.pos += QPointF(16.0, 16.0);
+            copy.group = 0;
+            copy.id = 0;
+            copy.masterId = 0;
             VectorItem *added = m_view->addVectorObject(copy, false, false);
             added->setSelected(true);
         }
@@ -685,7 +691,18 @@ void DockPanels::buildPropertiesDocker()
     widthRow->addStretch(1);
     layout->addWidget(m_fillButton);
     layout->addWidget(m_strokeButton);
+
+    auto *gradientButton = new QToolButton(content);
+    gradientButton->setText(QStringLiteral(" Градиент…"));
+    gradientButton->setIcon(Icons::icon(QStringLiteral("swatch"), QColor("#8a5cf6")));
+    gradientButton->setIconSize(QSize(18, 18));
+    gradientButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    gradientButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    layout->addWidget(gradientButton);
     layout->addLayout(widthRow);
+
+    connect(gradientButton, &QToolButton::clicked, this,
+            &DockPanels::openGradientDialog);
 
     auto *apply = new QToolButton(content);
     apply->setText(QStringLiteral("Применить"));
@@ -774,14 +791,29 @@ void DockPanels::refreshProperties()
                                       : QStringLiteral("Выбрано объектов: %1")
                                             .arg(items.size()));
         m_propertiesContent->setEnabled(true);
-        const VectorObject object = items.first()->object();
-        const QRectF bounds = object.localBounds();
-        m_x->setValue(object.pos.x());
-        m_y->setValue(object.pos.y());
-        m_w->setValue(bounds.width());
-        m_h->setValue(bounds.height());
-        m_angle->setValue(object.rotation);
-        m_opacitySlider->setValue(qRound(object.opacity * 100.0));
+        const VectorObject firstObject = items.first()->object();
+        if (items.size() > 1) {
+            QRectF groupBounds;
+            for (VectorItem *item : items) {
+                const QRectF visual = item->mapRectToScene(item->localBounds());
+                groupBounds = groupBounds.isNull()
+                                  ? visual
+                                  : groupBounds.united(visual);
+            }
+            m_x->setValue(groupBounds.x());
+            m_y->setValue(groupBounds.y());
+            m_w->setValue(groupBounds.width());
+            m_h->setValue(groupBounds.height());
+            m_angle->setValue(items.first()->object().rotation);
+        } else {
+            const QRectF bounds = firstObject.localBounds();
+            m_x->setValue(firstObject.pos.x());
+            m_y->setValue(firstObject.pos.y());
+            m_w->setValue(bounds.width());
+            m_h->setValue(bounds.height());
+            m_angle->setValue(firstObject.rotation);
+        }
+        m_opacitySlider->setValue(qRound(firstObject.opacity * 100.0));
         m_opacityValue->setText(QStringLiteral("%1 %").arg(m_opacitySlider->value()));
         if (m_effectOpacity) {
             const QSignalBlocker blocker(m_effectOpacity);
@@ -789,10 +821,10 @@ void DockPanels::refreshProperties()
             m_effectOpacityValue->setText(
                 QStringLiteral("%1 %").arg(m_opacitySlider->value()));
         }
-        m_strokeWidth->setValue(object.strokeWidth);
-        m_outlineColor = object.hasStroke ? object.stroke : m_outlineColor;
+        m_strokeWidth->setValue(firstObject.strokeWidth);
+        m_outlineColor = firstObject.hasStroke ? firstObject.stroke : m_outlineColor;
         colorButtonIcon(m_outlineColorButton, m_outlineColor);
-        m_outlineWidth->setValue(object.strokeWidth);
+        m_outlineWidth->setValue(firstObject.strokeWidth);
     }
 
     m_updating = false;
@@ -815,21 +847,17 @@ void DockPanels::applyTransform()
     const qreal angle = m_angle->value();
     const qreal opacity = m_opacitySlider->value() / 100.0;
 
-    emit beginEdit();
-    if (selected.size() == 1) {
+    if (selected.size() > 1) {
+        m_view->scaleSelectionTo(QRectF(position, size), opacity);
+    } else {
+        emit beginEdit();
         VectorItem *item = selected.first();
         item->setFrameSize(size);
         item->setRotationAngle(angle);
         item->setPos(position);
         item->setObjectOpacity(opacity);
-    } else {
-        const QPointF delta = position - selected.first()->pos();
-        for (VectorItem *item : selected) {
-            item->setPos(item->pos() + delta);
-            item->setObjectOpacity(opacity);
-        }
+        emit endEdit();
     }
-    emit endEdit();
     emit status(selected.size() == 1
                     ? QStringLiteral("Свойства объекта применены.")
                     : QStringLiteral("Для группы применены позиция и прозрачность."));
@@ -838,6 +866,61 @@ void DockPanels::applyTransform()
 // ---------------------------------------------------------------------------
 // Colour
 // ---------------------------------------------------------------------------
+
+
+void DockPanels::openGradientDialog()
+{
+    const QList<VectorItem *> selected = selection();
+    if (selected.isEmpty()) {
+        emit status(QStringLiteral("Сначала выберите объекты для градиента."));
+        return;
+    }
+
+    QDialog dialog(m_host);
+    dialog.setWindowTitle(QStringLiteral("Градиентная заливка"));
+    auto *form = new QFormLayout(&dialog);
+    auto *type = new QComboBox(&dialog);
+    type->addItems({QStringLiteral("Сплошная"), QStringLiteral("Линейный градиент"),
+                    QStringLiteral("Радиальный градиент")});
+    auto *color2 = new QPushButton(&dialog);
+    color2->setText(m_gradientColor2.name(QColor::HexArgb).toUpper());
+    color2->setStyleSheet(QStringLiteral("text-align:left; padding:5px;"));
+    auto *angle = spinField(&dialog, 0, 359, 45, QStringLiteral(" °"), 0, 76);
+    form->addRow(QStringLiteral("Тип заливки"), type);
+    form->addRow(QStringLiteral("Второй цвет"), color2);
+    form->addRow(QStringLiteral("Угол (для линейного)"), angle);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok
+                                             | QDialogButtonBox::Cancel,
+                                         &dialog);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(color2, &QPushButton::clicked, &dialog, [this, color2]() {
+        const QColor color = QColorDialog::getColor(
+            m_gradientColor2, m_host, QStringLiteral("Второй цвет градиента"),
+            QColorDialog::ShowAlphaChannel);
+        if (!color.isValid())
+            return;
+        m_gradientColor2 = color;
+        color2->setText(color.name(QColor::HexArgb).toUpper());
+    });
+
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    const int style = type->currentIndex();
+    emit beginEdit();
+    for (VectorItem *item : selected) {
+        if (style == 0)
+            item->setFillColor(item->object().fill);
+        else
+            item->setGradientFill(style, m_gradientColor2, angle->value());
+    }
+    emit endEdit();
+    emit status(style == 0 ? QStringLiteral("Заливка снова сплошная.")
+                           : QStringLiteral("Градиент применён к объектам: %1")
+                                 .arg(selected.size()));
+}
 
 void DockPanels::buildColorDocker()
 {
@@ -887,6 +970,13 @@ void DockPanels::buildColorDocker()
     layout->addLayout(hexRow);
 
     layout->addWidget(separator(content));
+
+    auto *gradient = new QToolButton(content);
+    gradient->setText(QStringLiteral("Градиент…"));
+    gradient->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    connect(gradient, &QToolButton::clicked, this,
+            &DockPanels::openGradientDialog);
+    layout->addWidget(gradient);
 
     auto *hint = new QLabel(QStringLiteral("ЛКМ по образцу — заливка\n"
                                            "ПКМ по образцу — обводка"),

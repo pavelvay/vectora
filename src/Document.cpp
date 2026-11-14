@@ -4,6 +4,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFontMetricsF>
+#include <QLinearGradient>
+#include <QRadialGradient>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonParseError>
@@ -224,6 +226,32 @@ QJsonObject fontToJson(const QFont &font)
 
 } // namespace
 
+namespace {
+
+QBrush fillBrush(const VectorObject &object, const QRectF &bounds)
+{
+    if (object.fillStyle == 1 && bounds.width() > 0.01 && bounds.height() > 0.01) {
+        const qreal angle = object.gradientAngle * kPi / 180.0;
+        const QPointF direction(std::cos(angle), std::sin(angle));
+        const qreal half = std::hypot(bounds.width(), bounds.height()) / 2.0;
+        QLinearGradient gradient(bounds.center() - direction * half,
+                                 bounds.center() + direction * half);
+        gradient.setColorAt(0.0, object.fill);
+        gradient.setColorAt(1.0, object.fill2);
+        return QBrush(gradient);
+    }
+    if (object.fillStyle == 2 && bounds.width() > 0.01 && bounds.height() > 0.01) {
+        QRadialGradient gradient(bounds.center(),
+                                 qMax(bounds.width(), bounds.height()) / 2.0);
+        gradient.setColorAt(0.0, object.fill);
+        gradient.setColorAt(1.0, object.fill2);
+        return QBrush(gradient);
+    }
+    return QBrush(object.fill);
+}
+
+} // namespace
+
 QString shapeTypeId(ShapeType type)
 {
     switch (type) {
@@ -308,7 +336,7 @@ void Document::paintObject(QPainter *painter, const VectorObject &object)
     if (!object.path.isEmpty()) {
         if (object.hasFill && object.fill.alpha() > 0) {
             painter->setPen(Qt::NoPen);
-            painter->setBrush(object.fill);
+            painter->setBrush(fillBrush(object, object.path.boundingRect()));
             painter->drawPath(object.path);
         }
         if (object.hasStroke && object.strokeWidth > 0.0 && object.stroke.alpha() > 0) {
@@ -322,7 +350,10 @@ void Document::paintObject(QPainter *painter, const VectorObject &object)
     }
 
     if (object.type == ShapeType::Text && !object.text.isEmpty()) {
-        painter->setPen(object.fill);
+        if (object.fillStyle != 0)
+            painter->setPen(QPen(fillBrush(object, object.textBox), 1.0));
+        else
+            painter->setPen(object.fill);
         painter->setFont(object.font);
         painter->drawText(object.textBox,
                           textAlignment(object.textAlign) | Qt::TextWordWrap,
@@ -471,6 +502,9 @@ QJsonObject Document::toJson() const
         QJsonObject entry;
         entry.insert(QStringLiteral("type"), shapeTypeId(object.type));
         entry.insert(QStringLiteral("layer"), object.layer);
+        entry.insert(QStringLiteral("group"), object.group);
+        entry.insert(QStringLiteral("id"), object.id);
+        entry.insert(QStringLiteral("masterId"), object.masterId);
         entry.insert(QStringLiteral("cornerRadius"), object.cornerRadius);
         entry.insert(QStringLiteral("sides"), object.sides);
         entry.insert(QStringLiteral("starPoints"), object.starPoints);
@@ -480,6 +514,11 @@ QJsonObject Document::toJson() const
         entry.insert(QStringLiteral("rotation"), object.rotation);
         entry.insert(QStringLiteral("path"), encodePath(object.path));
         entry.insert(QStringLiteral("fill"), colorToJson(object.fill, object.hasFill));
+        entry.insert(QStringLiteral("fill2"), object.fill2.name(QColor::HexArgb));
+        entry.insert(QStringLiteral("fillStyle"), object.fillStyle);
+        entry.insert(QStringLiteral("gradientAngle"), object.gradientAngle);
+        entry.insert(QStringLiteral("pivotX"), object.pivot.x());
+        entry.insert(QStringLiteral("pivotY"), object.pivot.y());
         entry.insert(QStringLiteral("stroke"), colorToJson(object.stroke, object.hasStroke));
         entry.insert(QStringLiteral("strokeWidth"), object.strokeWidth);
         entry.insert(QStringLiteral("opacity"), object.opacity);
@@ -509,6 +548,24 @@ QJsonObject Document::toJson() const
         }
         objectArray.append(entry);
     }
+    QJsonArray groupArray;
+    for (const VectorGroup &group : groups) {
+        QJsonObject entry;
+        entry.insert(QStringLiteral("id"), group.id);
+        entry.insert(QStringLiteral("parent"), group.parent);
+        groupArray.append(entry);
+    }
+    root.insert(QStringLiteral("groups"), groupArray);
+
+    QJsonArray guidesXArray;
+    QJsonArray guidesYArray;
+    for (qreal value : guidesX)
+        guidesXArray.append(value);
+    for (qreal value : guidesY)
+        guidesYArray.append(value);
+    root.insert(QStringLiteral("guidesX"), guidesXArray);
+    root.insert(QStringLiteral("guidesY"), guidesYArray);
+
     root.insert(QStringLiteral("objects"), objectArray);
     return root;
 }
@@ -537,6 +594,21 @@ Document Document::fromJson(const QJsonObject &json, QString *error)
         }
     }
 
+    for (const QJsonValue &value : json.value(QStringLiteral("guidesX")).toArray())
+        document.guidesX.append(value.toDouble());
+    for (const QJsonValue &value : json.value(QStringLiteral("guidesY")).toArray())
+        document.guidesY.append(value.toDouble());
+
+    const QJsonArray groupArray = json.value(QStringLiteral("groups")).toArray();
+    for (const QJsonValue &value : groupArray) {
+        const QJsonObject entry = value.toObject();
+        VectorGroup group;
+        group.id = entry.value(QStringLiteral("id")).toInt();
+        group.parent = entry.value(QStringLiteral("parent")).toInt();
+        if (group.id > 0)
+            document.groups.append(group);
+    }
+
     document.layerVisible.fill(true, document.layers.size());
     document.layerLocked.fill(false, document.layers.size());
     const QJsonArray visibleArray = json.value(QStringLiteral("layerVisible")).toArray();
@@ -554,6 +626,9 @@ Document Document::fromJson(const QJsonObject &json, QString *error)
         VectorObject object;
         object.type = shapeTypeFromId(entry.value(QStringLiteral("type")).toString());
         object.layer = entry.value(QStringLiteral("layer")).toInt(0);
+        object.group = entry.value(QStringLiteral("group")).toInt(0);
+        object.id = entry.value(QStringLiteral("id")).toInt(0);
+        object.masterId = entry.value(QStringLiteral("masterId")).toInt(0);
         object.cornerRadius = entry.value(QStringLiteral("cornerRadius")).toDouble(0.0);
         object.sides = entry.value(QStringLiteral("sides")).toInt(6);
         object.starPoints = entry.value(QStringLiteral("starPoints")).toInt(5);
@@ -564,6 +639,14 @@ Document Document::fromJson(const QJsonObject &json, QString *error)
         object.path = decodePath(entry.value(QStringLiteral("path")).toArray());
         object.fill = colorFromJson(entry.value(QStringLiteral("fill")), &object.hasFill,
                                     QColor("#4f7cc0"));
+        const QColor fill2(entry.value(QStringLiteral("fill2"))
+                               .toString(QStringLiteral("#ffffffff")));
+        if (fill2.isValid())
+            object.fill2 = fill2;
+        object.fillStyle = entry.value(QStringLiteral("fillStyle")).toInt(0);
+        object.gradientAngle = entry.value(QStringLiteral("gradientAngle")).toDouble(0.0);
+        object.pivot = QPointF(entry.value(QStringLiteral("pivotX")).toDouble(0.5),
+                               entry.value(QStringLiteral("pivotY")).toDouble(0.5));
         object.stroke = colorFromJson(entry.value(QStringLiteral("stroke")), &object.hasStroke,
                                       QColor("#1d2127"));
         object.strokeWidth = entry.value(QStringLiteral("strokeWidth")).toDouble(2.0);
@@ -662,6 +745,9 @@ bool Document::load(const QString &path, QString *error)
 
     pageSize = loaded.pageSize;
     layers = loaded.layers;
+    groups = loaded.groups;
+    guidesX = loaded.guidesX;
+    guidesY = loaded.guidesY;
     layerVisible = loaded.layerVisible;
     layerLocked = loaded.layerLocked;
     objects = loaded.objects;
@@ -678,15 +764,64 @@ QString Document::toSvg() const
                .arg(num(pageSize.width()), num(pageSize.height()));
     svg += QStringLiteral("  <rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n");
 
+    int objectIndex = 0;
     for (const VectorObject &object : objects) {
         if (object.layer >= 0 && object.layer < layerVisible.size()
             && !layerVisible.at(object.layer))
             continue;
         const QRectF bounds = object.localBounds();
+        const QString gradientId = QStringLiteral("grad%1").arg(objectIndex++);
+        const QRectF fillBounds = object.type == ShapeType::Text ? object.textBox
+                                                                 : object.path.boundingRect();
+        const bool gradientFill = object.hasFill && object.fillStyle != 0
+                                  && fillBounds.width() > 0.01
+                                  && fillBounds.height() > 0.01;
+        QString gradientMarkup;
+        if (gradientFill) {
+            if (object.fillStyle == 1) {
+                const qreal angle = object.gradientAngle * kPi / 180.0;
+                const QPointF direction(std::cos(angle), std::sin(angle));
+                const qreal half = std::hypot(fillBounds.width(),
+                                              fillBounds.height()) / 2.0;
+                const QPointF start = fillBounds.center() - direction * half;
+                const QPointF end = fillBounds.center() + direction * half;
+                gradientMarkup = QStringLiteral(
+                    "<defs><linearGradient id=\"%1\" gradientUnits=\"userSpaceOnUse\" "
+                    "x1=\"%2\" y1=\"%3\" x2=\"%4\" y2=\"%5\">"
+                    "<stop offset=\"0\" stop-color=\"%6\" stop-opacity=\"%7\"/>"
+                    "<stop offset=\"1\" stop-color=\"%8\" stop-opacity=\"%9\"/>"
+                    "</linearGradient></defs>")
+                                     .arg(gradientId, num(start.x()), num(start.y()),
+                                          num(end.x()), num(end.y()),
+                                          object.fill.name(QColor::HexRgb),
+                                          num(object.fill.alphaF()),
+                                          object.fill2.name(QColor::HexRgb),
+                                          num(object.fill2.alphaF()));
+            } else {
+                gradientMarkup = QStringLiteral(
+                    "<defs><radialGradient id=\"%1\" gradientUnits=\"userSpaceOnUse\" "
+                    "cx=\"%2\" cy=\"%3\" r=\"%4\">"
+                    "<stop offset=\"0\" stop-color=\"%5\" stop-opacity=\"%6\"/>"
+                    "<stop offset=\"1\" stop-color=\"%7\" stop-opacity=\"%8\"/>"
+                    "</radialGradient></defs>")
+                                     .arg(gradientId,
+                                          num(fillBounds.center().x()),
+                                          num(fillBounds.center().y()),
+                                          num(qMax(fillBounds.width(),
+                                                   fillBounds.height()) / 2.0),
+                                          object.fill.name(QColor::HexRgb),
+                                          num(object.fill.alphaF()),
+                                          object.fill2.name(QColor::HexRgb),
+                                          num(object.fill2.alphaF()));
+            }
+        }
+
         svg += QStringLiteral("  <g transform=\"translate(%1,%2) rotate(%3 %4 %5)\" opacity=\"%6\">\n")
                    .arg(num(object.pos.x()), num(object.pos.y()), num(object.rotation),
                         num(bounds.center().x()), num(bounds.center().y()),
                         num(object.opacity));
+        if (!gradientMarkup.isEmpty())
+            svg += QStringLiteral("    ") + gradientMarkup + QStringLiteral("\n");
 
         if (object.shadow && !object.path.isEmpty() && object.hasFill) {
             const QColor shadow = object.shadowColor;
@@ -698,14 +833,16 @@ QString Document::toSvg() const
         }
 
         if (!object.path.isEmpty()) {
-            const QString fill = object.hasFill
-                                     ? object.fill.name(QColor::HexRgb)
-                                     : QStringLiteral("none");
+            const QString fill = gradientFill
+                                     ? QStringLiteral("url(#%1)").arg(gradientId)
+                                     : (object.hasFill
+                                            ? object.fill.name(QColor::HexRgb)
+                                            : QStringLiteral("none"));
             const QString stroke = object.hasStroke
                                        ? object.stroke.name(QColor::HexRgb)
                                        : QStringLiteral("none");
             QString opacityAttributes;
-            if (object.hasFill && object.fill.alpha() < 255)
+            if (object.hasFill && !gradientFill && object.fill.alpha() < 255)
                 opacityAttributes += QStringLiteral(" fill-opacity=\"%1\"")
                                          .arg(num(object.fill.alphaF()));
             if (object.hasStroke && object.stroke.alpha() < 255)
@@ -733,14 +870,17 @@ QString Document::toSvg() const
                                 : (object.textAlign == 2 ? object.textBox.width() : 0.0);
             for (int i = 0; i < lines.size(); ++i) {
                 QString textOpacity;
-                if (object.fill.alpha() < 255)
+                if (!gradientFill && object.fill.alpha() < 255)
                     textOpacity = QStringLiteral(" fill-opacity=\"%1\"")
                                       .arg(num(object.fill.alphaF()));
+                const QString textFill = gradientFill
+                                             ? QStringLiteral("url(#%1)").arg(gradientId)
+                                             : object.fill.name(QColor::HexRgb);
                 svg += QStringLiteral("    <text x=\"%1\" y=\"%2\" fill=\"%3\" "
                                       "font-family=\"%4\" font-size=\"%5\" "
                                       "font-weight=\"%6\" text-anchor=\"%7\"%8>%9</text>\n")
                            .arg(num(x), num(ascent + i * lineHeight),
-                                object.fill.name(QColor::HexRgb),
+                                textFill,
                                 xmlEscape(object.font.family()),
                                 num(object.font.pixelSize() > 0
                                         ? object.font.pixelSize()
@@ -818,6 +958,10 @@ Document Document::sample()
                                        QColor("#6b8cf0"), QColor(Qt::transparent), 0);
     cardObject.rotation = -6;
     cardObject.cornerRadius = 28;
+    cardObject.fill = QColor("#5b8def");
+    cardObject.fill2 = QColor("#8a5cf6");
+    cardObject.fillStyle = 1;
+    cardObject.gradientAngle = 45;
     document.objects.append(cardObject);
 
     QPainterPath circle;

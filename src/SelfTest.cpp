@@ -103,8 +103,18 @@ int SelfTest::run(const QString &directory)
         layered.layers = {QStringLiteral("Нижний"), QStringLiteral("Верхний")};
         layered.layerVisible = {false, true};
         layered.layerLocked = {true, false};
+        layered.groups = {{1, 0}};
+        layered.guidesX = {120.0, 300.0};
+        layered.guidesY = {80.0};
         VectorObject circle;
         circle.locked = true;
+        circle.group = 1;
+        circle.id = 7;
+        circle.masterId = 3;
+        circle.fillStyle = 1;
+        circle.fill2 = QColor("#ff8800");
+        circle.gradientAngle = 30;
+        circle.pivot = QPointF(0.25, 0.75);
         circle.type = ShapeType::Ellipse;
         circle.layer = 1;
         circle.path.addEllipse(QRectF(0, 0, 40, 40));
@@ -126,6 +136,22 @@ int SelfTest::run(const QString &directory)
         check(!layeredLoaded.objects.isEmpty()
                   && layeredLoaded.objects.first().locked,
               QStringLiteral("object lock preserved"));
+        check(layeredLoaded.groups == layered.groups
+                  && !layeredLoaded.objects.isEmpty()
+                  && layeredLoaded.objects.first().group == 1,
+              QStringLiteral("group preserved"));
+        check(layeredLoaded.guidesX == layered.guidesX
+                  && layeredLoaded.guidesY == layered.guidesY,
+              QStringLiteral("guides preserved"));
+        if (!layeredLoaded.objects.isEmpty()) {
+            const VectorObject loadedCircle = layeredLoaded.objects.first();
+            check(loadedCircle.id == 7 && loadedCircle.masterId == 3,
+                  QStringLiteral("clone links preserved"));
+            check(loadedCircle.fillStyle == 1
+                      && loadedCircle.fill2 == QColor("#ff8800")
+                      && qAbs(loadedCircle.pivot.x() - 0.25) < 0.01,
+                  QStringLiteral("gradient and pivot preserved"));
+        }
     }
 
     // --- Exports -------------------------------------------------------------
@@ -726,7 +752,186 @@ int SelfTest::run(const QString &directory)
                   && qAbs(rightDelta.y() - leftDelta.y()) < 0.5,
               QStringLiteral("multi-selection moves together"));
 
+        // Groups: selection spreads to the whole group and ungroup works.
+        view.setDocument(Document());
+        QList<VectorItem *> groupItems;
+        for (int i = 0; i < 4; ++i) {
+            VectorObject object;
+            object.type = ShapeType::Rectangle;
+            object.path.addRect(QRectF(0, 0, 50, 50));
+            object.pos = QPointF(80 + i * 80, 80);
+            groupItems.append(view.addVectorObject(object, false, false));
+        }
+        view.scene()->clearSelection();
+        groupItems.at(0)->setSelected(true);
+        groupItems.at(1)->setSelected(true);
+        view.groupSelection();
+        check(view.groups().size() == 1, QStringLiteral("group created"));
+        view.scene()->clearSelection();
+        groupItems.at(0)->setSelected(true);
+        QApplication::processEvents();
+        check(view.selectedVectorItems().size() == 2,
+              QStringLiteral("clicking a group selects all members"));
+
+        // Ctrl+click enters the group and selects a single member.
+        const QPoint insidePoint = view.mapFromScene(
+            groupItems.at(0)->mapToScene(groupItems.at(0)->localBounds().center()));
+        QMouseEvent ctrlClick(QEvent::MouseButtonPress, QPointF(insidePoint),
+                              view.viewport()->mapToGlobal(insidePoint),
+                              Qt::LeftButton, Qt::LeftButton, Qt::ControlModifier);
+        QApplication::sendEvent(view.viewport(), &ctrlClick);
+        QApplication::processEvents();
+        check(view.selectedVectorItems().size() == 1,
+              QStringLiteral("Ctrl+click selects inside a group"));
+
+        view.scene()->clearSelection();
+        groupItems.at(0)->setSelected(true);
+        QApplication::processEvents();
+        check(view.selectedVectorItems().size() == 2,
+              QStringLiteral("normal click reselects the whole group"));
+
+        const QPointF beforeRotate = groupItems.at(1)->pos();
+        view.rotateSelection(90);
+        check(QLineF(beforeRotate, groupItems.at(1)->pos()).length() > 1.0,
+              QStringLiteral("group rotates around its centre"));
+        view.ungroupSelection();
+        check(view.groups().isEmpty(), QStringLiteral("ungroup removes group"));
+
+        // Nested groups and ungroup-all.
+        view.scene()->clearSelection();
+        groupItems.at(0)->setSelected(true);
+        groupItems.at(1)->setSelected(true);
+        view.groupSelection();
+        view.scene()->clearSelection();
+        groupItems.at(2)->setSelected(true);
+        groupItems.at(3)->setSelected(true);
+        view.groupSelection();
+        view.selectAllObjects();
+        view.groupSelection();
+        check(view.groups().size() == 3, QStringLiteral("nested group created"));
+        view.ungroupAll();
+        check(view.groups().isEmpty(), QStringLiteral("ungroup all removes nesting"));
+
+        // Step and repeat.
+        view.setDocument(Document());
+        VectorObject repeatBase;
+        repeatBase.type = ShapeType::Rectangle;
+        repeatBase.path.addRect(QRectF(0, 0, 40, 40));
+        VectorItem *repeatItem = view.addVectorObject(repeatBase, false, false);
+        view.scene()->clearSelection();
+        repeatItem->setSelected(true);
+        const int beforeRepeat = view.vectorItems().size();
+        view.duplicateSelection(3, QPointF(50, 0));
+        check(view.vectorItems().size() == beforeRepeat + 3,
+              QStringLiteral("step and repeat creates copies"));
+
+        // Skew changes the path.
+        const int elementsBeforeSkew = repeatItem->object().path.elementCount();
+        view.skewSelection(20, 0);
+        check(repeatItem->object().path.elementCount() == elementsBeforeSkew,
+              QStringLiteral("skew keeps path complexity"));
+
+        // Clones follow their master.
+        view.setDocument(Document());
+        VectorObject masterObject;
+        masterObject.type = ShapeType::Rectangle;
+        masterObject.path.addRect(QRectF(0, 0, 60, 40));
+        masterObject.fill = QColor("#112233");
+        masterObject.pos = QPointF(100, 100);
+        VectorItem *masterItem = view.addVectorObject(masterObject, false, false);
+        view.scene()->clearSelection();
+        masterItem->setSelected(true);
+        view.cloneSelection();
+        check(view.vectorItems().size() == 2, QStringLiteral("clone created"));
+        VectorItem *cloneItem = view.vectorItems().last();
+        check(cloneItem->object().masterId == masterItem->object().id,
+              QStringLiteral("clone remembers its master"));
+        masterItem->setFillColor(QColor("#ff0000"));
+        view.syncClones();
+        check(cloneItem->object().fill == QColor("#ff0000"),
+              QStringLiteral("clone follows master fill"));
+
+        // Group scaling changes the whole selection.
+        view.setDocument(Document());
+        QList<VectorItem *> scaledItems;
+        for (int i = 0; i < 2; ++i) {
+            VectorObject object;
+            object.type = ShapeType::Rectangle;
+            object.path.addRect(QRectF(0, 0, 50, 50));
+            object.pos = QPointF(100 + i * 80, 100);
+            scaledItems.append(view.addVectorObject(object, false, false));
+        }
+        view.scene()->clearSelection();
+        scaledItems.at(0)->setSelected(true);
+        scaledItems.at(1)->setSelected(true);
+        const QRectF beforeScale = scaledItems.at(0)->mapRectToScene(
+                                       scaledItems.at(0)->localBounds())
+                                       .united(scaledItems.at(1)->mapRectToScene(
+                                           scaledItems.at(1)->localBounds()));
+        view.scaleSelectionTo(QRectF(beforeScale.topLeft(), QSizeF(300, 150)));
+        const QRectF afterScale = scaledItems.at(0)->mapRectToScene(
+                                      scaledItems.at(0)->localBounds())
+                                      .united(scaledItems.at(1)->mapRectToScene(
+                                          scaledItems.at(1)->localBounds()));
+        check(qAbs(afterScale.width() - 300.0) < 2.0,
+              QStringLiteral("group scaling resizes the selection"));
+
+        // Guides and snapping.
+        view.setDocument(Document());
+        view.setSnapEnabled(true);
+        view.endGuideDrag(Qt::Vertical, 333.0);
+        check(view.guidesX().contains(333.0), QStringLiteral("vertical guide added"));
+        view.beginGuideDrag(Qt::Horizontal);
+        view.updateGuideDrag(Qt::Horizontal, 222.0);
+        view.endGuideDrag(Qt::Horizontal, 222.0);
+        check(view.guidesY().contains(222.0), QStringLiteral("horizontal guide added"));
+
+        VectorObject snapObject;
+        snapObject.type = ShapeType::Rectangle;
+        snapObject.path.addRect(QRectF(0, 0, 50, 50));
+        snapObject.pos = QPointF(0, 100);
+        VectorItem *snapItem = view.addVectorObject(snapObject, false, false);
+        view.setActiveTool(Tool::Select);
+        view.scene()->clearSelection();
+        snapItem->setSelected(true);
+        const QPoint snapStart = view.mapFromScene(QPointF(25, 125));
+        drag(view, snapStart, snapStart + QPoint(3, 4));
+        check(qAbs(snapItem->pos().x()) < 0.6 && qAbs(snapItem->pos().y() - 100.0) < 0.6,
+              QStringLiteral("grid snapping aligns the object"));
+        const int guidesBeforeClear = view.guidesX().size() + view.guidesY().size();
+        view.clearGuides();
+        check(guidesBeforeClear > 0 && view.guidesX().isEmpty() && view.guidesY().isEmpty(),
+              QStringLiteral("guides cleared"));
+
+        // Gradient fill.
+        view.setDocument(Document());
+        VectorObject gradientObject;
+        gradientObject.type = ShapeType::Rectangle;
+        gradientObject.path.addRect(QRectF(0, 0, 100, 80));
+        VectorItem *gradientItem = view.addVectorObject(gradientObject, false, false);
+        gradientItem->setGradientFill(1, QColor("#ff0000"), 45);
+        check(gradientItem->object().fillStyle == 1
+                  && gradientItem->object().fill2 == QColor("#ff0000"),
+              QStringLiteral("gradient fill applied"));
+        {
+            Document gradientDoc;
+            gradientDoc.objects = view.objects();
+            check(gradientDoc.toSvg().contains(QStringLiteral("linearGradient")),
+                  QStringLiteral("gradient exported to SVG"));
+        }
+
+        // Pivot point.
+        gradientItem->setPivot(QPointF(0.0, 0.0));
+        const QPointF pivot = gradientItem->mapToScene(gradientItem->pivotPoint());
+        const QPointF topLeft =
+            gradientItem->mapToScene(gradientItem->localBounds().topLeft());
+        check(QLineF(pivot, topLeft).length() < 0.5,
+              QStringLiteral("rotation pivot can be moved"));
+
         // Object lock.
+        view.setDocument(Document());
+        leftItem = view.addVectorObject(left, false, false);
+        rightItem = view.addVectorObject(right, false, false);
         view.setItemLocked(leftItem, true);
         check(leftItem->isLocked(), QStringLiteral("object is locked"));
         check(!(leftItem->flags() & QGraphicsItem::ItemIsSelectable),

@@ -1,5 +1,7 @@
 #include "Ruler.h"
 
+#include <QCursor>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QtMath>
 
@@ -34,6 +36,58 @@ void Ruler::setView(CanvasView *view)
 {
     m_view = view;
     update();
+}
+
+qreal Ruler::sceneCoordinate() const
+{
+    if (!m_view)
+        return 0.0;
+    const QPoint viewportPos = m_view->viewport()->mapFromGlobal(QCursor::pos());
+    const QPointF scene = m_view->mapToScene(viewportPos);
+    return m_orientation == Qt::Vertical ? scene.x() : scene.y();
+}
+
+void Ruler::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() != Qt::LeftButton || !m_view) {
+        QWidget::mousePressEvent(event);
+        return;
+    }
+    m_dragging = true;
+    m_moved = false;
+    m_pressGlobal = QCursor::pos();
+    setCursor(m_orientation == Qt::Vertical ? Qt::SizeHorCursor
+                                            : Qt::SizeVerCursor);
+    m_view->beginGuideDrag(m_orientation);
+    m_view->updateGuideDrag(m_orientation, sceneCoordinate());
+    event->accept();
+}
+
+void Ruler::mouseMoveEvent(QMouseEvent *event)
+{
+    if (m_dragging && m_view) {
+        if ((QCursor::pos() - m_pressGlobal).manhattanLength() > 3)
+            m_moved = true;
+        m_view->updateGuideDrag(m_orientation, sceneCoordinate());
+        event->accept();
+        return;
+    }
+    QWidget::mouseMoveEvent(event);
+}
+
+void Ruler::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (m_dragging && m_view && event->button() == Qt::LeftButton) {
+        if (m_moved)
+            m_view->endGuideDrag(m_orientation, sceneCoordinate());
+        else
+            m_view->cancelGuideDrag();
+        m_dragging = false;
+        unsetCursor();
+        event->accept();
+        return;
+    }
+    QWidget::mouseReleaseEvent(event);
 }
 
 void Ruler::paintEvent(QPaintEvent *)

@@ -35,6 +35,7 @@ public:
     QList<QDockWidget *> docks() const { return m_docks; }
     QDockWidget *propertiesDock() const { return m_propertiesDock; }
     void refresh();
+    void openGradientDialog();
 
 signals:
     void beginEdit();
@@ -99,6 +100,7 @@ private:
     QSlider *m_alpha = nullptr;
     QLineEdit *m_hex = nullptr;
     QColor m_color = QColor(0x4f, 0x7c, 0xc0);
+    QColor m_gradientColor2 = QColor(0xff, 0xff, 0xff);
 
     QComboBox *m_alignTarget = nullptr;
 

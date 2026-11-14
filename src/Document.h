@@ -31,11 +31,18 @@ ShapeType shapeTypeFromId(const QString &id);
 struct VectorObject {
     ShapeType type = ShapeType::Rectangle;
     int layer = -1;              // -1 = active layer when added to the canvas
+    int group = 0;               // 0 = ungrouped, otherwise immediate group id
+    int id = 0;                  // stable object id, used by clones
+    int masterId = 0;            // 0 = ordinary object, otherwise clone source
     QPainterPath path;          // geometry in local coordinates
     QPointF pos;                // placement on the page
     qreal rotation = 0.0;       // degrees, around the local bounds centre
 
     QColor fill = QColor("#4f7cc0");
+    QColor fill2 = QColor("#ffffff");
+    int fillStyle = 0;           // 0 solid, 1 linear gradient, 2 radial gradient
+    qreal gradientAngle = 0.0;   // degrees, for linear gradients
+    QPointF pivot = QPointF(0.5, 0.5); // normalised rotation centre inside bounds
     QColor stroke = QColor("#1d2127");
     qreal strokeWidth = 2.0;
     bool hasFill = true;
@@ -63,6 +70,16 @@ struct VectorObject {
     QRectF localBounds() const;
 };
 
+struct VectorGroup {
+    int id = 0;
+    int parent = 0;
+
+    bool operator==(const VectorGroup &other) const
+    {
+        return id == other.id && parent == other.parent;
+    }
+};
+
 class Document
 {
 public:
@@ -70,6 +87,9 @@ public:
     QStringList layers = {QStringLiteral("Слой 1")};
     QVector<bool> layerVisible = {true};
     QVector<bool> layerLocked = {false};
+    QVector<VectorGroup> groups;
+    QVector<qreal> guidesX;
+    QVector<qreal> guidesY;
     QVector<VectorObject> objects;
 
     void clear();

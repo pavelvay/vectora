@@ -1,5 +1,6 @@
 #include "VectorItem.h"
 
+#include <QGraphicsScene>
 #include <QGraphicsSceneMouseEvent>
 #include <QPainter>
 #include <QPainterPathStroker>
@@ -108,6 +109,16 @@ void VectorItem::drawSelection(QPainter *painter) const
                       points.at(8));
     painter->setBrush(QColor(0x4f, 0x7c, 0xc0));
     painter->drawEllipse(points.at(8), 5.0, 5.0);
+
+    if (points.size() > 9) {
+        painter->setPen(QPen(QColor(0xff, 0xb3, 0x47), 1.2));
+        painter->setBrush(QColor(0x1b, 0x1d, 0x21));
+        painter->drawEllipse(points.at(9), 4.5, 4.5);
+        painter->drawLine(points.at(9) + QPointF(-7, 0),
+                          points.at(9) + QPointF(7, 0));
+        painter->drawLine(points.at(9) + QPointF(0, -7),
+                          points.at(9) + QPointF(0, 7));
+    }
     painter->restore();
 }
 
@@ -124,6 +135,7 @@ QVector<QPointF> VectorItem::handlePoints() const
         QPointF(b.center().x(), b.bottom()),
         QPointF(b.left(), b.center().y()),
         QPointF(b.center().x(), b.top() - kRotationOffset),
+        pivotPoint(),
     };
 }
 
@@ -175,7 +187,17 @@ void VectorItem::setText(const QString &text)
 void VectorItem::setFillColor(const QColor &color)
 {
     m_object.fill = color;
+    m_object.fillStyle = 0;
     m_object.hasFill = color.alpha() > 0;
+    update();
+}
+
+void VectorItem::setGradientFill(int style, const QColor &second, qreal angle)
+{
+    m_object.fillStyle = qBound(0, style, 2);
+    m_object.fill2 = second;
+    m_object.gradientAngle = angle;
+    m_object.hasFill = true;
     update();
 }
 
@@ -360,6 +382,28 @@ void VectorItem::setSpiralTurns(qreal turns)
     update();
 }
 
+bool VectorItem::applySkew(qreal angleX, qreal angleY)
+{
+    if (m_object.path.isEmpty() || m_object.type == ShapeType::Text)
+        return false;
+    const qreal ax = qBound(-75.0, angleX, 75.0) * M_PI / 180.0;
+    const qreal ay = qBound(-75.0, angleY, 75.0) * M_PI / 180.0;
+    if (qAbs(ax) < 0.0001 && qAbs(ay) < 0.0001)
+        return false;
+
+    const QRectF bounds = m_object.localBounds();
+    QTransform transform;
+    transform.translate(bounds.center().x(), bounds.center().y());
+    transform.shear(std::tan(ax), std::tan(ay));
+    transform.translate(-bounds.center().x(), -bounds.center().y());
+
+    prepareGeometryChange();
+    m_object.path = transform.map(m_object.path);
+    updateOrigin();
+    update();
+    return true;
+}
+
 void VectorItem::setLocked(bool locked)
 {
     m_object.locked = locked;
@@ -439,10 +483,24 @@ void VectorItem::setPathElements(const QVector<QPainterPath::Element> &elements)
     update();
 }
 
-void VectorItem::updateOrigin()
+QPointF VectorItem::pivotPoint() const
 {
     const QRectF bounds = m_object.localBounds();
-    setTransformOriginPoint(bounds.center());
+    return QPointF(bounds.left() + bounds.width() * m_object.pivot.x(),
+                   bounds.top() + bounds.height() * m_object.pivot.y());
+}
+
+void VectorItem::setPivot(const QPointF &normalised)
+{
+    m_object.pivot = QPointF(qBound(0.0, normalised.x(), 1.0),
+                             qBound(0.0, normalised.y(), 1.0));
+    updateOrigin();
+    update();
+}
+
+void VectorItem::updateOrigin()
+{
+    setTransformOriginPoint(pivotPoint());
     m_object.rotation = rotation();
 }
 
@@ -454,10 +512,19 @@ void VectorItem::mousePressEvent(QGraphicsSceneMouseEvent *event)
     }
 
     m_handle = isSelected() ? handleAt(event->pos()) : -1;
+    if (m_handle == 9 && !(event->modifiers() & Qt::ControlModifier))
+        m_handle = -1;
+
+    if (m_handle == 9) {
+        m_interaction = Interaction::Pivot;
+        emit editStarted();
+        event->accept();
+        return;
+    }
 
     if (m_handle == 8) {
         m_interaction = Interaction::Rotate;
-        m_rotateCenter = mapToScene(m_object.localBounds().center());
+        m_rotateCenter = mapToScene(pivotPoint());
         m_startRotation = rotation();
         m_startAngle = std::atan2(event->scenePos().y() - m_rotateCenter.y(),
                                   event->scenePos().x() - m_rotateCenter.x());
@@ -492,6 +559,20 @@ void VectorItem::mouseMoveEvent(QGraphicsSceneMouseEvent *event)
         return;
     }
 
+    if (m_interaction == Interaction::Pivot) {
+        setPivot(QPointF(
+            m_object.localBounds().width() > 0.5
+                ? (event->pos().x() - m_object.localBounds().left())
+                      / m_object.localBounds().width()
+                : 0.5,
+            m_object.localBounds().height() > 0.5
+                ? (event->pos().y() - m_object.localBounds().top())
+                      / m_object.localBounds().height()
+                : 0.5));
+        event->accept();
+        return;
+    }
+
     if (m_interaction == Interaction::Rotate) {
         const qreal angle = std::atan2(event->scenePos().y() - m_rotateCenter.y(),
                                        event->scenePos().x() - m_rotateCenter.x());
@@ -505,6 +586,65 @@ void VectorItem::mouseMoveEvent(QGraphicsSceneMouseEvent *event)
     }
 
     QGraphicsObject::mouseMoveEvent(event);
+    if (m_interaction == Interaction::Move && m_snapEnabled)
+        applySnapping();
+}
+
+void VectorItem::setSnapSettings(bool enabled, qreal step,
+                                 const QVector<qreal> &guidesX,
+                                 const QVector<qreal> &guidesY)
+{
+    m_snapEnabled = enabled;
+    m_snapStep = qMax<qreal>(1.0, step);
+    m_snapGuidesX = guidesX;
+    m_snapGuidesY = guidesY;
+}
+
+void VectorItem::applySnapping()
+{
+    const QRectF visual = mapRectToScene(m_object.localBounds());
+    constexpr qreal threshold = 6.0;
+
+    const auto bestOffset = [threshold](const QVector<qreal> &edges,
+                                        const QVector<qreal> &targets, qreal step) {
+        qreal best = 0.0;
+        qreal bestDistance = threshold + 1.0;
+        for (qreal edge : edges) {
+            const qreal grid = qRound(edge / step) * step;
+            const qreal gridDistance = qAbs(grid - edge);
+            if (gridDistance < bestDistance) {
+                bestDistance = gridDistance;
+                best = grid - edge;
+            }
+            for (qreal target : targets) {
+                const qreal distance = qAbs(target - edge);
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    best = target - edge;
+                }
+            }
+        }
+        return bestDistance <= threshold ? best : 0.0;
+    };
+
+    const QVector<qreal> xEdges = {visual.left(), visual.center().x(),
+                                   visual.right()};
+    const QVector<qreal> yEdges = {visual.top(), visual.center().y(),
+                                   visual.bottom()};
+    const qreal dx = bestOffset(xEdges, m_snapGuidesX, m_snapStep);
+    const qreal dy = bestOffset(yEdges, m_snapGuidesY, m_snapStep);
+    if (qFuzzyIsNull(dx) && qFuzzyIsNull(dy))
+        return;
+
+    moveBy(dx, dy);
+    if (scene()) {
+        for (QGraphicsItem *other : scene()->selectedItems()) {
+            if (other == this)
+                continue;
+            if (other->flags() & QGraphicsItem::ItemIsMovable)
+                other->moveBy(dx, dy);
+        }
+    }
 }
 
 void VectorItem::mouseReleaseEvent(QGraphicsSceneMouseEvent *event)

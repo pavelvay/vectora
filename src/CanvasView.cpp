@@ -53,7 +53,45 @@ CanvasView::CanvasView(QWidget *parent)
     setFocusPolicy(Qt::StrongFocus);
 
     connect(graphicsScene, &QGraphicsScene::selectionChanged, this, [this]() {
-        emit selectionChanged(selectedVectorItems().size());
+        if (selectedVectorItems().isEmpty())
+            m_insideGroup = false;
+        if (!m_syncingSelection && !m_insideGroup) {
+            QSet<int> roots;
+            for (VectorItem *item : selectedVectorItems()) {
+                if (item->groupIndex() > 0)
+                    roots.insert(topGroupOf(item->groupIndex()));
+            }
+            if (!roots.isEmpty()) {
+                m_syncingSelection = true;
+                for (VectorItem *item : vectorItems()) {
+                    if (item->groupIndex() > 0
+                        && roots.contains(topGroupOf(item->groupIndex())))
+                        item->setSelected(true);
+                }
+                m_syncingSelection = false;
+            }
+        }
+        const QList<VectorItem *> selected = selectedVectorItems();
+        const int count = selected.size();
+        if (count >= 2) {
+            if (count != m_lastSelectionCount || !m_groupPivotValid) {
+                QRectF bounds;
+                for (VectorItem *item : selected) {
+                    const QRectF visual = item->mapRectToScene(item->localBounds());
+                    bounds = bounds.isNull() ? visual : bounds.united(visual);
+                }
+                if (!bounds.isNull()) {
+                    m_groupPivot = bounds.center();
+                    m_groupPivotValid = true;
+                    m_groupPivotCustom = false;
+                }
+            }
+        } else {
+            m_groupPivotValid = false;
+            m_groupPivotCustom = false;
+        }
+        m_lastSelectionCount = count;
+        emit selectionChanged(count);
     });
 
     auto *tabShortcut = new QShortcut(QKeySequence(Qt::Key_Tab), this);
@@ -284,8 +322,47 @@ void CanvasView::drawBackground(QPainter *painter, const QRectF &rect)
 void CanvasView::drawForeground(QPainter *painter, const QRectF &rect)
 {
     Q_UNUSED(rect)
+    painter->save();
+    QPen guidePen(QColor(0x00, 0xb8, 0xd9), 0.0);
+    guidePen.setStyle(Qt::DashLine);
+    painter->setPen(guidePen);
+    const QRectF area = sceneRect();
+    if (m_guidesVisible) {
+        for (qreal x : m_guidesX)
+            painter->drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()));
+        for (qreal y : m_guidesY)
+            painter->drawLine(QPointF(area.left(), y), QPointF(area.right(), y));
+    }
+    if (m_guidePreview) {
+        QPen preview(QColor(0xff, 0xb3, 0x47), 0.0);
+        preview.setStyle(Qt::DashLine);
+        painter->setPen(preview);
+        if (m_guideOrientation == Qt::Vertical)
+            painter->drawLine(QPointF(m_guidePosition, area.top()),
+                              QPointF(m_guidePosition, area.bottom()));
+        else
+            painter->drawLine(QPointF(area.left(), m_guidePosition),
+                              QPointF(area.right(), m_guidePosition));
+    }
+    painter->restore();
+
     drawPreview(painter);
     drawNodeOverlay(painter);
+
+    if (m_tool == Tool::Select && m_groupPivotValid
+        && selectedVectorItems().size() > 1) {
+        const qreal s = transform().m11() > 0 ? transform().m11() : 1.0;
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        painter->setPen(QPen(QColor(0xff, 0xb3, 0x47), 1.4));
+        painter->setBrush(QColor(0x1b, 0x1d, 0x21));
+        painter->drawEllipse(m_groupPivot, 6.0 / s, 6.0 / s);
+        painter->drawLine(m_groupPivot + QPointF(-10.0 / s, 0),
+                          m_groupPivot + QPointF(10.0 / s, 0));
+        painter->drawLine(m_groupPivot + QPointF(0, -10.0 / s),
+                          m_groupPivot + QPointF(0, 10.0 / s));
+        painter->restore();
+    }
 }
 
 void CanvasView::drawPreview(QPainter *painter)
@@ -533,6 +610,12 @@ VectorItem *CanvasView::addVectorObject(const VectorObject &object, bool record,
     VectorObject copy = object;
     if (copy.layer < 0 || copy.layer >= m_layers.size())
         copy.layer = m_activeLayer;
+    if (copy.id <= 0)
+        copy.id = m_nextObjectId++;
+    else
+        m_nextObjectId = qMax(m_nextObjectId, copy.id + 1);
+    if (copy.masterId == copy.id)
+        copy.masterId = 0;
 
     if (record && copy.layer >= 0 && copy.layer < m_layers.size()
         && (m_layerLocked.value(copy.layer, false)
@@ -559,6 +642,7 @@ VectorItem *CanvasView::addVectorObject(const VectorObject &object, bool record,
 
     normalizeZOrder();
     applyLayerState(copy.layer);
+    updateSnapSettings();
 
     if (record)
         emit endEdit();
@@ -573,6 +657,14 @@ void CanvasView::setDocument(const Document &document)
     m_nextZ = 1.0;
     m_bezierActive = false;
     m_bezierNodes.clear();
+
+    m_nextObjectId = 1;
+    m_guidesX = document.guidesX;
+    m_guidesY = document.guidesY;
+    m_groups = document.groups;
+    m_nextGroupId = 1;
+    for (const VectorGroup &group : m_groups)
+        m_nextGroupId = qMax(m_nextGroupId, group.id + 1);
 
     m_layers = document.layers;
     if (m_layers.isEmpty())
@@ -595,6 +687,7 @@ void CanvasView::setDocument(const Document &document)
     normalizeZOrder();
     for (int i = 0; i < m_layers.size(); ++i)
         applyLayerState(i);
+    updateSnapSettings();
     emit selectionChanged(0);
     viewport()->update();
 }
@@ -616,10 +709,21 @@ void CanvasView::deleteSelectedObjects()
         emit statusHint(QStringLiteral("Нет выделенных объектов."));
         return;
     }
+    QSet<int> removedIds;
+    for (VectorItem *item : items)
+        removedIds.insert(item->object().id);
+
     emit beginEdit();
     for (VectorItem *item : items) {
         scene()->removeItem(item);
         delete item;
+    }
+    for (VectorItem *item : vectorItems()) {
+        if (removedIds.contains(item->object().masterId)) {
+            VectorObject object = item->object();
+            object.masterId = 0;
+            item->setObject(object);
+        }
     }
     normalizeZOrder();
     emit endEdit();
@@ -629,6 +733,7 @@ void CanvasView::deleteSelectedObjects()
 
 void CanvasView::selectAllObjects()
 {
+    m_insideGroup = false;
     const QList<VectorItem *> items = vectorItems();
     int selected = 0;
     for (VectorItem *item : items) {
@@ -1391,11 +1496,31 @@ void CanvasView::flipSelection(bool horizontal)
     if (selected.isEmpty())
         return;
 
+    QRectF bounds;
+    for (VectorItem *item : selected) {
+        bounds = bounds.isNull() ? item->sceneBoundingRect()
+                                 : bounds.united(item->sceneBoundingRect());
+    }
+    QPointF pivot = bounds.center();
+    if (selected.size() > 1 && m_groupPivotValid)
+        pivot = m_groupPivot;
+    else if (selected.size() == 1)
+        pivot = selected.first()->mapToScene(selected.first()->pivotPoint());
+
     emit beginEdit();
     int flipped = 0;
     for (VectorItem *item : selected) {
-        if (item->flip(horizontal))
-            ++flipped;
+        const QPointF oldCenter = item->sceneBoundingRect().center();
+        if (!item->flip(horizontal))
+            continue;
+        const QPointF newCenter = item->sceneBoundingRect().center();
+        QPointF target = oldCenter;
+        if (horizontal)
+            target.setX(pivot.x() * 2.0 - oldCenter.x());
+        else
+            target.setY(pivot.y() * 2.0 - oldCenter.y());
+        item->moveBy(target.x() - newCenter.x(), target.y() - newCenter.y());
+        ++flipped;
     }
     emit endEdit();
     emit statusHint(flipped > 0
@@ -1409,8 +1534,29 @@ void CanvasView::rotateSelection(qreal degrees)
     if (selected.isEmpty())
         return;
 
+    QRectF bounds;
+    for (VectorItem *item : selected) {
+        bounds = bounds.isNull() ? item->sceneBoundingRect()
+                                 : bounds.united(item->sceneBoundingRect());
+    }
+    QPointF pivot = bounds.center();
+    if (selected.size() > 1 && m_groupPivotValid)
+        pivot = m_groupPivot;
+    else if (selected.size() == 1)
+        pivot = selected.first()->mapToScene(selected.first()->pivotPoint());
+    const qreal radians = degrees * M_PI / 180.0;
+
     emit beginEdit();
     for (VectorItem *item : selected) {
+        const QPointF center = item->sceneBoundingRect().center();
+        const QPointF shifted = center - pivot;
+        const QPointF rotated(shifted.x() * std::cos(radians)
+                                  - shifted.y() * std::sin(radians),
+                              shifted.x() * std::sin(radians)
+                                  + shifted.y() * std::cos(radians));
+        const QPointF target = pivot + rotated;
+        item->moveBy(target.x() - center.x(), target.y() - center.y());
+
         qreal angle = item->object().rotation + degrees;
         while (angle > 360.0)
             angle -= 360.0;
@@ -1419,6 +1565,75 @@ void CanvasView::rotateSelection(qreal degrees)
         item->setRotationAngle(angle);
     }
     emit endEdit();
+}
+
+void CanvasView::beginGuideDrag(Qt::Orientation orientation)
+{
+    m_guidePreview = true;
+    m_guideOrientation = orientation;
+    m_guidePosition = 0.0;
+}
+
+void CanvasView::updateGuideDrag(Qt::Orientation orientation, qreal scenePos)
+{
+    m_guidePreview = true;
+    m_guideOrientation = orientation;
+    m_guidePosition = scenePos;
+    viewport()->update();
+}
+
+void CanvasView::endGuideDrag(Qt::Orientation orientation, qreal scenePos)
+{
+    m_guidePreview = false;
+    emit beginEdit();
+    if (orientation == Qt::Vertical) {
+        m_guidesX.append(scenePos);
+        std::sort(m_guidesX.begin(), m_guidesX.end());
+    } else {
+        m_guidesY.append(scenePos);
+        std::sort(m_guidesY.begin(), m_guidesY.end());
+    }
+    updateSnapSettings();
+    emit endEdit();
+    viewport()->update();
+    emit statusHint(QStringLiteral("Направляющая добавлена."));
+}
+
+void CanvasView::setGuidesVisible(bool visible)
+{
+    m_guidesVisible = visible;
+    viewport()->update();
+}
+
+void CanvasView::cancelGuideDrag()
+{
+    m_guidePreview = false;
+    viewport()->update();
+}
+
+void CanvasView::clearGuides()
+{
+    if (m_guidesX.isEmpty() && m_guidesY.isEmpty())
+        return;
+    emit beginEdit();
+    m_guidesX.clear();
+    m_guidesY.clear();
+    updateSnapSettings();
+    emit endEdit();
+    viewport()->update();
+    emit statusHint(QStringLiteral("Направляющие удалены."));
+}
+
+void CanvasView::setSnapEnabled(bool enabled)
+{
+    m_snapEnabled = enabled;
+    updateSnapSettings();
+}
+
+void CanvasView::updateSnapSettings()
+{
+    for (VectorItem *item : vectorItems())
+        item->setSnapSettings(m_snapEnabled, 20.0, m_guidesX, m_guidesY);
 }
 
 void CanvasView::setItemLocked(VectorItem *item, bool locked)
@@ -1430,6 +1645,314 @@ void CanvasView::setItemLocked(VectorItem *item, bool locked)
     emit endEdit();
     emit statusHint(locked ? QStringLiteral("Объект заблокирован.")
                            : QStringLiteral("Объект разблокирован."));
+}
+
+int CanvasView::topGroupOf(int group) const
+{
+    int current = group;
+    for (int guard = 0; guard < 100 && current > 0; ++guard) {
+        int parent = 0;
+        for (const VectorGroup &entry : m_groups) {
+            if (entry.id == current) {
+                parent = entry.parent;
+                break;
+            }
+        }
+        if (parent <= 0)
+            return current;
+        current = parent;
+    }
+    return current;
+}
+
+QList<VectorItem *> CanvasView::itemsInGroup(int topGroup) const
+{
+    QList<VectorItem *> result;
+    for (VectorItem *item : vectorItems()) {
+        if (item->groupIndex() > 0
+            && topGroupOf(item->groupIndex()) == topGroup)
+            result.append(item);
+    }
+    return result;
+}
+
+void CanvasView::syncClones()
+{
+    QHash<int, VectorItem *> byId;
+    for (VectorItem *item : vectorItems())
+        byId.insert(item->object().id, item);
+
+    const QList<VectorItem *> items = vectorItems();
+    for (VectorItem *clone : items) {
+        const VectorObject cloneObject = clone->object();
+        if (cloneObject.masterId <= 0)
+            continue;
+        VectorItem *master = byId.value(cloneObject.masterId, nullptr);
+        if (!master)
+            continue;
+
+        VectorObject updated = master->object();
+        updated.id = cloneObject.id;
+        updated.masterId = cloneObject.masterId;
+        updated.pos = cloneObject.pos;
+        updated.layer = cloneObject.layer;
+        updated.group = cloneObject.group;
+        updated.locked = cloneObject.locked;
+        clone->setObject(updated);
+    }
+}
+
+void CanvasView::scaleSelectionTo(const QRectF &targetBounds, qreal opacity)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.size() < 2 || targetBounds.width() < 1.0
+        || targetBounds.height() < 1.0) {
+        return;
+    }
+
+    QRectF sourceBounds;
+    for (VectorItem *item : selected) {
+        const QRectF visual = item->mapRectToScene(item->localBounds());
+        sourceBounds = sourceBounds.isNull() ? visual : sourceBounds.united(visual);
+    }
+    if (sourceBounds.width() < 0.5 || sourceBounds.height() < 0.5)
+        return;
+
+    const qreal sx = targetBounds.width() / sourceBounds.width();
+    const qreal sy = targetBounds.height() / sourceBounds.height();
+
+    emit beginEdit();
+    for (VectorItem *item : selected) {
+        const QRectF oldVisual = item->mapRectToScene(item->localBounds());
+        const QPointF oldCenter = oldVisual.center();
+        const QSizeF oldSize = item->object().localBounds().size();
+        item->setFrameSize(QSizeF(qMax<qreal>(1.0, oldSize.width() * sx),
+                                  qMax<qreal>(1.0, oldSize.height() * sy)));
+        const QPointF newCenter = item->mapToScene(item->object().localBounds().center());
+        const QPointF wanted(targetBounds.left()
+                                 + (oldCenter.x() - sourceBounds.left()) * sx,
+                             targetBounds.top()
+                                 + (oldCenter.y() - sourceBounds.top()) * sy);
+        item->moveBy(wanted.x() - newCenter.x(), wanted.y() - newCenter.y());
+        if (opacity >= 0.0)
+            item->setObjectOpacity(opacity);
+    }
+    emit endEdit();
+    emit statusHint(QStringLiteral("Размер группы изменён."));
+}
+
+void CanvasView::duplicateSelection(int count, const QPointF &offset)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty() || count < 1)
+        return;
+
+    QVector<VectorObject> originals;
+    for (VectorItem *item : selected)
+        originals.append(item->object());
+
+    emit beginEdit();
+    scene()->clearSelection();
+    for (int step = 1; step <= count; ++step) {
+        for (VectorObject object : originals) {
+            object.pos += offset * qreal(step);
+            object.id = 0;
+            object.masterId = 0;
+            object.group = 0;
+            object.locked = false;
+            VectorItem *copy = addVectorObject(object, false, false);
+            if (copy)
+                copy->setSelected(true);
+        }
+    }
+    emit endEdit();
+    emit statusHint(QStringLiteral("Создано копий: %1").arg(count * originals.size()));
+}
+
+void CanvasView::cloneSelection(const QPointF &offset)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty()) {
+        emit statusHint(QStringLiteral("Выберите объект для клонирования."));
+        return;
+    }
+
+    QVector<VectorObject> originals;
+    for (VectorItem *item : selected)
+        originals.append(item->object());
+
+    emit beginEdit();
+    scene()->clearSelection();
+    for (VectorObject object : originals) {
+        object.pos += offset;
+        object.masterId = object.id;
+        object.id = 0;
+        object.group = 0;
+        object.locked = false;
+        VectorItem *clone = addVectorObject(object, false, false);
+        if (clone)
+            clone->setSelected(true);
+    }
+    emit endEdit();
+    syncClones();
+    emit statusHint(QStringLiteral("Создано клонов: %1").arg(originals.size()));
+}
+
+void CanvasView::skewSelection(qreal angleX, qreal angleY)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty())
+        return;
+
+    QRectF bounds;
+    for (VectorItem *item : selected) {
+        bounds = bounds.isNull() ? item->sceneBoundingRect()
+                                 : bounds.united(item->sceneBoundingRect());
+    }
+    const QPointF pivot = bounds.center();
+    const qreal ax = std::tan(qBound(-75.0, angleX, 75.0) * M_PI / 180.0);
+    const qreal ay = std::tan(qBound(-75.0, angleY, 75.0) * M_PI / 180.0);
+
+    emit beginEdit();
+    int skewed = 0;
+    for (VectorItem *item : selected) {
+        if (!item->applySkew(angleX, angleY))
+            continue;
+        ++skewed;
+        if (selected.size() > 1) {
+            const QPointF pos = item->pos();
+            item->moveBy((pos.y() - pivot.y()) * ax, (pos.x() - pivot.x()) * ay);
+        }
+    }
+    emit endEdit();
+    emit statusHint(skewed > 0
+                        ? QStringLiteral("Наклонено объектов: %1").arg(skewed)
+                        : QStringLiteral("Текст пока не наклоняется."));
+}
+
+void CanvasView::groupSelection()
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.size() < 2) {
+        emit statusHint(QStringLiteral("Для группировки нужно минимум два объекта."));
+        return;
+    }
+
+    emit beginEdit();
+    const int groupId = m_nextGroupId++;
+    m_groups.append({groupId, 0});
+
+    QSet<int> attached;
+    for (VectorItem *item : selected) {
+        const int current = item->groupIndex();
+        if (current == 0) {
+            item->setGroupIndex(groupId);
+            continue;
+        }
+        const int top = topGroupOf(current);
+        if (attached.contains(top))
+            continue;
+        for (VectorGroup &entry : m_groups) {
+            if (entry.id == top) {
+                entry.parent = groupId;
+                break;
+            }
+        }
+        attached.insert(top);
+    }
+    emit endEdit();
+    emit statusHint(QStringLiteral("Создана группа из %1 объектов.").arg(selected.size()));
+}
+
+void CanvasView::ungroupSelection()
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty())
+        return;
+
+    QSet<int> tops;
+    for (VectorItem *item : selected) {
+        if (item->groupIndex() > 0)
+            tops.insert(topGroupOf(item->groupIndex()));
+    }
+    if (tops.isEmpty()) {
+        emit statusHint(QStringLiteral("Выделенные объекты не входят в группу."));
+        return;
+    }
+
+    emit beginEdit();
+    for (int top : tops) {
+        int parent = 0;
+        for (const VectorGroup &entry : m_groups) {
+            if (entry.id == top) {
+                parent = entry.parent;
+                break;
+            }
+        }
+        for (VectorGroup &entry : m_groups) {
+            if (entry.parent == top)
+                entry.parent = parent;
+        }
+        for (VectorItem *item : vectorItems()) {
+            if (item->groupIndex() == top)
+                item->setGroupIndex(parent);
+        }
+        for (int i = m_groups.size() - 1; i >= 0; --i) {
+            if (m_groups.at(i).id == top)
+                m_groups.removeAt(i);
+        }
+    }
+    emit endEdit();
+    emit statusHint(QStringLiteral("Группа расформирована."));
+}
+
+void CanvasView::ungroupAll()
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty())
+        return;
+
+    QSet<int> tops;
+    for (VectorItem *item : selected) {
+        if (item->groupIndex() > 0)
+            tops.insert(topGroupOf(item->groupIndex()));
+    }
+    if (tops.isEmpty()) {
+        emit statusHint(QStringLiteral("Выделенные объекты не входят в группу."));
+        return;
+    }
+
+    auto isDescendant = [this](int group, int root) {
+        int current = group;
+        for (int guard = 0; guard < 100 && current > 0; ++guard) {
+            if (current == root)
+                return true;
+            int parent = 0;
+            for (const VectorGroup &entry : m_groups) {
+                if (entry.id == current) {
+                    parent = entry.parent;
+                    break;
+                }
+            }
+            current = parent;
+        }
+        return false;
+    };
+
+    emit beginEdit();
+    for (int root : tops) {
+        for (VectorItem *item : vectorItems()) {
+            if (item->groupIndex() > 0
+                && isDescendant(item->groupIndex(), root))
+                item->setGroupIndex(0);
+        }
+        for (int i = m_groups.size() - 1; i >= 0; --i) {
+            if (isDescendant(m_groups.at(i).id, root))
+                m_groups.removeAt(i);
+        }
+    }
+    emit endEdit();
+    emit statusHint(QStringLiteral("Все вложенные группы расформированы."));
 }
 
 void CanvasView::blendSelected(int steps)
@@ -1573,6 +2096,39 @@ void CanvasView::mousePressEvent(QMouseEvent *event)
         return;
     }
 
+    if (m_tool == Tool::Select && m_groupPivotValid
+        && selectedVectorItems().size() > 1
+        && (event->modifiers() & Qt::ControlModifier)) {
+        const qreal tolerance = 10.0 / (m_zoom > 0.0 ? m_zoom : 1.0);
+        if (QLineF(scenePos, m_groupPivot).length() <= tolerance) {
+            m_groupPivotDragging = true;
+            m_groupPivotCustom = true;
+            event->accept();
+            return;
+        }
+    }
+
+    if (m_tool == Tool::Select && !m_groupPivotDragging
+        && (event->modifiers() & Qt::ControlModifier)
+        && !(event->modifiers() & Qt::AltModifier)) {
+        VectorItem *hit = itemAtScene(scenePos);
+        if (hit && hit->groupIndex() > 0 && hit->isVisible()
+            && (hit->flags() & QGraphicsItem::ItemIsSelectable)) {
+            m_insideGroup = true;
+            m_syncingSelection = true;
+            scene()->clearSelection();
+            hit->setSelected(true);
+            m_syncingSelection = false;
+            emit selectionChanged(1);
+            emit statusHint(QStringLiteral("Ctrl+клик: выбран объект внутри группы."));
+            event->accept();
+            return;
+        }
+    }
+
+    if (m_tool == Tool::Select && !(event->modifiers() & Qt::ControlModifier))
+        m_insideGroup = false;
+
     if (m_tool == Tool::Select && (event->modifiers() & Qt::AltModifier)) {
         QList<VectorItem *> candidates;
         for (QGraphicsItem *graphicsItem : scene()->items(scenePos)) {
@@ -1704,6 +2260,26 @@ void CanvasView::mouseMoveEvent(QMouseEvent *event)
         return;
     }
 
+    if (m_groupPivotDragging) {
+        m_groupPivot = scenePos;
+        viewport()->update();
+        emit scenePosChanged(scenePos);
+        return;
+    }
+
+    if (m_tool == Tool::Select && m_groupPivotValid && !m_groupPivotCustom
+        && selectedVectorItems().size() > 1
+        && (event->buttons() & Qt::LeftButton)) {
+        QRectF bounds;
+        for (VectorItem *item : selectedVectorItems()) {
+            const QRectF visual = item->mapRectToScene(item->localBounds());
+            bounds = bounds.isNull() ? visual : bounds.united(visual);
+        }
+        if (!bounds.isNull())
+            m_groupPivot = bounds.center();
+        viewport()->update();
+    }
+
     if (m_nodeDragging && m_nodeItem && m_nodeElement >= 0) {
         const QPointF local = m_nodeItem->mapFromScene(scenePos);
         QVector<QPainterPath::Element> elements = m_nodeItem->pathElements();
@@ -1789,6 +2365,12 @@ void CanvasView::mouseReleaseEvent(QMouseEvent *event)
     if (m_panning) {
         m_panning = false;
         updateCursor();
+        event->accept();
+        return;
+    }
+
+    if (m_groupPivotDragging) {
+        m_groupPivotDragging = false;
         event->accept();
         return;
     }

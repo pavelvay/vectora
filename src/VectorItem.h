@@ -24,6 +24,7 @@ public:
     void setObject(const VectorObject &object);
     void setText(const QString &text);
     void setFillColor(const QColor &color);
+    void setGradientFill(int style, const QColor &second, qreal angle);
     void setStrokeColor(const QColor &color);
     void setStrokeWidth(qreal width);
     void setObjectOpacity(qreal opacity);
@@ -42,6 +43,11 @@ public:
     void setSpiralTurns(qreal turns);
     bool flip(bool horizontal);
     void setLocked(bool locked);
+    bool applySkew(qreal angleX, qreal angleY);
+    void setPivot(const QPointF &normalised);
+    QPointF pivotPoint() const;
+    void setSnapSettings(bool enabled, qreal step, const QVector<qreal> &guidesX,
+                         const QVector<qreal> &guidesY);
     bool isLocked() const { return m_object.locked; }
     int shapeTypeValue() const { return int(m_object.type); }
     void setPath(const QPainterPath &path);
@@ -49,6 +55,8 @@ public:
     QVector<QPainterPath::Element> pathElements() const;
     void setPathElements(const QVector<QPainterPath::Element> &elements);
     void setLayerIndex(int layer) { m_object.layer = layer; }
+    void setGroupIndex(int group) { m_object.group = group; }
+    int groupIndex() const { return m_object.group; }
     QRectF localBounds() const { return m_object.localBounds(); }
     bool hasPath() const { return !m_object.path.isEmpty(); }
 
@@ -64,15 +72,20 @@ protected:
     void mouseDoubleClickEvent(QGraphicsSceneMouseEvent *event) override;
 
 private:
-    enum class Interaction { None, Move, Resize, Rotate };
+    enum class Interaction { None, Move, Resize, Rotate, Pivot };
 
     int handleAt(const QPointF &pos) const;
     QVector<QPointF> handlePoints() const;
     void applyResize(const QPointF &pos, bool keepAspect);
     void updateOrigin();
     void drawSelection(QPainter *painter) const;
+    void applySnapping();
 
     VectorObject m_object;
+    bool m_snapEnabled = false;
+    qreal m_snapStep = 20.0;
+    QVector<qreal> m_snapGuidesX;
+    QVector<qreal> m_snapGuidesY;
     Interaction m_interaction = Interaction::None;
     int m_handle = -1;
     QPointF m_pressScenePos;

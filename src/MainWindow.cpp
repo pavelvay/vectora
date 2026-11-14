@@ -10,6 +10,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
@@ -48,6 +49,7 @@
 #include <QSizePolicy>
 #include <QSlider>
 #include <QStackedWidget>
+#include <QSpinBox>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTextBrowser>
@@ -274,6 +276,11 @@ void MainWindow::createActions()
                QKeySequence::Paste, QStringLiteral("Вставить объекты из буфера"), false);
     makeAction(QStringLiteral("duplicate"), QStringLiteral("Дублировать"),
                QKeySequence(QStringLiteral("Ctrl+D")), QStringLiteral("Создать копию выделения"), false);
+    makeAction(QStringLiteral("step-repeat"), QStringLiteral("Шаг и повтор…"),
+               QKeySequence(QStringLiteral("Ctrl+Shift+D")),
+               QStringLiteral("Создать несколько копий со смещением"), false);
+    makeAction(QStringLiteral("clone"), QStringLiteral("Клонировать"),
+               QKeySequence(), QStringLiteral("Создать связанный клон объекта"), false);
     makeAction(QStringLiteral("delete"), QStringLiteral("Удалить"),
                QKeySequence::Delete, QStringLiteral("Удалить выделенные объекты"), false);
     makeAction(QStringLiteral("select-all"), QStringLiteral("Выделить всё"),
@@ -296,6 +303,8 @@ void MainWindow::createActions()
                QKeySequence(QStringLiteral("Ctrl+R")), QStringLiteral("Показать или скрыть линейки"));
     makeAction(QStringLiteral("guides"), QStringLiteral("Направляющие"),
                QKeySequence(), QStringLiteral("Показать или скрыть направляющие"));
+    makeAction(QStringLiteral("clear-guides"), QStringLiteral("Удалить направляющие"),
+               QKeySequence(), QStringLiteral("Убрать все направляющие с холста"), false);
     makeAction(QStringLiteral("grid"), QStringLiteral("Сетка"),
                QKeySequence(QStringLiteral("Ctrl+Alt+G")), QStringLiteral("Показать или скрыть сетку"));
     makeAction(QStringLiteral("snap"), QStringLiteral("Привязка"),
@@ -305,9 +314,11 @@ void MainWindow::createActions()
 
     // Object
     makeAction(QStringLiteral("group"), QStringLiteral("Сгруппировать"),
-               QKeySequence(QStringLiteral("Ctrl+G")), QStringLiteral("Сгруппировать выделенные объекты"));
+               QKeySequence(QStringLiteral("Ctrl+G")), QStringLiteral("Сгруппировать выделенные объекты"), false);
     makeAction(QStringLiteral("ungroup"), QStringLiteral("Разгруппировать"),
-               QKeySequence(QStringLiteral("Ctrl+U")), QStringLiteral("Разгруппировать выделение"));
+               QKeySequence(QStringLiteral("Ctrl+U")), QStringLiteral("Разгруппировать выделение"), false);
+    makeAction(QStringLiteral("ungroup-all"), QStringLiteral("Разгруппировать всё"),
+               QKeySequence(QStringLiteral("Ctrl+Shift+U")), QStringLiteral("Расформировать все вложенные группы"), false);
     makeAction(QStringLiteral("order-front"), QStringLiteral("На передний план"),
                QKeySequence(QStringLiteral("Ctrl+Home")), QStringLiteral("Поднять объект на передний план"), false);
     makeAction(QStringLiteral("order-forward"), QStringLiteral("На уровень выше"),
@@ -334,6 +345,8 @@ void MainWindow::createActions()
                QKeySequence(), QStringLiteral("Отразить объект сверху вниз"), false);
     makeAction(QStringLiteral("rotate"), QStringLiteral("Повернуть на 90°"),
                QKeySequence(), QStringLiteral("Повернуть объект на 90 градусов"), false);
+    makeAction(QStringLiteral("skew"), QStringLiteral("Наклонить…"),
+               QKeySequence(), QStringLiteral("Наклонить объект по горизонтали и вертикали"), false);
     makeAction(QStringLiteral("convert-curves"), QStringLiteral("Преобразовать в кривые"),
                QKeySequence(QStringLiteral("Ctrl+Q")), QStringLiteral("Преобразовать объект в редактируемые кривые"));
     makeAction(QStringLiteral("lock"), QStringLiteral("Заблокировать"),
@@ -396,6 +409,93 @@ void MainWindow::createActions()
             &MainWindow::deleteSelection);
     connect(action(QStringLiteral("zoom-selection")), &QAction::triggered, this,
             [this]() { m_view->zoomToSelection(); });
+    connect(action(QStringLiteral("duplicate")), &QAction::triggered, this, [this]() {
+        const QList<VectorItem *> selected = m_view->selectedVectorItems();
+        if (selected.isEmpty()) {
+            statusBar()->showMessage(QStringLiteral("Нет объектов для дублирования."), 3000);
+            return;
+        }
+        beginEdit();
+        m_view->scene()->clearSelection();
+        for (VectorItem *item : selected) {
+            VectorObject copy = item->object();
+            copy.pos += QPointF(16.0, 16.0);
+            copy.group = 0;
+            copy.id = 0;
+            copy.masterId = 0;
+            VectorItem *added = m_view->addVectorObject(copy, false, false);
+            if (added)
+                added->setSelected(true);
+        }
+        endEdit();
+    });
+    connect(action(QStringLiteral("step-repeat")), &QAction::triggered, this, [this]() {
+        if (m_view->selectedVectorItems().isEmpty()) {
+            statusBar()->showMessage(QStringLiteral("Выберите объекты."), 3000);
+            return;
+        }
+        QDialog dialog(this);
+        dialog.setWindowTitle(QStringLiteral("Шаг и повтор"));
+        auto *form = new QFormLayout(&dialog);
+        auto *count = new QSpinBox(&dialog);
+        count->setRange(1, 200);
+        count->setValue(5);
+        auto *dx = new QDoubleSpinBox(&dialog);
+        dx->setRange(-2000, 2000);
+        dx->setValue(20);
+        dx->setSuffix(QStringLiteral(" px"));
+        auto *dy = new QDoubleSpinBox(&dialog);
+        dy->setRange(-2000, 2000);
+        dy->setValue(20);
+        dy->setSuffix(QStringLiteral(" px"));
+        form->addRow(QStringLiteral("Количество копий"), count);
+        form->addRow(QStringLiteral("Смещение X"), dx);
+        form->addRow(QStringLiteral("Смещение Y"), dy);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok
+                                                 | QDialogButtonBox::Cancel,
+                                             &dialog);
+        form->addRow(buttons);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() == QDialog::Accepted)
+            m_view->duplicateSelection(count->value(),
+                                       QPointF(dx->value(), dy->value()));
+    });
+    connect(action(QStringLiteral("clone")), &QAction::triggered, this,
+            [this]() { m_view->cloneSelection(); });
+    connect(action(QStringLiteral("skew")), &QAction::triggered, this, [this]() {
+        if (m_view->selectedVectorItems().isEmpty()) {
+            statusBar()->showMessage(QStringLiteral("Выберите объекты."), 3000);
+            return;
+        }
+        QDialog dialog(this);
+        dialog.setWindowTitle(QStringLiteral("Наклонить"));
+        auto *form = new QFormLayout(&dialog);
+        auto *ax = new QDoubleSpinBox(&dialog);
+        ax->setRange(-75, 75);
+        ax->setValue(15);
+        ax->setSuffix(QStringLiteral(" °"));
+        auto *ay = new QDoubleSpinBox(&dialog);
+        ay->setRange(-75, 75);
+        ay->setValue(0);
+        ay->setSuffix(QStringLiteral(" °"));
+        form->addRow(QStringLiteral("По горизонтали"), ax);
+        form->addRow(QStringLiteral("По вертикали"), ay);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok
+                                                 | QDialogButtonBox::Cancel,
+                                             &dialog);
+        form->addRow(buttons);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() == QDialog::Accepted)
+            m_view->skewSelection(ax->value(), ay->value());
+    });
+    connect(action(QStringLiteral("group")), &QAction::triggered, this,
+            [this]() { m_view->groupSelection(); });
+    connect(action(QStringLiteral("ungroup")), &QAction::triggered, this,
+            [this]() { m_view->ungroupSelection(); });
+    connect(action(QStringLiteral("ungroup-all")), &QAction::triggered, this,
+            [this]() { m_view->ungroupAll(); });
     connect(action(QStringLiteral("order-front")), &QAction::triggered, this,
             [this]() { m_view->bringToFront(); refreshQuickTransform(); });
     connect(action(QStringLiteral("order-forward")), &QAction::triggered, this,
@@ -422,21 +522,6 @@ void MainWindow::createActions()
             &MainWindow::cutSelection);
     connect(action(QStringLiteral("paste")), &QAction::triggered, this,
             &MainWindow::pasteClipboard);
-    connect(action(QStringLiteral("duplicate")), &QAction::triggered, this, [this]() {
-        const QList<VectorItem *> selected = m_view->selectedVectorItems();
-        if (selected.isEmpty()) {
-            statusBar()->showMessage(QStringLiteral("Нет объектов для дублирования."), 3000);
-            return;
-        }
-        beginEdit();
-        for (VectorItem *item : selected) {
-            VectorObject copy = item->object();
-            copy.pos += QPointF(16.0, 16.0);
-            VectorItem *added = m_view->addVectorObject(copy, false, false);
-            added->setSelected(true);
-        }
-        endEdit();
-    });
     connect(action(QStringLiteral("shortcuts")), &QAction::triggered, this,
             &MainWindow::showShortcuts);
     connect(action(QStringLiteral("about")), &QAction::triggered, this,
@@ -470,10 +555,25 @@ void MainWindow::createActions()
     auto *snapAction = action(QStringLiteral("snap"));
     snapAction->setCheckable(true);
     snapAction->setChecked(true);
+    connect(snapAction, &QAction::toggled, this, [this](bool on) {
+        if (!m_view)
+            return;
+        m_view->setSnapEnabled(on);
+        statusBar()->showMessage(on ? QStringLiteral("Привязка к сетке и направляющим включена")
+                                    : QStringLiteral("Привязка выключена"), 3000);
+    });
 
     auto *guidesAction = action(QStringLiteral("guides"));
     guidesAction->setCheckable(true);
     guidesAction->setChecked(true);
+    connect(guidesAction, &QAction::toggled, this, [this](bool on) {
+        if (!m_view)
+            return;
+        m_view->setGuidesVisible(on);
+    });
+
+    connect(action(QStringLiteral("clear-guides")), &QAction::triggered, this,
+            [this]() { m_view->clearGuides(); });
 
     fullscreen->setCheckable(true);
     connect(fullscreen, &QAction::toggled, this, [this](bool on) {
@@ -515,6 +615,8 @@ void MainWindow::createMenus()
     editMenu->addAction(action(QStringLiteral("copy")));
     editMenu->addAction(action(QStringLiteral("paste")));
     editMenu->addAction(action(QStringLiteral("duplicate")));
+    editMenu->addAction(action(QStringLiteral("step-repeat")));
+    editMenu->addAction(action(QStringLiteral("clone")));
     editMenu->addAction(action(QStringLiteral("delete")));
     editMenu->addSeparator();
     editMenu->addAction(action(QStringLiteral("select-all")));
@@ -530,6 +632,7 @@ void MainWindow::createMenus()
     viewMenu->addSeparator();
     viewMenu->addAction(action(QStringLiteral("rulers")));
     viewMenu->addAction(action(QStringLiteral("guides")));
+    viewMenu->addAction(action(QStringLiteral("clear-guides")));
     viewMenu->addAction(action(QStringLiteral("grid")));
     viewMenu->addAction(action(QStringLiteral("snap")));
     viewMenu->addSeparator();
@@ -538,6 +641,7 @@ void MainWindow::createMenus()
     auto *objectMenu = menuBar()->addMenu(QStringLiteral("Объект"));
     objectMenu->addAction(action(QStringLiteral("group")));
     objectMenu->addAction(action(QStringLiteral("ungroup")));
+    objectMenu->addAction(action(QStringLiteral("ungroup-all")));
     objectMenu->addSeparator();
     objectMenu->addAction(action(QStringLiteral("order-front")));
     objectMenu->addAction(action(QStringLiteral("order-forward")));
@@ -554,6 +658,7 @@ void MainWindow::createMenus()
     objectMenu->addAction(action(QStringLiteral("flip-h")));
     objectMenu->addAction(action(QStringLiteral("flip-v")));
     objectMenu->addAction(action(QStringLiteral("rotate")));
+    objectMenu->addAction(action(QStringLiteral("skew")));
     objectMenu->addSeparator();
     objectMenu->addAction(action(QStringLiteral("convert-curves")));
     objectMenu->addAction(action(QStringLiteral("lock")));
@@ -1505,6 +1610,9 @@ Document MainWindow::currentDocument() const
         return document;
     document.pageSize = m_view->pageSize();
     document.layers = m_view->layers();
+    document.groups = m_view->groups();
+    document.guidesX = m_view->guidesX();
+    document.guidesY = m_view->guidesY();
     document.layerVisible.clear();
     document.layerLocked.clear();
     for (int i = 0; i < document.layers.size(); ++i) {
@@ -1867,6 +1975,8 @@ void MainWindow::endEdit()
         return;
     m_editOpen = false;
 
+    m_view->syncClones();
+
     const QJsonObject current = currentDocument().toJson();
     if (current == m_pendingSnapshot)
         return;
@@ -2083,22 +2193,38 @@ void MainWindow::refreshQuickTransform()
     const QSignalBlocker blockAngle(m_quickAngle);
 
     const bool enabled = !selected.isEmpty();
+    const bool single = selected.size() == 1;
     m_quickX->setEnabled(enabled);
     m_quickY->setEnabled(enabled);
-    m_quickW->setEnabled(enabled);
-    m_quickH->setEnabled(enabled);
-    m_quickAngle->setEnabled(enabled);
+    m_quickW->setEnabled(single);
+    m_quickH->setEnabled(single);
+    m_quickAngle->setEnabled(single);
 
     if (!enabled)
         return;
 
-    const VectorObject object = selected.first()->object();
-    const QRectF bounds = object.localBounds();
-    m_quickX->setValue(object.pos.x());
-    m_quickY->setValue(object.pos.y());
-    m_quickW->setValue(bounds.width());
-    m_quickH->setValue(bounds.height());
-    m_quickAngle->setValue(object.rotation);
+    if (single) {
+        const VectorObject object = selected.first()->object();
+        const QRectF bounds = object.localBounds();
+        m_quickX->setValue(object.pos.x());
+        m_quickY->setValue(object.pos.y());
+        m_quickW->setValue(bounds.width());
+        m_quickH->setValue(bounds.height());
+        m_quickAngle->setValue(object.rotation);
+    } else {
+        QRectF groupBounds;
+        for (VectorItem *item : selected) {
+            const QRectF visual = item->mapRectToScene(item->localBounds());
+            groupBounds = groupBounds.isNull()
+                              ? visual
+                              : groupBounds.united(visual);
+        }
+        m_quickX->setValue(groupBounds.x());
+        m_quickY->setValue(groupBounds.y());
+        m_quickW->setValue(groupBounds.width());
+        m_quickH->setValue(groupBounds.height());
+        m_quickAngle->setValue(selected.first()->object().rotation);
+    }
 }
 
 void MainWindow::applyQuickTransform()
@@ -2164,6 +2290,9 @@ void MainWindow::pasteClipboard()
     m_view->scene()->clearSelection();
     for (VectorObject object : m_clipboard) {
         object.layer = m_view->activeLayer();
+        object.group = 0;
+        object.id = 0;
+        object.masterId = 0;
         VectorItem *item = m_view->addVectorObject(object, false, false);
         item->setSelected(true);
     }
@@ -2221,7 +2350,16 @@ void MainWindow::showShortcuts()
         "<tr><td><b>Ctrl+S</b></td><td>Сохранить</td><td><b>Ctrl+Shift+S</b></td><td>Сохранить как</td></tr>"
         "<tr><td><b>Ctrl+I</b></td><td>Импорт</td><td><b>Ctrl+E</b></td><td>Экспорт</td></tr>"
         "<tr><td><b>Ctrl+Z</b></td><td>Отменить</td><td><b>Ctrl+Shift+Z</b></td><td>Повторить</td></tr>"
-        "<tr><td><b>Ctrl+D</b></td><td>Дублировать</td><td><b>Del</b></td><td>Удалить</td></tr>"
+        "<tr><td><b>Ctrl+D</b></td><td>Дублировать</td><td><b>Ctrl+Shift+D</b></td><td>Шаг и повтор</td></tr>"
+        "<tr><td><b>Ctrl+G</b></td><td>Сгруппировать</td><td><b>Ctrl+U</b></td><td>Разгруппировать</td></tr>"
+        "<tr><td><b>Ctrl+Shift+U</b></td><td>Разгруппировать всё</td><td><b>Del</b></td><td>Удалить</td></tr>"
+        "</table>"
+        "<h3 style='color:#e3e7ee'>Выделение и группы</h3>"
+        "<table cellspacing='6'>"
+        "<tr><td><b>Alt+клик</b></td><td>объект под верхним</td>"
+        "<td><b>Ctrl+клик</b></td><td>объект внутри группы</td></tr>"
+        "<tr><td><b>Tab</b></td><td>следующий объект</td>"
+        "<td><b>Ctrl+перетаскивание</b></td><td>центр вращения</td></tr>"
         "</table>"
         "<h3 style='color:#e3e7ee'>Просмотр</h3>"
         "<table cellspacing='6'>"
@@ -2242,7 +2380,7 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("О программе"),
         QStringLiteral(
-            "<h3>Vectora 0.1.7</h3>"
+            "<h3>Vectora 0.1.8</h3>"
             "<p>Кроссплатформенный векторный редактор на C++ и Qt 6.</p>"
             "<p>Работают: документы .vct, экспорт PNG/SVG/PDF, печать, "
             "рисование фигур и кривых, Bezier с типами узлов, докеры "

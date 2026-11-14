@@ -58,6 +58,17 @@ public:
     void lowerSelection();
 
     QStringList layers() const { return m_layers; }
+    QVector<VectorGroup> groups() const { return m_groups; }
+    QVector<qreal> guidesX() const { return m_guidesX; }
+    QVector<qreal> guidesY() const { return m_guidesY; }
+    void beginGuideDrag(Qt::Orientation orientation);
+    void updateGuideDrag(Qt::Orientation orientation, qreal scenePos);
+    void endGuideDrag(Qt::Orientation orientation, qreal scenePos);
+    void cancelGuideDrag();
+    void clearGuides();
+    void setGuidesVisible(bool visible);
+    bool snapEnabled() const { return m_snapEnabled; }
+    void setSnapEnabled(bool enabled);
     int activeLayer() const { return m_activeLayer; }
     void setActiveLayer(int index);
     int addLayer(const QString &name = QString());
@@ -91,6 +102,17 @@ public:
     void flipSelection(bool horizontal);
     void rotateSelection(qreal degrees);
     void setItemLocked(VectorItem *item, bool locked);
+    void syncClones();
+    void scaleSelectionTo(const QRectF &targetBounds, qreal opacity = -1.0);
+    void duplicateSelection(int count, const QPointF &offset);
+    void cloneSelection(const QPointF &offset = QPointF(24.0, 24.0));
+    void skewSelection(qreal angleX, qreal angleY);
+
+    void groupSelection();
+    void ungroupSelection();
+    void ungroupAll();
+    int topGroupOf(int group) const;
+    QList<VectorItem *> itemsInGroup(int topGroup) const;
 
     void finishBezier();
     void closeBezier();
@@ -147,6 +169,7 @@ private:
     void updateCursor();
     void cycleSelection();
     void normalizeZOrder();
+    void updateSnapSettings();
     void applyLayerState(int layer);
     void applyLayerLayout(const QVector<QList<VectorItem *>> &perLayer);
     VectorItem *itemAtScene(const QPointF &scenePos) const;
@@ -216,4 +239,23 @@ private:
     int m_starPoints = 5;
     qreal m_starRatio = 0.45;
     qreal m_spiralTurns = 3.0;
+
+    QVector<VectorGroup> m_groups;
+    int m_nextGroupId = 1;
+    int m_nextObjectId = 1;
+    bool m_syncingSelection = false;
+    QPointF m_groupPivot;
+    bool m_groupPivotValid = false;
+    bool m_groupPivotCustom = false;
+    bool m_groupPivotDragging = false;
+    bool m_insideGroup = false;
+    int m_lastSelectionCount = 0;
+
+    QVector<qreal> m_guidesX;
+    QVector<qreal> m_guidesY;
+    bool m_snapEnabled = true;
+    bool m_guidePreview = false;
+    bool m_guidesVisible = true;
+    Qt::Orientation m_guideOrientation = Qt::Horizontal;
+    qreal m_guidePosition = 0.0;
 };
