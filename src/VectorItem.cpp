@@ -44,7 +44,7 @@ VectorItem::VectorItem(const VectorObject &object, QGraphicsItem *parent)
 
 QRectF VectorItem::boundingRect() const
 {
-    const QRectF bounds = m_object.localBounds();
+    const QRectF bounds = effectBounds(m_object);
     const qreal margin = kBoundsMargin + m_object.strokeWidth / 2.0;
     return bounds.adjusted(-margin, -margin, margin, margin);
 }
@@ -52,6 +52,12 @@ QRectF VectorItem::boundingRect() const
 QPainterPath VectorItem::shape() const
 {
     QPainterPath result;
+    if (m_object.type == ShapeType::Dimension) {
+        result = dimensionOutline(m_object);
+        if (result.isEmpty())
+            result.addRect(m_object.localBounds());
+        return result;
+    }
     if (!m_object.path.isEmpty()) {
         QPainterPathStroker stroker;
         stroker.setWidth(qMax<qreal>(m_object.strokeWidth, 8.0));
@@ -95,6 +101,11 @@ void VectorItem::drawSelection(QPainter *painter) const
     painter->setPen(frame);
     painter->setBrush(Qt::NoBrush);
     painter->drawRect(bounds.adjusted(-2.0, -2.0, 2.0, 2.0));
+
+    if (m_object.type == ShapeType::Dimension) {
+        painter->restore();
+        return;
+    }
 
     QPen handlePen(QColor(0x6f, 0x9e, 0xe8));
     handlePen.setWidthF(1.3);
@@ -160,6 +171,13 @@ VectorObject VectorItem::object() const
     return copy;
 }
 
+void VectorItem::setEffects(const QVector<Effect> &effects)
+{
+    prepareGeometryChange();
+    m_object.effects = effects;
+    update();
+}
+
 void VectorItem::setObject(const VectorObject &object)
 {
     prepareGeometryChange();
@@ -167,7 +185,8 @@ void VectorItem::setObject(const VectorObject &object)
     setPos(object.pos);
     setRotation(object.rotation);
     setFlag(ItemIsSelectable, !m_object.locked);
-    setFlag(ItemIsMovable, !m_object.locked);
+    setFlag(ItemIsMovable, !m_object.locked
+                               && m_object.type != ShapeType::Dimension);
     if (m_object.locked)
         setSelected(false);
     updateOrigin();
@@ -342,7 +361,8 @@ void VectorItem::setFrameSize(const QSizeF &size)
         font.setPixelSize(qMax(4, qRound(base * factor)));
         m_object.font = font;
         m_object.textBox.setSize(size);
-    } else if (m_object.type == ShapeType::Image) {
+    } else if (m_object.type == ShapeType::Image
+               || m_object.type == ShapeType::Code) {
         m_object.textBox.setSize(size);
     } else {
         QTransform transform;
@@ -581,6 +601,11 @@ void VectorItem::mousePressEvent(QGraphicsSceneMouseEvent *event)
         return;
     }
 
+    if (m_object.type == ShapeType::Dimension) {
+        QGraphicsObject::mousePressEvent(event);
+        return;
+    }
+
     m_handle = isSelected() ? handleAt(event->pos()) : -1;
     if (m_handle == 9 && !(event->modifiers() & Qt::ControlModifier))
         m_handle = -1;
@@ -662,13 +687,18 @@ void VectorItem::mouseMoveEvent(QGraphicsSceneMouseEvent *event)
 
 void VectorItem::setSnapSettings(bool enabled, qreal step,
                                  const QVector<qreal> &guidesX,
-                                 const QVector<qreal> &guidesY, qreal threshold)
+                                 const QVector<qreal> &guidesY, qreal threshold,
+                                 int gridType, const QPointF &gridOrigin,
+                                 qreal gridAngle)
 {
     m_snapEnabled = enabled;
     m_snapStep = qMax<qreal>(1.0, step);
     m_snapGuidesX = guidesX;
     m_snapGuidesY = guidesY;
     m_snapThreshold = qMax<qreal>(1.0, threshold);
+    m_snapGridType = gridType;
+    m_snapGridOrigin = gridOrigin;
+    m_snapGridAngle = gridAngle;
 }
 
 void VectorItem::applySnapping()
@@ -737,8 +767,45 @@ void VectorItem::applySnapping()
                                    visual.right()};
     const QVector<qreal> yEdges = {visual.top(), visual.center().y(),
                                    visual.bottom()};
-    const SnapResult x = bestOffset(xEdges, xTargets, m_snapStep);
-    const SnapResult y = bestOffset(yEdges, yTargets, m_snapStep);
+    SnapResult x = bestOffset(xEdges, xTargets, m_snapStep);
+    SnapResult y = bestOffset(yEdges, yTargets, m_snapStep);
+
+    if (m_snapGridType != 0) {
+        const QPointF center = visual.center();
+        QPointF candidate = center;
+        const qreal step = qMax<qreal>(1.0, m_snapStep);
+        if (m_snapGridType == 1) {
+            const QPointF origin = page.isValid() ? page.center() + m_snapGridOrigin
+                                                 : m_snapGridOrigin;
+            const QPointF delta = center - origin;
+            const qreal radius = std::hypot(delta.x(), delta.y());
+            const qreal snappedRadius = qRound(radius / step) * step;
+            const qreal angleStep = qMax<qreal>(1.0, m_snapGridAngle);
+            qreal degrees = std::atan2(delta.y(), delta.x()) * 180.0 / kPi;
+            degrees = qRound(degrees / angleStep) * angleStep;
+            const qreal radians = degrees * kPi / 180.0;
+            candidate = origin + QPointF(std::cos(radians) * snappedRadius,
+                                         std::sin(radians) * snappedRadius);
+        } else {
+            const QPointF origin = page.isValid() ? page.center() + m_snapGridOrigin
+                                                 : m_snapGridOrigin;
+            const qreal radians = 30.0 * kPi / 180.0;
+            const QPointF u(std::cos(radians) * step, std::sin(radians) * step);
+            const QPointF v(-std::cos(radians) * step, std::sin(radians) * step);
+            const QPointF delta = center - origin;
+            const qreal a = delta.x() / (step * std::cos(radians));
+            const qreal b = delta.y() / (step * std::sin(radians));
+            candidate = origin + u * qRound((a + b) / 2.0)
+                        + v * qRound((b - a) / 2.0);
+        }
+        const QPointF offset = candidate - center;
+        if (std::hypot(offset.x(), offset.y()) <= m_snapThreshold) {
+            x.offset = offset.x();
+            y.offset = offset.y();
+            x.found = true;
+            y.found = true;
+        }
+    }
 
     QVector<QLineF> lines;
     const QRectF area = scene()->sceneRect();

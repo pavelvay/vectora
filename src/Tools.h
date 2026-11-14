@@ -27,6 +27,9 @@ enum class Tool {
     Transparency,
     Shadow,
     Blend,
+    Dimension,
+    Extrude,
+    Perspective,
     Zoom,
     Pan
 };
@@ -124,6 +127,15 @@ inline const QVector<ToolInfo> &toolInfos()
         {Tool::Blend, ToolGroup::Paint, QStringLiteral("blend"),
          QStringLiteral("Перетекание"), QStringLiteral("Shift+B"),
          QStringLiteral("Перетекание между объектами")},
+        {Tool::Dimension, ToolGroup::Paint, QStringLiteral("dimension"),
+         QStringLiteral("Размер"), QStringLiteral("Q"),
+         QStringLiteral("Размеры: линейные, угловые, радиус и диаметр")},
+        {Tool::Extrude, ToolGroup::Paint, QStringLiteral("extrude"),
+         QStringLiteral("Экструзия"), QStringLiteral("Shift+X"),
+         QStringLiteral("Объёмное продолжение объекта")},
+        {Tool::Perspective, ToolGroup::Paint, QStringLiteral("perspective"),
+         QStringLiteral("Перспектива"), QStringLiteral("Shift+F"),
+         QStringLiteral("Перспективное искажение по углам")},
 
         {Tool::Zoom, ToolGroup::View, QStringLiteral("zoom"),
          QStringLiteral("Масштаб"), QStringLiteral("Z"),

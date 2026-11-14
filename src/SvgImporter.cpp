@@ -1,5 +1,6 @@
 #include "SvgImporter.h"
 
+#include <QBuffer>
 #include <QColor>
 #include <QFile>
 #include <QFontMetricsF>
@@ -334,16 +335,11 @@ void applyShapeStyle(VectorObject &object, const SvgStyle &style,
 
 } // namespace
 
-bool importSvgFile(const QString &path, Document *document, QString *error)
-{
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        if (error)
-            *error = QStringLiteral("Не удалось открыть SVG: %1").arg(file.errorString());
-        return false;
-    }
+namespace {
 
-    QXmlStreamReader xml(&file);
+bool importSvgDevice(QIODevice *device, Document *document, QString *error)
+{
+    QXmlStreamReader xml(device);
     Document result;
     result.layers = {QStringLiteral("Импорт SVG")};
     result.layerVisible = {true};
@@ -596,4 +592,29 @@ bool importSvgFile(const QString &path, Document *document, QString *error)
 
     *document = result;
     return true;
+}
+
+} // namespace
+
+bool importSvgFile(const QString &path, Document *document, QString *error)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        if (error)
+            *error = QStringLiteral("Не удалось открыть SVG: %1").arg(file.errorString());
+        return false;
+    }
+    return importSvgDevice(&file, document, error);
+}
+
+bool importSvgData(const QByteArray &data, Document *document, QString *error)
+{
+    QByteArray copy = data;
+    QBuffer buffer(&copy);
+    if (!buffer.open(QIODevice::ReadOnly)) {
+        if (error)
+            *error = QStringLiteral("Не удалось прочитать SVG из памяти.");
+        return false;
+    }
+    return importSvgDevice(&buffer, document, error);
 }

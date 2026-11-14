@@ -45,6 +45,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSettings>
+#include <QUuid>
+#include <QDesktopServices>
 #include <QPainterPath>
 #include <QPdfWriter>
 #include <QPen>
@@ -53,6 +55,7 @@
 #include <QPrinter>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QShortcut>
 #include <QSignalBlocker>
@@ -77,12 +80,22 @@
 #include "CanvasView.h"
 #include "ColorPalette.h"
 #include "PageBar.h"
+#include "AssetLibrary.h"
+#include "AssetPanel.h"
+#include "CodeDialog.h"
+#include "DocumentDialogs.h"
+#include "DocumentTools.h"
+#include "TemplateStore.h"
 #include "DockPanels.h"
 #include "Icons.h"
 #include "PageDialog.h"
+#include "PatternDialog.h"
+#include "PatternStore.h"
+#include "Patterns.h"
 #include "Ruler.h"
 #include "SvgImporter.h"
 #include "Theme.h"
+#include "UpdateChecker.h"
 #include "ToolPalette.h"
 #include "VectorItem.h"
 #include "WelcomeWidget.h"
@@ -110,6 +123,40 @@ QDoubleSpinBox *numberField(QWidget *parent, double min, double max, double valu
     spin->setFixedWidth(width);
     spin->setKeyboardTracking(false);
     return spin;
+}
+
+struct DialogNumber {
+    QString label;
+    double value = 0.0;
+    double minimum = -100000.0;
+    double maximum = 100000.0;
+    QString suffix;
+    int decimals = 2;
+};
+
+bool askNumbers(QWidget *parent, const QString &title, QVector<DialogNumber> *rows)
+{
+    QDialog dialog(parent);
+    dialog.setWindowTitle(title);
+    auto *form = new QFormLayout(&dialog);
+    QVector<QDoubleSpinBox *> spins;
+    for (const DialogNumber &row : *rows) {
+        auto *spin = numberField(&dialog, row.minimum, row.maximum, row.value,
+                                 row.suffix, 120, row.decimals);
+        form->addRow(row.label, spin);
+        spins.append(spin);
+    }
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok
+                                             | QDialogButtonBox::Cancel,
+                                         &dialog);
+    form->addRow(buttons);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted)
+        return false;
+    for (int i = 0; i < rows->size() && i < spins.size(); ++i)
+        (*rows)[i].value = spins.at(i)->value();
+    return true;
 }
 
 QFrame *verticalRule(QWidget *parent)
@@ -176,6 +223,60 @@ MainWindow::MainWindow(QWidget *parent)
     updateTitle();
     applyTool(Tool::Select);
     showWelcome();
+
+    m_updateChecker = new UpdateChecker(this);
+    connect(m_updateChecker, &UpdateChecker::updateAvailable, this,
+            [this](const UpdateInfo &info) {
+                m_manualUpdateCheck = false;
+                if (m_updateDialogOpen)
+                    return;
+                m_updateDialogOpen = true;
+                UpdateDialog dialog(info, this);
+                dialog.exec();
+                m_updateDialogOpen = false;
+            });
+    connect(m_updateChecker, &UpdateChecker::upToDate, this, [this](const QString &version) {
+        if (m_manualUpdateCheck) {
+            m_manualUpdateCheck = false;
+            QMessageBox::information(this, QStringLiteral("Обновления"),
+                                     QStringLiteral("Установлена последняя версия: %1.")
+                                         .arg(version));
+        }
+    });
+    connect(m_updateChecker, &UpdateChecker::failed, this, [this](const QString &error) {
+        if (!m_manualUpdateCheck) {
+            statusBar()->showMessage(QStringLiteral("Не удалось проверить обновления."), 4000);
+            return;
+        }
+        m_manualUpdateCheck = false;
+        QMessageBox::warning(this, QStringLiteral("Обновления"), error);
+    });
+    connect(m_view, &CanvasView::statusHint, this, [this](const QString &text) {
+        m_lastHint = text;
+        m_lastHintTime = QDateTime::currentDateTime();
+    });
+    if (m_dockPanels) {
+        connect(m_dockPanels, &DockPanels::status, this, [this](const QString &text) {
+            m_lastHint = text;
+            m_lastHintTime = QDateTime::currentDateTime();
+        });
+    }
+    m_autosaveSession = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    setupAutosave();
+    if (!qEnvironmentVariableIsSet("VECTORA_NO_RECOVERY"))
+        QTimer::singleShot(600, this, [this]() { recoverAutosaves(); });
+
+    {
+        QSettings settings;
+        const bool automatic = settings.value(QStringLiteral("updates/checkOnStartup"), true).toBool();
+        const bool disabled = qEnvironmentVariableIsSet("VECTORA_NO_UPDATE_CHECK");
+        if (automatic && !disabled) {
+            QTimer::singleShot(2500, this, [this]() {
+                if (m_updateChecker)
+                    m_updateChecker->check(false);
+            });
+        }
+    }
 
     QTimer::singleShot(0, this, [this]() {
         if (m_centralStack && m_centralStack->currentWidget() == m_editorPage)
@@ -303,7 +404,17 @@ void MainWindow::createActions()
     makeAction(QStringLiteral("select-all"), QStringLiteral("Выделить всё"),
                QKeySequence::SelectAll, QStringLiteral("Выделить все объекты"), false);
     makeAction(QStringLiteral("preferences"), QStringLiteral("Настройки…"),
-               QKeySequence(QStringLiteral("Ctrl+,")), QStringLiteral("Настройки приложения"));
+               QKeySequence(QStringLiteral("Ctrl+,")), QStringLiteral("Настройки приложения"), false);
+    makeAction(QStringLiteral("history"), QStringLiteral("История изменений…"),
+               QKeySequence(), QStringLiteral("Список действий и переход к состоянию"), false);
+    makeAction(QStringLiteral("versions"), QStringLiteral("Версии документа…"),
+               QKeySequence(), QStringLiteral("Именованные версии и сравнение"), false);
+    makeAction(QStringLiteral("templates"), QStringLiteral("Шаблоны документов…"),
+               QKeySequence(), QStringLiteral("Создать документ из шаблона"), false);
+    makeAction(QStringLiteral("search-objects"), QStringLiteral("Поиск объектов…"),
+               QKeySequence(QStringLiteral("Ctrl+F")), QStringLiteral("Поиск объектов по имени и типу"), false);
+    makeAction(QStringLiteral("package"), QStringLiteral("Упаковать документ…"),
+               QKeySequence(), QStringLiteral("Собрать документ, изображения и отчёт"), false);
 
     // View
     makeAction(QStringLiteral("zoom-in"), QStringLiteral("Увеличить"),
@@ -415,10 +526,133 @@ void MainWindow::createActions()
                QKeySequence(), QStringLiteral("Деформировать объект оболочкой"));
     makeAction(QStringLiteral("fx-extrude"), QStringLiteral("Экструзия…"),
                QKeySequence(), QStringLiteral("Придать объекту объём"));
-    makeAction(QStringLiteral("fx-lens"), QStringLiteral("Линза…"),
+    makeAction(QStringLiteral("fx-lens"), QStringLiteral("Линза (размытие)…"),
                QKeySequence(), QStringLiteral("Наложить эффект линзы"));
-    makeAction(QStringLiteral("fx-bevel"), QStringLiteral("Скос…"),
+    makeAction(QStringLiteral("fx-bevel"), QStringLiteral("Скос (внутренняя тень)…"),
                QKeySequence(), QStringLiteral("Добавить фаску по краю"));
+    makeAction(QStringLiteral("fx-glow"), QStringLiteral("Свечение"),
+               QKeySequence(), QStringLiteral("Добавить внешнее свечение"), false);
+    makeAction(QStringLiteral("fx-blur"), QStringLiteral("Размытие"),
+               QKeySequence(), QStringLiteral("Добавить размытие"), false);
+    makeAction(QStringLiteral("fx-distort"), QStringLiteral("Искажение"),
+               QKeySequence(), QStringLiteral("Добавить волновое искажение"), false);
+    makeAction(QStringLiteral("fx-warp"), QStringLiteral("Деформация"),
+               QKeySequence(), QStringLiteral("Добавить радиальную деформацию"), false);
+    makeAction(QStringLiteral("fx-perspective"), QStringLiteral("Перспектива"),
+               QKeySequence(), QStringLiteral("Добавить перспективное искажение"), false);
+    makeAction(QStringLiteral("fx-clip"), QStringLiteral("Обтравочная маска"),
+               QKeySequence(), QStringLiteral("Обрезать объект фигурой-маской"), false);
+    makeAction(QStringLiteral("fx-opacity"), QStringLiteral("Маска прозрачности"),
+               QKeySequence(), QStringLiteral("Применить маску прозрачности"), false);
+    makeAction(QStringLiteral("fx-clear"), QStringLiteral("Очистить эффекты"),
+               QKeySequence(), QStringLiteral("Удалить все эффекты выделения"), false);
+    makeAction(QStringLiteral("fx-panel"), QStringLiteral("Панель эффектов…"),
+               QKeySequence(), QStringLiteral("Открыть панель эффектов"), false);
+
+    // Symbols and the asset library
+    makeAction(QStringLiteral("symbol-create"), QStringLiteral("Создать символ из выделения…"),
+               QKeySequence(QStringLiteral("Ctrl+K")),
+               QStringLiteral("Создать символ из выделенных объектов"), false);
+    makeAction(QStringLiteral("symbol-update"), QStringLiteral("Обновить символ по экземпляру"),
+               QKeySequence(QStringLiteral("Ctrl+Shift+K")),
+               QStringLiteral("Перенести изменения экземпляра в исходный символ"), false);
+    makeAction(QStringLiteral("symbol-detach"), QStringLiteral("Отделить экземпляр"),
+               QKeySequence(QStringLiteral("Ctrl+Alt+K")),
+               QStringLiteral("Отвязать экземпляр от исходного символа"), false);
+    makeAction(QStringLiteral("symbol-rename"), QStringLiteral("Переименовать символ…"),
+               QKeySequence(), QStringLiteral("Переименовать символ документа"), false);
+    makeAction(QStringLiteral("symbol-delete"), QStringLiteral("Удалить символ"),
+               QKeySequence(), QStringLiteral("Удалить символ из документа"), false);
+    makeAction(QStringLiteral("symbol-panel"), QStringLiteral("Панель символов…"),
+               QKeySequence(), QStringLiteral("Открыть панель символов"), false);
+    makeAction(QStringLiteral("library-add"), QStringLiteral("Добавить выделение в библиотеку…"),
+               QKeySequence(QStringLiteral("Ctrl+Shift+L")),
+               QStringLiteral("Сохранить выделение как ресурс библиотеки"), false);
+    makeAction(QStringLiteral("library-panel"), QStringLiteral("Панель библиотеки…"),
+               QKeySequence(), QStringLiteral("Открыть библиотеку ресурсов"), false);
+    makeAction(QStringLiteral("library-new"), QStringLiteral("Создать библиотеку…"),
+               QKeySequence(), QStringLiteral("Создать новую библиотеку ресурсов"));
+    makeAction(QStringLiteral("library-import"), QStringLiteral("Импортировать библиотеку…"),
+               QKeySequence(), QStringLiteral("Загрузить библиотеку из файла .vlib"));
+    makeAction(QStringLiteral("library-export"), QStringLiteral("Экспортировать библиотеку…"),
+               QKeySequence(), QStringLiteral("Сохранить библиотеку в файл .vlib"));
+    makeAction(QStringLiteral("library-undo"), QStringLiteral("Отменить изменение библиотеки"),
+               QKeySequence(), QStringLiteral("Отменить последнее изменение библиотеки"));
+    // Drafting
+    makeAction(QStringLiteral("dimension-horizontal"), QStringLiteral("Горизонтальный размер"),
+               QKeySequence(), QStringLiteral("Линейный горизонтальный размер"));
+    makeAction(QStringLiteral("dimension-vertical"), QStringLiteral("Вертикальный размер"),
+               QKeySequence(), QStringLiteral("Линейный вертикальный размер"));
+    makeAction(QStringLiteral("dimension-aligned"), QStringLiteral("Наклонный размер"),
+               QKeySequence(), QStringLiteral("Размер вдоль наклонной линии"));
+    makeAction(QStringLiteral("dimension-angular"), QStringLiteral("Угловой размер"),
+               QKeySequence(), QStringLiteral("Измерить угол между двумя лучами"));
+    makeAction(QStringLiteral("dimension-radius"), QStringLiteral("Радиус"),
+               QKeySequence(), QStringLiteral("Радиус окружности или эллипса"));
+    makeAction(QStringLiteral("dimension-diameter"), QStringLiteral("Диаметр"),
+               QKeySequence(), QStringLiteral("Диаметр окружности или эллипса"));
+    makeAction(QStringLiteral("construct-line"), QStringLiteral("Линия по координатам…"),
+               QKeySequence(), QStringLiteral("Построить линию по двум точкам"));
+    makeAction(QStringLiteral("construct-angle"), QStringLiteral("Линия по длине и углу…"),
+               QKeySequence(), QStringLiteral("Построить линию заданной длины под углом"));
+    makeAction(QStringLiteral("construct-parallel"), QStringLiteral("Параллельная линия…"),
+               QKeySequence(), QStringLiteral("Построить параллель к выделенной линии"));
+    makeAction(QStringLiteral("construct-perpendicular"), QStringLiteral("Перпендикуляр…"),
+               QKeySequence(), QStringLiteral("Построить перпендикуляр из середины линии"));
+    makeAction(QStringLiteral("construct-tangent"), QStringLiteral("Касательная из точки…"),
+               QKeySequence(), QStringLiteral("Построить касательные к выделенному эллипсу"));
+    makeAction(QStringLiteral("construct-circle"), QStringLiteral("Окружность по радиусу…"),
+               QKeySequence(), QStringLiteral("Построить окружность заданного радиуса"));
+    makeAction(QStringLiteral("construct-arc"), QStringLiteral("Дуга по радиусу…"),
+               QKeySequence(), QStringLiteral("Построить дугу заданного радиуса"));
+    makeAction(QStringLiteral("construct-polygon"), QStringLiteral("Правильный многоугольник…"),
+               QKeySequence(), QStringLiteral("Построить правильный многоугольник"));
+    makeAction(QStringLiteral("construct-copy"), QStringLiteral("Копия со смещением…"),
+               QKeySequence(), QStringLiteral("Точное копирование с заданным смещением"));
+    makeAction(QStringLiteral("scale-selection"), QStringLiteral("Масштабировать выделение…"),
+               QKeySequence(), QStringLiteral("Масштабировать объекты на коэффициент"));
+    makeAction(QStringLiteral("grid-cartesian"), QStringLiteral("Декартова сетка"),
+               QKeySequence(), QStringLiteral("Переключить сетку на декартову"));
+    makeAction(QStringLiteral("grid-polar"), QStringLiteral("Полярная сетка"),
+               QKeySequence(), QStringLiteral("Переключить сетку на полярную"));
+    makeAction(QStringLiteral("grid-isometric"), QStringLiteral("Изометрическая сетка"),
+               QKeySequence(), QStringLiteral("Переключить сетку на изометрическую"));
+    makeAction(QStringLiteral("pattern-create"), QStringLiteral("Создать узор из выделения…"),
+               QKeySequence(QStringLiteral("Ctrl+Alt+P")),
+               QStringLiteral("Создать узор из выделенных объектов"), false);
+    makeAction(QStringLiteral("pattern-edit"), QStringLiteral("Редактировать узор…"),
+               QKeySequence(), QStringLiteral("Изменить повторение и ячейку узора"), false);
+    makeAction(QStringLiteral("pattern-update"), QStringLiteral("Обновить узор из выделения"),
+               QKeySequence(), QStringLiteral("Заменить элементы узора выделением"), false);
+    makeAction(QStringLiteral("pattern-expand"), QStringLiteral("Разобрать узор на объекты"),
+               QKeySequence(), QStringLiteral("Преобразовать узорную заливку в объекты"), false);
+    makeAction(QStringLiteral("pattern-save-library"), QStringLiteral("Сохранить узор в библиотеку"),
+               QKeySequence(), QStringLiteral("Добавить узор в общую библиотеку"), false);
+    makeAction(QStringLiteral("code-qr"), QStringLiteral("QR-код…"),
+               QKeySequence(QStringLiteral("Ctrl+Alt+Q")),
+               QStringLiteral("Создать QR-код из текста или ссылки"), false);
+    makeAction(QStringLiteral("code-ean13"), QStringLiteral("Штрихкод EAN-13…"),
+               QKeySequence(), QStringLiteral("Создать штрихкод EAN-13"), false);
+    makeAction(QStringLiteral("code-ean8"), QStringLiteral("Штрихкод EAN-8…"),
+               QKeySequence(), QStringLiteral("Создать штрихкод EAN-8"), false);
+    makeAction(QStringLiteral("code-upca"), QStringLiteral("Штрихкод UPC-A…"),
+               QKeySequence(), QStringLiteral("Создать штрихкод UPC-A"), false);
+    makeAction(QStringLiteral("code-code128"), QStringLiteral("Штрихкод Code 128…"),
+               QKeySequence(), QStringLiteral("Создать штрихкод Code 128"), false);
+    makeAction(QStringLiteral("code-code39"), QStringLiteral("Штрихкод Code 39…"),
+               QKeySequence(), QStringLiteral("Создать штрихкод Code 39"), false);
+    makeAction(QStringLiteral("code-datamatrix"), QStringLiteral("Data Matrix…"),
+               QKeySequence(), QStringLiteral("Создать код Data Matrix"), false);
+    makeAction(QStringLiteral("code-edit"), QStringLiteral("Редактировать код…"),
+               QKeySequence(), QStringLiteral("Изменить данные и параметры кода"), false);
+    makeAction(QStringLiteral("pattern-library"), QStringLiteral("Библиотека узоров…"),
+               QKeySequence(), QStringLiteral("Открыть вкладку узоров"), false);
+    makeAction(QStringLiteral("drawing-scale"), QStringLiteral("Масштаб чертежа…"),
+               QKeySequence(), QStringLiteral("Задать масштаб 1:N и реальные размеры"));
+
+    makeAction(QStringLiteral("library-redo"), QStringLiteral("Вернуть изменение библиотеки"),
+               QKeySequence(QStringLiteral("Ctrl+Alt+Z")),
+               QStringLiteral("Повторить отменённое изменение библиотеки"));
 
     // Text
     makeAction(QStringLiteral("text-character"), QStringLiteral("Символ…"),
@@ -433,6 +667,8 @@ void MainWindow::createActions()
     // Help
     makeAction(QStringLiteral("shortcuts"), QStringLiteral("Горячие клавиши"),
                QKeySequence(QStringLiteral("Ctrl+F1")), QStringLiteral("Список горячих клавиш"), false);
+    makeAction(QStringLiteral("check-updates"), QStringLiteral("Проверить обновления…"),
+               QKeySequence(), QStringLiteral("Проверить новую версию на GitHub"), false);
     makeAction(QStringLiteral("about"), QStringLiteral("О программе"),
                QKeySequence(), QStringLiteral("Сведения о Vectora"), false);
 
@@ -1097,12 +1333,477 @@ void MainWindow::createActions()
             [this]() { m_view->flipSelection(false); });
     connect(action(QStringLiteral("rotate")), &QAction::triggered, this,
             [this]() { m_view->rotateSelection(90.0); refreshQuickTransform(); });
+    const auto addEffectAndShow = [this](const QString &type) {
+        if (m_view->selectedVectorItems().isEmpty()) {
+            statusBar()->showMessage(QStringLiteral("Выберите объекты."), 3000);
+            return;
+        }
+        m_view->addEffectToSelection(makeEffect(type));
+        showDockerTab(QStringLiteral("Эффекты"), 3);
+    };
     connect(action(QStringLiteral("fx-shadow")), &QAction::triggered, this,
-            [this]() { showDockerTab(QStringLiteral("Эффекты"), 0); });
+            [addEffectAndShow]() { addEffectAndShow(QStringLiteral("shadow")); });
     connect(action(QStringLiteral("fx-transparency")), &QAction::triggered, this,
             [this]() { showDockerTab(QStringLiteral("Эффекты"), 1); });
     connect(action(QStringLiteral("fx-blend")), &QAction::triggered, this,
             [this]() { showDockerTab(QStringLiteral("Эффекты"), 2); });
+    connect(action(QStringLiteral("fx-extrude")), &QAction::triggered, this,
+            [addEffectAndShow]() { addEffectAndShow(QStringLiteral("extrude")); });
+    connect(action(QStringLiteral("fx-lens")), &QAction::triggered, this,
+            [addEffectAndShow]() { addEffectAndShow(QStringLiteral("blur")); });
+    connect(action(QStringLiteral("fx-bevel")), &QAction::triggered, this,
+            [addEffectAndShow]() { addEffectAndShow(QStringLiteral("inner-shadow")); });
+    connect(action(QStringLiteral("fx-glow")), &QAction::triggered, this,
+            [addEffectAndShow]() { addEffectAndShow(QStringLiteral("glow")); });
+    connect(action(QStringLiteral("fx-blur")), &QAction::triggered, this,
+            [addEffectAndShow]() { addEffectAndShow(QStringLiteral("blur")); });
+    connect(action(QStringLiteral("fx-distort")), &QAction::triggered, this,
+            [addEffectAndShow]() { addEffectAndShow(QStringLiteral("distortion")); });
+    connect(action(QStringLiteral("fx-warp")), &QAction::triggered, this,
+            [addEffectAndShow]() { addEffectAndShow(QStringLiteral("warp")); });
+    connect(action(QStringLiteral("fx-perspective")), &QAction::triggered, this,
+            [addEffectAndShow]() { addEffectAndShow(QStringLiteral("perspective")); });
+    connect(action(QStringLiteral("fx-clip")), &QAction::triggered, this,
+            [this]() {
+                m_view->applyMaskFromSelection(QStringLiteral("clip-mask"));
+                showDockerTab(QStringLiteral("Эффекты"), 3);
+            });
+    connect(action(QStringLiteral("fx-opacity")), &QAction::triggered, this,
+            [this]() {
+                m_view->applyMaskFromSelection(QStringLiteral("opacity-mask"));
+                showDockerTab(QStringLiteral("Эффекты"), 3);
+            });
+    connect(action(QStringLiteral("fx-clear")), &QAction::triggered, this,
+            [this]() { m_view->setSelectionEffects({}); });
+    connect(action(QStringLiteral("fx-panel")), &QAction::triggered, this,
+            [this]() { showDockerTab(QStringLiteral("Эффекты"), 3); });
+
+    const auto showLibrary = [this]() {
+        if (m_assetDock) {
+            m_assetDock->show();
+            m_assetDock->raise();
+        }
+    };
+    connect(action(QStringLiteral("symbol-create")), &QAction::triggered, this,
+            [this, showLibrary]() {
+                showLibrary();
+                if (m_assetPanel) {
+                    m_assetPanel->showSymbolsTab();
+                    m_assetPanel->refreshSymbols();
+                    m_assetPanel->createSymbol();
+                }
+            });
+    connect(action(QStringLiteral("symbol-update")), &QAction::triggered, this,
+            [this, showLibrary]() {
+                showLibrary();
+                if (m_assetPanel) {
+                    m_assetPanel->showSymbolsTab();
+                    m_assetPanel->updateSymbol();
+                }
+            });
+    connect(action(QStringLiteral("symbol-detach")), &QAction::triggered, this,
+            [this, showLibrary]() {
+                showLibrary();
+                if (m_assetPanel) {
+                    m_assetPanel->showSymbolsTab();
+                    m_assetPanel->detachSymbol();
+                }
+            });
+    connect(action(QStringLiteral("symbol-rename")), &QAction::triggered, this,
+            [this, showLibrary]() {
+                showLibrary();
+                if (m_assetPanel)
+                    m_assetPanel->renameSymbol();
+            });
+    connect(action(QStringLiteral("symbol-delete")), &QAction::triggered, this,
+            [this, showLibrary]() {
+                showLibrary();
+                if (m_assetPanel)
+                    m_assetPanel->deleteSymbol();
+            });
+    connect(action(QStringLiteral("symbol-panel")), &QAction::triggered, this,
+            [this, showLibrary]() {
+                showLibrary();
+                if (m_assetPanel) {
+                    m_assetPanel->showSymbolsTab();
+                    m_assetPanel->refreshSymbols();
+                }
+            });
+    connect(action(QStringLiteral("library-add")), &QAction::triggered, this,
+            [this, showLibrary]() {
+                showLibrary();
+                if (m_assetPanel) {
+                    m_assetPanel->showAssetsTab();
+                    m_assetPanel->addSelectionToLibrary();
+                }
+            });
+    connect(action(QStringLiteral("library-panel")), &QAction::triggered, this,
+            [this, showLibrary]() {
+                showLibrary();
+                if (m_assetPanel)
+                    m_assetPanel->showAssetsTab();
+            });
+    connect(action(QStringLiteral("library-new")), &QAction::triggered, this,
+            [this, showLibrary]() {
+                showLibrary();
+                if (m_assetPanel)
+                    m_assetPanel->newLibrary();
+            });
+    connect(action(QStringLiteral("library-import")), &QAction::triggered, this,
+            [this, showLibrary]() {
+                showLibrary();
+                if (m_assetPanel)
+                    m_assetPanel->importLibrary();
+            });
+    connect(action(QStringLiteral("library-export")), &QAction::triggered, this,
+            [this, showLibrary]() {
+                showLibrary();
+                if (m_assetPanel)
+                    m_assetPanel->exportLibrary();
+            });
+    connect(action(QStringLiteral("library-undo")), &QAction::triggered, this,
+            [this, showLibrary]() {
+                showLibrary();
+                AssetStore::instance().undo();
+            });
+    connect(action(QStringLiteral("library-redo")), &QAction::triggered, this,
+            [this, showLibrary]() {
+                showLibrary();
+                AssetStore::instance().redo();
+            });
+
+    connect(action(QStringLiteral("history")), &QAction::triggered, this,
+            &MainWindow::openHistoryDialog);
+    connect(action(QStringLiteral("versions")), &QAction::triggered, this,
+            &MainWindow::openVersionDialog);
+    connect(action(QStringLiteral("templates")), &QAction::triggered, this,
+            &MainWindow::openTemplateDialog);
+    connect(action(QStringLiteral("search-objects")), &QAction::triggered, this,
+            &MainWindow::openResourceSearch);
+    connect(action(QStringLiteral("package")), &QAction::triggered, this,
+            &MainWindow::packageCurrentDocument);
+    connect(action(QStringLiteral("preferences")), &QAction::triggered, this,
+            &MainWindow::showPreferences);
+
+    connect(action(QStringLiteral("check-updates")), &QAction::triggered, this, [this]() {
+        if (!m_updateChecker) {
+            m_updateChecker = new UpdateChecker(this);
+        }
+        m_manualUpdateCheck = true;
+        m_updateChecker->check(true);
+        statusBar()->showMessage(QStringLiteral("Проверка обновлений…"), 3000);
+    });
+
+    // Drafting: dimensions
+    const QStringList dimensionActions = {
+        QStringLiteral("dimension-horizontal"), QStringLiteral("dimension-vertical"),
+        QStringLiteral("dimension-aligned"), QStringLiteral("dimension-angular"),
+        QStringLiteral("dimension-radius"), QStringLiteral("dimension-diameter"),
+    };
+    for (int i = 0; i < dimensionActions.size(); ++i) {
+        connect(action(dimensionActions.at(i)), &QAction::triggered, this,
+                [this, i]() { startDimensionTool(i); });
+    }
+
+    // Drafting: exact constructions
+    connect(action(QStringLiteral("construct-line")), &QAction::triggered, this, [this]() {
+        if (!m_view)
+            return;
+        const QSizeF page = m_view->pageSize();
+        const QPointF centre(page.width() / 2.0, page.height() / 2.0);
+        QVector<DialogNumber> rows = {
+            {QStringLiteral("X1"), centre.x(), -100000, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Y1"), centre.y(), -100000, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("X2"), centre.x() + 100.0, -100000, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Y2"), centre.y() + 100.0, -100000, 100000, QStringLiteral(" px"), 1},
+        };
+        if (!askNumbers(this, QStringLiteral("Линия по координатам"), &rows))
+            return;
+        m_view->constructLine(QPointF(rows.at(0).value, rows.at(1).value),
+                              QPointF(rows.at(2).value, rows.at(3).value));
+    });
+    connect(action(QStringLiteral("construct-angle")), &QAction::triggered, this, [this]() {
+        if (!m_view)
+            return;
+        const QSizeF page = m_view->pageSize();
+        const QPointF centre(page.width() / 2.0, page.height() / 2.0);
+        QVector<DialogNumber> rows = {
+            {QStringLiteral("Начало X"), centre.x(), -100000, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Начало Y"), centre.y(), -100000, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Длина"), 100.0, 0.1, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Угол"), 45.0, -360, 360, QStringLiteral(" °"), 1},
+        };
+        if (!askNumbers(this, QStringLiteral("Линия по длине и углу"), &rows))
+            return;
+        m_view->constructLineFrom(QPointF(rows.at(0).value, rows.at(1).value),
+                                  rows.at(2).value, rows.at(3).value);
+    });
+    connect(action(QStringLiteral("construct-parallel")), &QAction::triggered, this, [this]() {
+        if (!m_view)
+            return;
+        QVector<DialogNumber> rows = {
+            {QStringLiteral("Смещение"), 20.0, -10000, 10000, QStringLiteral(" px"), 1},
+        };
+        if (askNumbers(this, QStringLiteral("Параллельная линия"), &rows))
+            m_view->createParallelFromSelection(rows.at(0).value);
+    });
+    connect(action(QStringLiteral("construct-perpendicular")), &QAction::triggered, this, [this]() {
+        if (!m_view)
+            return;
+        QVector<DialogNumber> rows = {
+            {QStringLiteral("Длина"), 100.0, 0.1, 100000, QStringLiteral(" px"), 1},
+        };
+        if (askNumbers(this, QStringLiteral("Перпендикуляр"), &rows))
+            m_view->createPerpendicularFromSelection(rows.at(0).value);
+    });
+    connect(action(QStringLiteral("construct-tangent")), &QAction::triggered, this, [this]() {
+        if (!m_view)
+            return;
+        const QSizeF page = m_view->pageSize();
+        const QPointF centre(page.width() / 2.0, page.height() / 2.0);
+        QVector<DialogNumber> rows = {
+            {QStringLiteral("Точка X"), centre.x() + 220.0, -100000, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Точка Y"), centre.y() - 180.0, -100000, 100000, QStringLiteral(" px"), 1},
+        };
+        if (askNumbers(this, QStringLiteral("Касательная из точки"), &rows))
+            m_view->createTangentFromSelection(QPointF(rows.at(0).value, rows.at(1).value));
+    });
+    connect(action(QStringLiteral("construct-circle")), &QAction::triggered, this, [this]() {
+        if (!m_view)
+            return;
+        const QSizeF page = m_view->pageSize();
+        const QPointF centre(page.width() / 2.0, page.height() / 2.0);
+        QVector<DialogNumber> rows = {
+            {QStringLiteral("Центр X"), centre.x(), -100000, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Центр Y"), centre.y(), -100000, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Радиус"), 60.0, 0.1, 100000, QStringLiteral(" px"), 1},
+        };
+        if (askNumbers(this, QStringLiteral("Окружность по радиусу"), &rows))
+            m_view->constructCircle(QPointF(rows.at(0).value, rows.at(1).value),
+                                    rows.at(2).value);
+    });
+    connect(action(QStringLiteral("construct-arc")), &QAction::triggered, this, [this]() {
+        if (!m_view)
+            return;
+        const QSizeF page = m_view->pageSize();
+        const QPointF centre(page.width() / 2.0, page.height() / 2.0);
+        QVector<DialogNumber> rows = {
+            {QStringLiteral("Центр X"), centre.x(), -100000, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Центр Y"), centre.y(), -100000, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Радиус"), 60.0, 0.1, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Начало"), 0.0, -360, 360, QStringLiteral(" °"), 1},
+            {QStringLiteral("Разворот"), 120.0, -360, 360, QStringLiteral(" °"), 1},
+        };
+        if (askNumbers(this, QStringLiteral("Дуга по радиусу"), &rows))
+            m_view->constructArc(QPointF(rows.at(0).value, rows.at(1).value),
+                                 rows.at(2).value, rows.at(3).value, rows.at(4).value);
+    });
+    connect(action(QStringLiteral("construct-polygon")), &QAction::triggered, this, [this]() {
+        if (!m_view)
+            return;
+        const QSizeF page = m_view->pageSize();
+        const QPointF centre(page.width() / 2.0, page.height() / 2.0);
+        QVector<DialogNumber> rows = {
+            {QStringLiteral("Центр X"), centre.x(), -100000, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Центр Y"), centre.y(), -100000, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Сторон"), 6.0, 3, 64, QString(), 0},
+            {QStringLiteral("Радиус"), 70.0, 0.1, 100000, QStringLiteral(" px"), 1},
+        };
+        if (askNumbers(this, QStringLiteral("Правильный многоугольник"), &rows))
+            m_view->constructPolygon(QPointF(rows.at(0).value, rows.at(1).value),
+                                     qRound(rows.at(2).value), rows.at(3).value);
+    });
+    connect(action(QStringLiteral("construct-copy")), &QAction::triggered, this, [this]() {
+        if (!m_view)
+            return;
+        QVector<DialogNumber> rows = {
+            {QStringLiteral("Смещение X"), 20.0, -100000, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Смещение Y"), 20.0, -100000, 100000, QStringLiteral(" px"), 1},
+            {QStringLiteral("Копий"), 3.0, 1, 200, QString(), 0},
+        };
+        if (askNumbers(this, QStringLiteral("Копия со смещением"), &rows))
+            m_view->duplicateSelection(qRound(rows.at(2).value),
+                                       QPointF(rows.at(0).value, rows.at(1).value));
+    });
+    connect(action(QStringLiteral("scale-selection")), &QAction::triggered, this, [this]() {
+        if (!m_view)
+            return;
+        QVector<DialogNumber> rows = {
+            {QStringLiteral("Коэффициент"), 1.5, 0.01, 1000, QString(), 3},
+        };
+        if (askNumbers(this, QStringLiteral("Масштабировать выделение"), &rows))
+            m_view->scaleSelectionBy(rows.at(0).value);
+    });
+    for (int type = 0; type < 3; ++type) {
+        const QString id = type == 0 ? QStringLiteral("grid-cartesian")
+                                     : (type == 1 ? QStringLiteral("grid-polar")
+                                                  : QStringLiteral("grid-isometric"));
+        connect(action(id), &QAction::triggered, this, [this, type]() {
+            if (!m_view)
+                return;
+            m_view->setGridType(type);
+            m_view->setShowGrid(true);
+            statusBar()->showMessage(QStringLiteral("Сетка: %1")
+                                         .arg(type == 0 ? QStringLiteral("декартова")
+                                              : (type == 1 ? QStringLiteral("полярная")
+                                                           : QStringLiteral("изометрическая"))),
+                                     3000);
+        });
+    }
+    connect(action(QStringLiteral("drawing-scale")), &QAction::triggered, this, [this]() {
+        if (!m_view)
+            return;
+        QVector<DialogNumber> rows = {
+            {QStringLiteral("Масштаб 1 :"), m_view->drawingScale(), 0.01, 1000, QString(), 2},
+        };
+        if (!askNumbers(this, QStringLiteral("Масштаб чертежа"), &rows))
+            return;
+        m_view->setDrawingScale(rows.at(0).value);
+        updateScaleLabel();
+        updateRulers();
+    });
+
+    connect(action(QStringLiteral("pattern-create")), &QAction::triggered, this, [this]() {
+        if (!m_view)
+            return;
+        if (m_view->selectedVectorItems().isEmpty()) {
+            statusBar()->showMessage(QStringLiteral("Выделите объекты для узора."), 3000);
+            return;
+        }
+        bool ok = false;
+        const QString name = QInputDialog::getText(
+            this, QStringLiteral("Новый узор"), QStringLiteral("Название узора:"),
+            QLineEdit::Normal,
+            QStringLiteral("Узор %1").arg(m_view->patterns().size() + 1), &ok);
+        if (!ok)
+            return;
+        const int id = m_view->createPatternFromSelection(name);
+        if (id <= 0)
+            return;
+        PatternDialog dialog(m_view, m_view->patternDefinition(id), this);
+        dialog.exec();
+        if (m_assetPanel)
+            m_assetPanel->refreshPatterns();
+    });
+
+    connect(action(QStringLiteral("pattern-edit")), &QAction::triggered, this, [this]() {
+        if (!m_view)
+            return;
+        int patternId = m_view->selectedPatternId();
+        if (patternId <= 0 && !m_view->patterns().isEmpty()) {
+            QStringList names;
+            for (const PatternDefinition &pattern : m_view->patterns()) {
+                names.append(QStringLiteral("%1 (%2)")
+                                 .arg(pattern.name, patternTypeName(pattern.settings.type)));
+            }
+            bool ok = false;
+            const QString chosen = QInputDialog::getItem(
+                this, QStringLiteral("Редактировать узор"), QStringLiteral("Узор:"),
+                names, 0, false, &ok);
+            if (!ok)
+                return;
+            patternId = m_view->patterns().at(names.indexOf(chosen)).id;
+        }
+        if (patternId <= 0) {
+            statusBar()->showMessage(
+                QStringLiteral("Выделите объект с узорной заливкой или создайте узор."),
+                3500);
+            return;
+        }
+        PatternDialog dialog(m_view, m_view->patternDefinition(patternId), this);
+        dialog.exec();
+        if (m_assetPanel)
+            m_assetPanel->refreshPatterns();
+    });
+
+    connect(action(QStringLiteral("pattern-update")), &QAction::triggered, this,
+            [this]() {
+                if (!m_view)
+                    return;
+                int patternId = m_view->selectedPatternId();
+                if (patternId <= 0 && !m_view->patterns().isEmpty()) {
+                    QStringList names;
+                    for (const PatternDefinition &pattern : m_view->patterns()) {
+                        names.append(QStringLiteral("%1 (%2)").arg(
+                            pattern.name, patternTypeName(pattern.settings.type)));
+                    }
+                    bool ok = false;
+                    const QString chosen = QInputDialog::getItem(
+                        this, QStringLiteral("Обновить узор"),
+                        QStringLiteral("Узор:"), names, 0, false, &ok);
+                    if (!ok)
+                        return;
+                    patternId = m_view->patterns().at(names.indexOf(chosen)).id;
+                }
+                if (patternId > 0)
+                    m_view->updatePatternFromSelection(patternId);
+            });
+
+    connect(action(QStringLiteral("pattern-expand")), &QAction::triggered, this,
+            [this]() {
+                if (m_view)
+                    m_view->expandSelectedPatterns();
+            });
+
+    connect(action(QStringLiteral("pattern-save-library")), &QAction::triggered, this,
+            [this]() {
+                if (!m_view)
+                    return;
+                const int patternId = m_view->selectedPatternId();
+                if (patternId <= 0) {
+                    statusBar()->showMessage(
+                        QStringLiteral("Выделите объект с узорной заливкой."), 3000);
+                    return;
+                }
+                PatternDefinition pattern = m_view->patternDefinition(patternId);
+                pattern.id = 0;
+                PatternStore::instance().load();
+                if (PatternStore::instance().add(pattern) >= 0) {
+                    statusBar()->showMessage(
+                        QStringLiteral("Узор «%1» сохранён в библиотеку.")
+                            .arg(pattern.name),
+                        3000);
+                    if (m_assetPanel)
+                        m_assetPanel->refreshPatterns();
+                }
+            });
+
+    connect(action(QStringLiteral("pattern-library")), &QAction::triggered, this,
+            [this, showLibrary]() {
+                showLibrary();
+                if (m_assetPanel)
+                    m_assetPanel->showPatternsTab();
+            });
+
+    const QStringList codeActions = {
+        QStringLiteral("code-qr"), QStringLiteral("code-ean13"),
+        QStringLiteral("code-ean8"), QStringLiteral("code-upca"),
+        QStringLiteral("code-code128"), QStringLiteral("code-code39"),
+        QStringLiteral("code-datamatrix"),
+    };
+    for (int kind = 0; kind < codeActions.size(); ++kind) {
+        connect(action(codeActions.at(kind)), &QAction::triggered, this,
+                [this, kind]() { openCodeDialog(nullptr, kind); });
+    }
+    connect(action(QStringLiteral("code-edit")), &QAction::triggered, this, [this]() {
+        VectorItem *target = nullptr;
+        if (m_view) {
+            for (VectorItem *item : m_view->selectedVectorItems()) {
+                if (item->object().type == ShapeType::Code) {
+                    target = item;
+                    break;
+                }
+            }
+        }
+        if (!target) {
+            statusBar()->showMessage(
+                QStringLiteral("Выделите объект кода для редактирования."), 3000);
+            return;
+        }
+        openCodeDialog(target, -1);
+    });
+    connect(m_view, &CanvasView::codeEditRequested, this,
+            [this](VectorItem *item) { openCodeDialog(item, -1); });
     connect(action(QStringLiteral("copy")), &QAction::triggered, this,
             &MainWindow::copySelection);
     connect(action(QStringLiteral("cut")), &QAction::triggered, this,
@@ -1169,16 +1870,65 @@ void MainWindow::createActions()
         QDialog dialog(this);
         dialog.setWindowTitle(QStringLiteral("Сетка и привязка"));
         auto *form = new QFormLayout(&dialog);
+
+        auto *gridType = new QComboBox(&dialog);
+        gridType->addItems({QStringLiteral("Декартова"), QStringLiteral("Полярная"),
+                            QStringLiteral("Изометрическая")});
+        gridType->setCurrentIndex(m_view->gridType());
         auto *step = new QSpinBox(&dialog);
         step->setRange(2, 400);
         step->setValue(m_view->gridStep());
         step->setSuffix(QStringLiteral(" px"));
+        auto *angle = new QDoubleSpinBox(&dialog);
+        angle->setRange(1.0, 90.0);
+        angle->setValue(m_view->gridAngle());
+        angle->setSuffix(QStringLiteral(" °"));
+        auto *originX = new QDoubleSpinBox(&dialog);
+        originX->setRange(-10000.0, 10000.0);
+        originX->setValue(m_view->gridOrigin().x());
+        originX->setSuffix(QStringLiteral(" px"));
+        auto *originY = new QDoubleSpinBox(&dialog);
+        originY->setRange(-10000.0, 10000.0);
+        originY->setValue(m_view->gridOrigin().y());
+        originY->setSuffix(QStringLiteral(" px"));
         auto *threshold = new QDoubleSpinBox(&dialog);
         threshold->setRange(1, 60);
         threshold->setValue(m_view->snapThreshold());
         threshold->setSuffix(QStringLiteral(" px"));
+
+        form->addRow(QStringLiteral("Тип сетки"), gridType);
         form->addRow(QStringLiteral("Шаг сетки"), step);
+        form->addRow(QStringLiteral("Угол полярной сетки"), angle);
+        form->addRow(QStringLiteral("Начало координат X"), originX);
+        form->addRow(QStringLiteral("Начало координат Y"), originY);
         form->addRow(QStringLiteral("Чувствительность привязки"), threshold);
+
+        struct SnapToggle {
+            QString key;
+            QString label;
+            QCheckBox *box = nullptr;
+        };
+        QVector<SnapToggle> toggles = {
+            {QStringLiteral("grid"), QStringLiteral("Сетка"), nullptr},
+            {QStringLiteral("guides"), QStringLiteral("Направляющие"), nullptr},
+            {QStringLiteral("objects"), QStringLiteral("Края объектов"), nullptr},
+            {QStringLiteral("nodes"), QStringLiteral("Узлы"), nullptr},
+            {QStringLiteral("centers"), QStringLiteral("Центры"), nullptr},
+            {QStringLiteral("midpoints"), QStringLiteral("Середины"), nullptr},
+            {QStringLiteral("intersections"), QStringLiteral("Пересечения"), nullptr},
+            {QStringLiteral("edges"), QStringLiteral("Ближайшие края"), nullptr},
+            {QStringLiteral("tangents"), QStringLiteral("Касания"), nullptr},
+        };
+        auto *snapGrid = new QGridLayout;
+        int row = 0;
+        for (SnapToggle &toggle : toggles) {
+            toggle.box = new QCheckBox(toggle.label, &dialog);
+            toggle.box->setChecked(m_view->snapOption(toggle.key));
+            snapGrid->addWidget(toggle.box, row / 3, row % 3);
+            ++row;
+        }
+        form->addRow(QStringLiteral("Привязка к"), snapGrid);
+
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok
                                                  | QDialogButtonBox::Cancel,
                                              &dialog);
@@ -1187,8 +1937,14 @@ void MainWindow::createActions()
         connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         if (dialog.exec() != QDialog::Accepted)
             return;
+
+        m_view->setGridType(gridType->currentIndex());
         m_view->setGridStep(step->value());
+        m_view->setGridAngle(angle->value());
+        m_view->setGridOrigin(QPointF(originX->value(), originY->value()));
         m_view->setSnapThreshold(threshold->value());
+        for (const SnapToggle &toggle : toggles)
+            m_view->setSnapOption(toggle.key, toggle.box->isChecked());
         statusBar()->showMessage(
             QStringLiteral("Сетка: %1 px, привязка: %2 px")
                 .arg(step->value())
@@ -1224,6 +1980,10 @@ void MainWindow::createMenus()
     fileMenu->addAction(action(QStringLiteral("pdf")));
     fileMenu->addAction(action(QStringLiteral("export-pages")));
     fileMenu->addSeparator();
+    fileMenu->addAction(action(QStringLiteral("templates")));
+    fileMenu->addAction(action(QStringLiteral("versions")));
+    fileMenu->addAction(action(QStringLiteral("package")));
+    fileMenu->addSeparator();
     fileMenu->addAction(action(QStringLiteral("print")));
     fileMenu->addSeparator();
     fileMenu->addAction(action(QStringLiteral("quit")));
@@ -1231,6 +1991,7 @@ void MainWindow::createMenus()
     auto *editMenu = menuBar()->addMenu(QStringLiteral("Правка"));
     editMenu->addAction(action(QStringLiteral("undo")));
     editMenu->addAction(action(QStringLiteral("redo")));
+    editMenu->addAction(action(QStringLiteral("history")));
     editMenu->addSeparator();
     editMenu->addAction(action(QStringLiteral("cut")));
     editMenu->addAction(action(QStringLiteral("copy")));
@@ -1241,6 +2002,7 @@ void MainWindow::createMenus()
     editMenu->addAction(action(QStringLiteral("delete")));
     editMenu->addSeparator();
     editMenu->addAction(action(QStringLiteral("select-all")));
+    editMenu->addAction(action(QStringLiteral("search-objects")));
     editMenu->addSeparator();
     editMenu->addAction(action(QStringLiteral("preferences")));
 
@@ -1305,6 +2067,117 @@ void MainWindow::createMenus()
     effectsMenu->addAction(action(QStringLiteral("fx-extrude")));
     effectsMenu->addAction(action(QStringLiteral("fx-lens")));
     effectsMenu->addAction(action(QStringLiteral("fx-bevel")));
+    effectsMenu->addSeparator();
+    auto *vectorEffects = effectsMenu->addMenu(QStringLiteral("Векторные эффекты"));
+    vectorEffects->addAction(action(QStringLiteral("fx-glow")));
+    vectorEffects->addAction(action(QStringLiteral("fx-blur")));
+    vectorEffects->addAction(action(QStringLiteral("fx-distort")));
+    vectorEffects->addAction(action(QStringLiteral("fx-warp")));
+    vectorEffects->addAction(action(QStringLiteral("fx-perspective")));
+    vectorEffects->addAction(action(QStringLiteral("fx-clip")));
+    vectorEffects->addAction(action(QStringLiteral("fx-opacity")));
+    vectorEffects->addSeparator();
+    vectorEffects->addAction(action(QStringLiteral("fx-clear")));
+    vectorEffects->addAction(action(QStringLiteral("fx-panel")));
+
+    auto *symbolMenu = menuBar()->addMenu(QStringLiteral("Символы"));
+    symbolMenu->addAction(action(QStringLiteral("symbol-create")));
+    auto *insertSymbolMenu = symbolMenu->addMenu(QStringLiteral("Вставить символ"));
+    connect(insertSymbolMenu, &QMenu::aboutToShow, this, [this, insertSymbolMenu]() {
+        insertSymbolMenu->clear();
+        if (!m_view || m_view->symbols().isEmpty()) {
+            QAction *empty = insertSymbolMenu->addAction(QStringLiteral("Нет символов"));
+            empty->setEnabled(false);
+            return;
+        }
+        for (const SymbolDefinition &symbol : m_view->symbols()) {
+            QAction *entry = insertSymbolMenu->addAction(symbol.name);
+            const int id = symbol.id;
+            connect(entry, &QAction::triggered, this, [this, id]() {
+                m_view->insertSymbol(id);
+                if (m_assetPanel)
+                    m_assetPanel->refreshSymbols();
+            });
+        }
+    });
+    symbolMenu->addAction(action(QStringLiteral("symbol-update")));
+    symbolMenu->addAction(action(QStringLiteral("symbol-detach")));
+    symbolMenu->addSeparator();
+    symbolMenu->addAction(action(QStringLiteral("symbol-rename")));
+    symbolMenu->addAction(action(QStringLiteral("symbol-delete")));
+    symbolMenu->addSeparator();
+    symbolMenu->addAction(action(QStringLiteral("symbol-panel")));
+
+    auto *draftingMenu = menuBar()->addMenu(QStringLiteral("Черчение"));
+    auto *dimensionsMenu = draftingMenu->addMenu(QStringLiteral("Размеры"));
+    dimensionsMenu->addAction(action(QStringLiteral("dimension-horizontal")));
+    dimensionsMenu->addAction(action(QStringLiteral("dimension-vertical")));
+    dimensionsMenu->addAction(action(QStringLiteral("dimension-aligned")));
+    dimensionsMenu->addSeparator();
+    dimensionsMenu->addAction(action(QStringLiteral("dimension-angular")));
+    dimensionsMenu->addAction(action(QStringLiteral("dimension-radius")));
+    dimensionsMenu->addAction(action(QStringLiteral("dimension-diameter")));
+    draftingMenu->addSeparator();
+    draftingMenu->addAction(action(QStringLiteral("construct-line")));
+    draftingMenu->addAction(action(QStringLiteral("construct-angle")));
+    draftingMenu->addAction(action(QStringLiteral("construct-parallel")));
+    draftingMenu->addAction(action(QStringLiteral("construct-perpendicular")));
+    draftingMenu->addAction(action(QStringLiteral("construct-tangent")));
+    draftingMenu->addAction(action(QStringLiteral("construct-circle")));
+    draftingMenu->addAction(action(QStringLiteral("construct-arc")));
+    draftingMenu->addAction(action(QStringLiteral("construct-polygon")));
+    draftingMenu->addAction(action(QStringLiteral("construct-copy")));
+    draftingMenu->addSeparator();
+    draftingMenu->addAction(action(QStringLiteral("scale-selection")));
+    draftingMenu->addAction(action(QStringLiteral("drawing-scale")));
+    auto *gridMenu = draftingMenu->addMenu(QStringLiteral("Сетка"));
+    gridMenu->addAction(action(QStringLiteral("grid-cartesian")));
+    gridMenu->addAction(action(QStringLiteral("grid-polar")));
+    gridMenu->addAction(action(QStringLiteral("grid-isometric")));
+    gridMenu->addSeparator();
+    gridMenu->addAction(action(QStringLiteral("snap-settings")));
+
+    auto *patternMenu = menuBar()->addMenu(QStringLiteral("Узор"));
+    patternMenu->addAction(action(QStringLiteral("pattern-create")));
+    patternMenu->addAction(action(QStringLiteral("pattern-edit")));
+    patternMenu->addAction(action(QStringLiteral("pattern-update")));
+    auto *applyPatternMenu = patternMenu->addMenu(QStringLiteral("Применить узор"));
+    connect(applyPatternMenu, &QMenu::aboutToShow, this,
+            [this, applyPatternMenu]() {
+                applyPatternMenu->clear();
+                if (!m_view || m_view->patterns().isEmpty()) {
+                    QAction *empty = applyPatternMenu->addAction(
+                        QStringLiteral("В документе нет узоров"));
+                    empty->setEnabled(false);
+                    return;
+                }
+                for (const PatternDefinition &pattern : m_view->patterns()) {
+                    QAction *entry = applyPatternMenu->addAction(
+                        QStringLiteral("%1 — %2").arg(pattern.name,
+                                                      patternTypeName(pattern.settings.type)));
+                    const int id = pattern.id;
+                    connect(entry, &QAction::triggered, this, [this, id]() {
+                        m_view->applyPatternToSelection(id);
+                    });
+                }
+            });
+    patternMenu->addAction(action(QStringLiteral("pattern-expand")));
+    patternMenu->addSeparator();
+    patternMenu->addAction(action(QStringLiteral("pattern-save-library")));
+    patternMenu->addAction(action(QStringLiteral("pattern-library")));
+
+    auto *codeMenu = menuBar()->addMenu(QStringLiteral("Код"));
+    codeMenu->addAction(action(QStringLiteral("code-qr")));
+    codeMenu->addSeparator();
+    codeMenu->addAction(action(QStringLiteral("code-ean13")));
+    codeMenu->addAction(action(QStringLiteral("code-ean8")));
+    codeMenu->addAction(action(QStringLiteral("code-upca")));
+    codeMenu->addSeparator();
+    codeMenu->addAction(action(QStringLiteral("code-code128")));
+    codeMenu->addAction(action(QStringLiteral("code-code39")));
+    codeMenu->addAction(action(QStringLiteral("code-datamatrix")));
+    codeMenu->addSeparator();
+    codeMenu->addAction(action(QStringLiteral("code-edit")));
 
     auto *textMenu = menuBar()->addMenu(QStringLiteral("Текст"));
     textMenu->addAction(action(QStringLiteral("text-character")));
@@ -1558,9 +2431,22 @@ void MainWindow::createMenus()
     Q_UNUSED(paletteFromSettings)
     Q_UNUSED(storePaletteInSettings)
 
+    auto *libraryMenu = menuBar()->addMenu(QStringLiteral("Библиотека"));
+    libraryMenu->addAction(action(QStringLiteral("library-add")));
+    libraryMenu->addAction(action(QStringLiteral("library-panel")));
+    libraryMenu->addSeparator();
+    libraryMenu->addAction(action(QStringLiteral("library-new")));
+    libraryMenu->addAction(action(QStringLiteral("library-import")));
+    libraryMenu->addAction(action(QStringLiteral("library-export")));
+    libraryMenu->addSeparator();
+    libraryMenu->addAction(action(QStringLiteral("library-undo")));
+    libraryMenu->addAction(action(QStringLiteral("library-redo")));
+
     auto *windowMenu = menuBar()->addMenu(QStringLiteral("Окно"));
     windowMenu->addAction(m_toolsDock->toggleViewAction());
     windowMenu->addAction(m_paletteDock->toggleViewAction());
+    if (m_assetDock)
+        windowMenu->addAction(m_assetDock->toggleViewAction());
     auto *dockersMenu = windowMenu->addMenu(QStringLiteral("Докеры"));
     if (m_dockPanels) {
         for (QDockWidget *dock : m_dockPanels->docks())
@@ -1570,6 +2456,8 @@ void MainWindow::createMenus()
     windowMenu->addAction(action(QStringLiteral("preferences")));
 
     auto *helpMenu = menuBar()->addMenu(QStringLiteral("Справка"));
+    helpMenu->addAction(action(QStringLiteral("check-updates")));
+    helpMenu->addSeparator();
     helpMenu->addAction(action(QStringLiteral("shortcuts")));
     helpMenu->addAction(action(QStringLiteral("about")));
 }
@@ -1661,10 +2549,18 @@ void MainWindow::createDocks()
     m_toolsDock = new QDockWidget(QStringLiteral("Инструменты"), this);
     m_toolsDock->setObjectName(QStringLiteral("ToolsDock"));
     m_toolPalette = new ToolPalette(m_toolsDock);
-    m_toolsDock->setWidget(m_toolPalette);
+    // The tool list is taller than a laptop viewport now, so keep it scrollable
+    // instead of clipping the lower groups.
+    auto *toolsScroll = new QScrollArea(m_toolsDock);
+    toolsScroll->setObjectName(QStringLiteral("ToolsScroll"));
+    toolsScroll->setWidgetResizable(true);
+    toolsScroll->setFrameShape(QFrame::NoFrame);
+    toolsScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    toolsScroll->setWidget(m_toolPalette);
+    m_toolsDock->setWidget(toolsScroll);
     m_toolsDock->setFeatures(QDockWidget::NoDockWidgetFeatures);
     m_toolsDock->setTitleBarWidget(new QWidget(m_toolsDock));
-    m_toolsDock->setFixedWidth(54);
+    m_toolsDock->setFixedWidth(64);
     addDockWidget(Qt::LeftDockWidgetArea, m_toolsDock);
     connect(m_toolPalette, &ToolPalette::toolSelected, this, &MainWindow::applyTool);
     connect(m_toolPalette, &ToolPalette::toolDoubleClicked, this, [this](Tool tool) {
@@ -1707,6 +2603,18 @@ void MainWindow::createDocks()
     });
 
     // Bottom: colour palette
+    AssetStore::instance().load();
+    PatternStore::instance().load();
+    m_assetDock = new QDockWidget(QStringLiteral("Библиотека"), this);
+    m_assetDock->setObjectName(QStringLiteral("AssetDock"));
+    m_assetPanel = new AssetPanel(m_view, m_assetDock);
+    m_assetDock->setWidget(m_assetPanel);
+    addDockWidget(Qt::RightDockWidgetArea, m_assetDock);
+    if (!dockers.isEmpty()) {
+        tabifyDockWidget(dockers.at(0), m_assetDock);
+        dockers.at(0)->raise();
+    }
+
     m_paletteDock = new QDockWidget(QStringLiteral("Палитра"), this);
     m_paletteDock->setObjectName(QStringLiteral("PaletteDock"));
     auto *bottomPanel = new QWidget(m_paletteDock);
@@ -2289,6 +3197,102 @@ void MainWindow::createPropertyBar()
     nodeLayout->addStretch(1);
 
     m_propertyStack->addWidget(nodePage);      // 9
+
+    // 10 — dimensions
+    auto *dimensionPage = new QWidget(m_propertyStack);
+    auto *dimensionLayout = new QHBoxLayout(dimensionPage);
+    dimensionLayout->setContentsMargins(2, 0, 2, 0);
+    dimensionLayout->setSpacing(6);
+
+    dimensionLayout->addWidget(fieldLabel(QStringLiteral("Размер")));
+    m_dimensionTypeCombo = new QComboBox(dimensionPage);
+    m_dimensionTypeCombo->addItems({QStringLiteral("Горизонтальный"),
+                                    QStringLiteral("Вертикальный"),
+                                    QStringLiteral("Наклонный"),
+                                    QStringLiteral("Угловой"),
+                                    QStringLiteral("Радиус"),
+                                    QStringLiteral("Диаметр")});
+    m_dimensionTypeCombo->setFixedWidth(132);
+    dimensionLayout->addWidget(m_dimensionTypeCombo);
+
+    dimensionLayout->addWidget(fieldLabel(QStringLiteral("Единицы")));
+    m_dimensionUnitsCombo = new QComboBox(dimensionPage);
+    m_dimensionUnitsCombo->addItems({QStringLiteral("мм"), QStringLiteral("см"),
+                                     QStringLiteral("дюймы"), QStringLiteral("px")});
+    m_dimensionUnitsCombo->setFixedWidth(82);
+    dimensionLayout->addWidget(m_dimensionUnitsCombo);
+
+    dimensionLayout->addWidget(fieldLabel(QStringLiteral("Точность")));
+    m_dimensionPrecisionSpin = new QSpinBox(dimensionPage);
+    m_dimensionPrecisionSpin->setRange(0, 4);
+    m_dimensionPrecisionSpin->setValue(m_view->dimensionPrecision());
+    m_dimensionPrecisionSpin->setFixedWidth(58);
+    dimensionLayout->addWidget(m_dimensionPrecisionSpin);
+
+    dimensionLayout->addWidget(fieldLabel(QStringLiteral("Смещение")));
+    m_dimensionOffsetSpin = new QDoubleSpinBox(dimensionPage);
+    m_dimensionOffsetSpin->setRange(-300.0, 300.0);
+    m_dimensionOffsetSpin->setDecimals(1);
+    m_dimensionOffsetSpin->setValue(m_view->dimensionOffset());
+    m_dimensionOffsetSpin->setSuffix(QStringLiteral(" px"));
+    m_dimensionOffsetSpin->setFixedWidth(88);
+    dimensionLayout->addWidget(m_dimensionOffsetSpin);
+
+    m_dimensionAssocCheck = new QCheckBox(QStringLiteral("Связь с объектом"), dimensionPage);
+    m_dimensionAssocCheck->setChecked(m_view->dimensionAssociative());
+    dimensionLayout->addWidget(m_dimensionAssocCheck);
+
+    auto *applyDimensionButton = new QToolButton(dimensionPage);
+    applyDimensionButton->setText(QStringLiteral("Применить к выделенным"));
+    dimensionLayout->addWidget(applyDimensionButton);
+    dimensionLayout->addStretch(1);
+
+    const auto applyLiveDimensionStyle = [this]() {
+        if (!m_view)
+            return;
+        for (VectorItem *item : m_view->selectedVectorItems()) {
+            if (item->object().type == ShapeType::Dimension) {
+                m_view->applyDimensionSettingsToSelection();
+                break;
+            }
+        }
+    };
+    connect(m_dimensionTypeCombo, &QComboBox::currentIndexChanged, this,
+            [this](int index) {
+                if (m_view)
+                    m_view->setDimensionMode(
+                        static_cast<CanvasView::DimensionMode>(qBound(0, index, 5)));
+            });
+    connect(m_dimensionUnitsCombo, &QComboBox::currentIndexChanged, this,
+            [this, applyLiveDimensionStyle](int index) {
+                if (m_view)
+                    m_view->setDimensionUnits(index);
+                applyLiveDimensionStyle();
+            });
+    connect(m_dimensionPrecisionSpin, &QSpinBox::valueChanged, this,
+            [this, applyLiveDimensionStyle](int value) {
+                if (m_view)
+                    m_view->setDimensionPrecision(value);
+                applyLiveDimensionStyle();
+            });
+    connect(m_dimensionOffsetSpin, &QDoubleSpinBox::valueChanged, this,
+            [this](double value) {
+                if (m_view)
+                    m_view->setDimensionOffset(value);
+            });
+    connect(m_dimensionOffsetSpin, &QDoubleSpinBox::editingFinished, this,
+            applyLiveDimensionStyle);
+    connect(m_dimensionAssocCheck, &QCheckBox::toggled, this, [this](bool on) {
+        if (m_view)
+            m_view->setDimensionAssociative(on);
+    });
+    connect(applyDimensionButton, &QToolButton::clicked, this, [this]() {
+        if (m_view)
+            m_view->applyDimensionSettingsToSelection();
+    });
+
+    m_propertyStack->addWidget(dimensionPage); // 10
+    m_dimensionPageIndex = 10;
     m_propertyStack->setCurrentIndex(m_transformPageIndex);
 
     bar->addWidget(m_propertyStack);
@@ -2336,6 +3340,11 @@ void MainWindow::createStatusBar()
     m_zoomCombo->setToolTip(QStringLiteral("Масштаб холста"));
     statusBar()->addPermanentWidget(m_zoomCombo);
 
+    m_scaleLabel = new QLabel(QStringLiteral("1:1"), this);
+    m_scaleLabel->setStyleSheet(QStringLiteral("color:#8b929d; padding:0 10px;"));
+    m_scaleLabel->setToolTip(QStringLiteral("Масштаб чертежа"));
+    statusBar()->addPermanentWidget(m_scaleLabel);
+
     connect(m_zoomCombo, &QComboBox::activated, this, [this](int) {
         applyZoomText(m_zoomCombo->currentText());
     });
@@ -2343,22 +3352,7 @@ void MainWindow::createStatusBar()
         applyZoomText(m_zoomCombo->currentText());
     });
     connect(m_unitsCombo, &QComboBox::currentTextChanged, this,
-            [this](const QString &unit) {
-                qreal pixelsPerUnit = 1.0;
-                if (unit == QLatin1String("мм"))
-                    pixelsPerUnit = 3.7795275591;
-                else if (unit == QLatin1String("см"))
-                    pixelsPerUnit = 37.795275591;
-                else if (unit == QLatin1String("in"))
-                    pixelsPerUnit = 96.0;
-                if (m_hRuler)
-                    m_hRuler->setUnit(unit, pixelsPerUnit);
-                if (m_vRuler)
-                    m_vRuler->setUnit(unit, pixelsPerUnit);
-                if (m_rulerCorner)
-                    m_rulerCorner->setText(unit);
-                updateCoordinates(m_cursorScenePos);
-            });
+            [this](const QString &) { updateRulers(); });
 }
 
 // ---------------------------------------------------------------------------
@@ -2416,6 +3410,18 @@ void MainWindow::showEditor()
     statusBar()->show();
 }
 
+void MainWindow::openCodeDialog(VectorItem *item, int kind)
+{
+    if (!m_view)
+        return;
+    if (item && item->object().type != ShapeType::Code)
+        item = nullptr;
+    CodeDialog dialog(m_view, item, this);
+    if (!item && kind >= 0)
+        dialog.setKind(codeKindFromIndex(kind));
+    dialog.exec();
+}
+
 void MainWindow::showCanvasContextMenu(const QPoint &globalPos, VectorItem *item)
 {
     QMenu menu(this);
@@ -2432,6 +3438,12 @@ void MainWindow::showCanvasContextMenu(const QPoint &globalPos, VectorItem *item
                 showDockerTab(QStringLiteral("Свойства"), 0);
             });
         } else {
+            if (item->object().type == ShapeType::Code) {
+                QAction *editCode = menu.addAction(QStringLiteral("Редактировать код…"));
+                connect(editCode, &QAction::triggered, this,
+                        [this, item]() { openCodeDialog(item, -1); });
+                menu.addSeparator();
+            }
             menu.addAction(action(QStringLiteral("cut")));
             menu.addAction(action(QStringLiteral("copy")));
             menu.addAction(action(QStringLiteral("duplicate")));
@@ -2457,6 +3469,15 @@ void MainWindow::showCanvasContextMenu(const QPoint &globalPos, VectorItem *item
             menu.addAction(action(QStringLiteral("convert-curves")));
             menu.addSeparator();
 
+            QAction *renameObject = menu.addAction(QStringLiteral("Переименовать объект…"));
+            connect(renameObject, &QAction::triggered, this, [this, item]() {
+                bool ok = false;
+                const QString name = QInputDialog::getText(
+                    this, QStringLiteral("Имя объекта"), QStringLiteral("Название:"),
+                    QLineEdit::Normal, item->object().name, &ok);
+                if (ok)
+                    m_view->renameItem(item, name);
+            });
             QAction *lock = menu.addAction(QStringLiteral("Заблокировать объект"));
             connect(lock, &QAction::triggered, this, [this, item]() {
                 m_view->setItemLocked(item, true);
@@ -2627,7 +3648,12 @@ void MainWindow::applyTool(Tool tool)
     case Tool::Transparency:
     case Tool::Shadow:
     case Tool::Blend:
+    case Tool::Extrude:
+    case Tool::Perspective:
         page = m_paintPageIndex;
+        break;
+    case Tool::Dimension:
+        page = m_dimensionPageIndex;
         break;
     default:
         page = m_transformPageIndex;
@@ -2640,6 +3666,48 @@ void MainWindow::applyTool(Tool tool)
     statusBar()->showMessage(QStringLiteral("Инструмент: %1 (%2)")
                                  .arg(info->name, info->shortcut),
                              3500);
+}
+
+void MainWindow::startDimensionTool(int type)
+{
+    applyTool(Tool::Dimension);
+    if (m_view)
+        m_view->setDimensionMode(
+            static_cast<CanvasView::DimensionMode>(qBound(0, type, 5)));
+    if (m_dimensionTypeCombo) {
+        const QSignalBlocker blocker(m_dimensionTypeCombo);
+        m_dimensionTypeCombo->setCurrentIndex(qBound(0, type, 5));
+    }
+}
+
+void MainWindow::updateRulers()
+{
+    if (!m_hRuler || !m_vRuler)
+        return;
+    const QString unit = m_unitsCombo ? m_unitsCombo->currentText()
+                                      : QStringLiteral("мм");
+    qreal base = 1.0;
+    if (unit == QLatin1String("мм"))
+        base = kPxPerMm;
+    else if (unit == QLatin1String("см"))
+        base = kPxPerMm * 10.0;
+    else if (unit == QLatin1String("in"))
+        base = 96.0;
+    const qreal scale = m_view ? qMax<qreal>(0.01, m_view->drawingScale()) : 1.0;
+    m_hRuler->setUnit(unit, base / scale);
+    m_vRuler->setUnit(unit, base / scale);
+    if (m_rulerCorner)
+        m_rulerCorner->setText(unit);
+    updateCoordinates(m_cursorScenePos);
+}
+
+void MainWindow::updateScaleLabel()
+{
+    if (!m_scaleLabel || !m_view)
+        return;
+    m_scaleLabel->setText(QStringLiteral("1:%1")
+                              .arg(m_view->drawingScale(), 0, 'g', 6));
+    m_scaleLabel->setVisible(m_view->drawingScale() > 0.0);
 }
 
 void MainWindow::showStub(const QString &feature)
@@ -2701,6 +3769,9 @@ void MainWindow::updateCoordinates(const QPointF &scenePos)
             factor = 1.0 / kPxPerMm;
     }
 
+    if (unit != QLatin1String("px") && m_view)
+        factor *= m_view->drawingScale();
+
     m_coordsLabel->setText(QStringLiteral("X: %1  Y: %2 %3")
                                .arg(scenePos.x() * factor, 0, 'f', 1)
                                .arg(scenePos.y() * factor, 0, 'f', 1)
@@ -2731,6 +3802,7 @@ Document MainWindow::currentDocument() const
     if (!m_view)
         return document;
     document.pageSize = m_view->pageSize();
+    document.drawingScale = m_view->drawingScale();
     document.pages = m_view->pageList();
     document.masters = m_view->masterList();
     document.currentPage = m_view->currentPage();
@@ -2739,6 +3811,10 @@ Document MainWindow::currentDocument() const
         document.pages[document.currentPage].size = m_view->pageSize();
     document.layers = m_view->layers();
     document.groups = m_view->groups();
+    document.blends = m_view->blends();
+    document.symbols = m_view->symbols();
+    document.instances = m_view->instances();
+    document.patterns = m_view->patterns();
     document.guidesX = m_view->guidesX();
     document.guidesY = m_view->guidesY();
     document.layerVisible.clear();
@@ -2759,6 +3835,8 @@ void MainWindow::applyDocument(const Document &document)
     if (m_dockPanels)
         m_dockPanels->refresh();
     updatePageBadge();
+    updateScaleLabel();
+    updateRulers();
     updateHistoryActions();
 }
 
@@ -2819,8 +3897,10 @@ void MainWindow::newDocument()
     document.pages.append(info);
     applyDocument(document);
     m_filePath.clear();
+    m_versions.clear();
     m_modified = false;
     resetHistory();
+    clearAutosave();
     updateTitle();
     showEditor();
     m_view->fitPage();
@@ -2913,11 +3993,20 @@ bool MainWindow::openPath(const QString &path)
     applyDocument(document);
     m_filePath = path;
     m_modified = false;
+    m_versions = loadVersions(path);
     resetHistory();
+    loadHistorySidecar();
+    clearAutosave();
     updateTitle();
     addRecentFile(path);
     showEditor();
     m_view->fitPage();
+    const QStringList absent = missingFonts(document);
+    if (!absent.isEmpty()) {
+        statusBar()->showMessage(
+            QStringLiteral("Отсутствуют шрифты: %1").arg(absent.join(QStringLiteral(", "))),
+            8000);
+    }
     return true;
 }
 
@@ -2935,6 +4024,9 @@ void MainWindow::saveDocument()
     }
 
     m_modified = false;
+    clearAutosave();
+    saveHistorySidecar();
+    saveVersions(m_filePath, m_versions, nullptr);
     updateTitle();
     addRecentFile(m_filePath);
     statusBar()->showMessage(
@@ -2963,6 +4055,9 @@ void MainWindow::saveDocumentAs()
 
     m_filePath = path;
     m_modified = false;
+    clearAutosave();
+    saveHistorySidecar();
+    saveVersions(m_filePath, m_versions, nullptr);
     updateTitle();
     addRecentFile(path);
     statusBar()->showMessage(
@@ -3266,10 +4361,22 @@ void MainWindow::endEdit()
     if (current == m_pendingSnapshot)
         return;
 
+    QString label = m_lastHint;
+    if (label.isEmpty() || !m_lastHintTime.isValid()
+        || m_lastHintTime.secsTo(QDateTime::currentDateTime()) > 4) {
+        label = QStringLiteral("Изменение документа");
+    }
     m_undoStack.append(m_pendingSnapshot);
-    if (m_undoStack.size() > 100)
+    m_undoLabels.append(label);
+    m_undoTimes.append(QDateTime::currentDateTime());
+    if (m_undoStack.size() > 100) {
         m_undoStack.removeFirst();
+        m_undoLabels.removeFirst();
+        m_undoTimes.removeFirst();
+    }
     m_redoStack.clear();
+    m_redoLabels.clear();
+    m_redoTimes.clear();
 
     m_modified = true;
     updateTitle();
@@ -3285,7 +4392,15 @@ void MainWindow::undo()
         return;
 
     const QJsonObject previous = m_undoStack.takeLast();
+    const QString label = m_undoLabels.isEmpty()
+                              ? QStringLiteral("Действие")
+                              : m_undoLabels.takeLast();
+    const QDateTime time = m_undoTimes.isEmpty()
+                               ? QDateTime::currentDateTime()
+                               : m_undoTimes.takeLast();
     m_redoStack.append(currentDocument().toJson());
+    m_redoLabels.append(label);
+    m_redoTimes.append(time);
 
     QString error;
     const Document document = Document::fromJson(previous, &error);
@@ -3297,8 +4412,12 @@ void MainWindow::undo()
     updateTitle();
     if (m_dockPanels)
         m_dockPanels->refresh();
+    if (m_assetPanel) {
+        m_assetPanel->refreshSymbols();
+        m_assetPanel->refreshPatterns();
+    }
     updateHistoryActions();
-    statusBar()->showMessage(QStringLiteral("Действие отменено."), 2500);
+    statusBar()->showMessage(QStringLiteral("Действие отменено: %1").arg(label), 2500);
 }
 
 void MainWindow::redo()
@@ -3307,7 +4426,15 @@ void MainWindow::redo()
         return;
 
     const QJsonObject next = m_redoStack.takeLast();
+    const QString label = m_redoLabels.isEmpty()
+                              ? QStringLiteral("Действие")
+                              : m_redoLabels.takeLast();
+    const QDateTime time = m_redoTimes.isEmpty()
+                               ? QDateTime::currentDateTime()
+                               : m_redoTimes.takeLast();
     m_undoStack.append(currentDocument().toJson());
+    m_undoLabels.append(label);
+    m_undoTimes.append(time);
 
     QString error;
     const Document document = Document::fromJson(next, &error);
@@ -3319,14 +4446,22 @@ void MainWindow::redo()
     updateTitle();
     if (m_dockPanels)
         m_dockPanels->refresh();
+    if (m_assetPanel) {
+        m_assetPanel->refreshSymbols();
+        m_assetPanel->refreshPatterns();
+    }
     updateHistoryActions();
-    statusBar()->showMessage(QStringLiteral("Действие повторено."), 2500);
+    statusBar()->showMessage(QStringLiteral("Действие повторено: %1").arg(label), 2500);
 }
 
 void MainWindow::resetHistory()
 {
     m_undoStack.clear();
     m_redoStack.clear();
+    m_undoLabels.clear();
+    m_redoLabels.clear();
+    m_undoTimes.clear();
+    m_redoTimes.clear();
     m_editOpen = false;
     updateHistoryActions();
 }
@@ -3339,6 +4474,379 @@ void MainWindow::updateHistoryActions()
         undoAction->setEnabled(!m_undoStack.isEmpty());
     if (redoAction)
         redoAction->setEnabled(!m_redoStack.isEmpty());
+}
+
+void MainWindow::setupAutosave()
+{
+    if (!m_autosaveTimer) {
+        m_autosaveTimer = new QTimer(this);
+        connect(m_autosaveTimer, &QTimer::timeout, this, &MainWindow::performAutosave);
+    }
+    QSettings settings;
+    const bool enabled = settings.value(QStringLiteral("autosave/enabled"), true).toBool();
+    const int interval = qBound(10, settings.value(QStringLiteral("autosave/interval"), 120).toInt(),
+                                3600);
+    if (enabled)
+        m_autosaveTimer->start(interval * 1000);
+    else
+        m_autosaveTimer->stop();
+}
+
+void MainWindow::performAutosave()
+{
+    if (!m_modified || !m_view || m_view->objects().isEmpty())
+        return;
+    QSettings settings;
+    const int keep = qBound(1, settings.value(QStringLiteral("autosave/backups"), 5).toInt(), 50);
+    const QString title = m_filePath.isEmpty()
+                              ? QStringLiteral("Без имени")
+                              : QFileInfo(m_filePath).fileName();
+    QString path;
+    QString error;
+    if (AutoSaveManager::saveSnapshot(m_autosaveSession, m_filePath, title,
+                                      currentDocument().toJson(), keep, &path,
+                                      &error)) {
+        statusBar()->showMessage(QStringLiteral("Автосохранение выполнено."), 1500);
+    }
+}
+
+void MainWindow::clearAutosave()
+{
+    if (!m_autosaveSession.isEmpty())
+        AutoSaveManager::discardSession(m_autosaveSession);
+}
+
+void MainWindow::recoverAutosaves()
+{
+    static bool checked = false;
+    if (checked)
+        return;
+    checked = true;
+    const QVector<AutoSaveEntry> entries = AutoSaveManager::pending();
+    if (entries.isEmpty())
+        return;
+
+    QString details;
+    for (const AutoSaveEntry &entry : entries) {
+        details += QStringLiteral("%1 · %2\n%3\n\n")
+                       .arg(entry.title,
+                            entry.time.toLocalTime().toString(
+                                QStringLiteral("dd.MM.yyyy hh:mm")),
+                            entry.originalPath.isEmpty()
+                                ? QStringLiteral("(без исходного файла)")
+                                : entry.originalPath);
+    }
+    QMessageBox box(QMessageBox::Question, QStringLiteral("Восстановление документа"),
+                    QStringLiteral("Найдены автосохранения после аварийного завершения."),
+                    QMessageBox::NoButton, this);
+    box.setDetailedText(details);
+    auto *restore = box.addButton(QStringLiteral("Восстановить последнее"),
+                                  QMessageBox::AcceptRole);
+    auto *discard = box.addButton(QStringLiteral("Удалить"), QMessageBox::DestructiveRole);
+    auto *later = box.addButton(QStringLiteral("Позже"), QMessageBox::RejectRole);
+    box.exec();
+    if (box.clickedButton() == later || box.clickedButton() == nullptr)
+        return;
+
+    if (box.clickedButton() == restore) {
+        const AutoSaveEntry entry = entries.first();
+        QString originalPath;
+        const QJsonObject snapshot = AutoSaveManager::loadSnapshot(entry.snapshotPath,
+                                                                   &originalPath);
+        if (snapshot.isEmpty())
+            return;
+        QString error;
+        const Document document = Document::fromJson(snapshot, &error);
+        applyDocument(document);
+        m_filePath = originalPath;
+        m_modified = true;
+        resetHistory();
+        updateTitle();
+        statusBar()->showMessage(QStringLiteral("Документ восстановлен из автосохранения."),
+                                 5000);
+        QFile::remove(entry.snapshotPath);
+        QFile::remove(entry.snapshotPath + QStringLiteral(".meta.json"));
+    } else if (box.clickedButton() == discard) {
+        AutoSaveManager::discardAll();
+    }
+}
+
+void MainWindow::saveHistorySidecar()
+{
+    if (m_filePath.isEmpty() || m_restoring)
+        return;
+    QSettings settings;
+    if (!settings.value(QStringLiteral("history/persist"), true).toBool())
+        return;
+    const int limit = qBound(1, settings.value(QStringLiteral("history/limit"), 20).toInt(),
+                             100);
+    QJsonArray states;
+    const int start = qMax(0, m_undoStack.size() - limit);
+    for (int i = start; i < m_undoStack.size(); ++i) {
+        QJsonObject entry;
+        entry.insert(QStringLiteral("label"),
+                     m_undoLabels.value(i, QStringLiteral("Изменение документа")));
+        entry.insert(QStringLiteral("time"),
+                     m_undoTimes.value(i).toString(Qt::ISODate));
+        entry.insert(QStringLiteral("snapshot"), m_undoStack.at(i));
+        states.append(entry);
+    }
+    QJsonObject root;
+    root.insert(QStringLiteral("format"), QStringLiteral("vectora-history"));
+    root.insert(QStringLiteral("version"), 1);
+    root.insert(QStringLiteral("states"), states);
+    QSaveFile file(m_filePath + QStringLiteral(".history.json"));
+    if (file.open(QIODevice::WriteOnly)) {
+        file.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+        file.commit();
+    }
+}
+
+void MainWindow::loadHistorySidecar()
+{
+    resetHistory();
+    if (m_filePath.isEmpty())
+        return;
+    QSettings settings;
+    if (!settings.value(QStringLiteral("history/persist"), true).toBool())
+        return;
+    QFile file(m_filePath + QStringLiteral(".history.json"));
+    if (!file.open(QIODevice::ReadOnly))
+        return;
+    const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
+    for (const QJsonValue &value :
+         root.value(QStringLiteral("states")).toArray()) {
+        const QJsonObject entry = value.toObject();
+        m_undoStack.append(entry.value(QStringLiteral("snapshot")).toObject());
+        m_undoLabels.append(entry.value(QStringLiteral("label"))
+                                .toString(QStringLiteral("Изменение документа")));
+        m_undoTimes.append(QDateTime::fromString(
+            entry.value(QStringLiteral("time")).toString(), Qt::ISODate));
+    }
+    updateHistoryActions();
+}
+
+void MainWindow::restoreHistoryIndex(int index)
+{
+    if (index < 0 || index >= m_undoStack.size())
+        return;
+
+    const QJsonObject current = currentDocument().toJson();
+    QVector<QJsonObject> redoStates;
+    QStringList redoLabels;
+    QVector<QDateTime> redoTimes;
+    redoStates.append(current);
+    redoLabels.append(m_undoLabels.value(m_undoStack.size() - 1,
+                                         QStringLiteral("Изменение документа")));
+    redoTimes.append(QDateTime::currentDateTime());
+    for (int i = m_undoStack.size() - 1; i > index; --i) {
+        redoStates.append(m_undoStack.at(i));
+        redoLabels.append(m_undoLabels.value(i - 1,
+                                             QStringLiteral("Изменение документа")));
+        redoTimes.append(m_undoTimes.value(i));
+    }
+
+    const QJsonObject target = m_undoStack.at(index);
+    m_undoStack = m_undoStack.mid(0, index);
+    m_undoLabels = m_undoLabels.mid(0, index);
+    m_undoTimes = m_undoTimes.mid(0, index);
+    m_redoStack = redoStates;
+    m_redoLabels = redoLabels;
+    m_redoTimes = redoTimes;
+
+    QString error;
+    const Document document = Document::fromJson(target, &error);
+    if (error.isEmpty()) {
+        m_restoring = true;
+        m_view->setDocument(document);
+        m_restoring = false;
+        m_modified = true;
+        updateTitle();
+        if (m_dockPanels)
+            m_dockPanels->refresh();
+        if (m_assetPanel) {
+            m_assetPanel->refreshSymbols();
+            m_assetPanel->refreshPatterns();
+        }
+        statusBar()->showMessage(QStringLiteral("Восстановлено состояние истории."), 3000);
+    }
+    updateHistoryActions();
+}
+
+void MainWindow::openHistoryDialog()
+{
+    HistoryDialog dialog(m_undoLabels, m_undoTimes, m_undoStack.size(), this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    const int index = dialog.selectedIndex();
+    if (index >= 0 && index < m_undoStack.size())
+        restoreHistoryIndex(index);
+}
+
+void MainWindow::openVersionDialog()
+{
+    const QString display = m_filePath.isEmpty()
+                                ? QStringLiteral("Без имени")
+                                : QFileInfo(m_filePath).fileName();
+    VersionDialog dialog(&m_versions, currentDocument().toJson(), display, this);
+    dialog.exec();
+
+    if (dialog.versionsChanged()) {
+        QString error;
+        if (!saveVersions(m_filePath, m_versions, &error)) {
+            QMessageBox::warning(this, QStringLiteral("Версии документа"), error);
+        }
+    }
+    if (!dialog.restoreRequested())
+        return;
+    QString error;
+    const Document document = Document::fromJson(dialog.restoreSnapshot(), &error);
+    if (!error.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Версии документа"), error);
+        return;
+    }
+    beginEdit();
+    applyDocument(document);
+    endEdit();
+    m_modified = true;
+    updateTitle();
+    statusBar()->showMessage(QStringLiteral("Версия документа восстановлена."), 4000);
+}
+
+void MainWindow::openTemplateDialog()
+{
+    if (!maybeSave())
+        return;
+    TemplateDialog dialog(currentDocument().toJson(), this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    const QJsonObject snapshot = dialog.selectedDocument();
+    if (snapshot.isEmpty())
+        return;
+    QString error;
+    const Document document = Document::fromJson(snapshot, &error);
+    if (!error.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Шаблоны"), error);
+        return;
+    }
+    m_filePath.clear();
+    m_versions.clear();
+    applyDocument(document);
+    m_modified = true;
+    resetHistory();
+    clearAutosave();
+    updateTitle();
+    showEditor();
+    m_view->fitPage();
+    const QStringList absent = missingFonts(document);
+    statusBar()->showMessage(
+        absent.isEmpty()
+            ? QStringLiteral("Документ создан из шаблона.")
+            : QStringLiteral("Документ создан из шаблона. Отсутствуют шрифты: %1")
+                  .arg(absent.join(QStringLiteral(", "))),
+        absent.isEmpty() ? 4000 : 8000);
+}
+
+void MainWindow::openResourceSearch()
+{
+    ResourceSearchDialog dialog(m_view, this);
+    dialog.exec();
+}
+
+void MainWindow::packageCurrentDocument()
+{
+    const QString directory = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("Куда упаковать документ"), QDir::homePath());
+    if (directory.isEmpty())
+        return;
+    const QString name = m_filePath.isEmpty()
+                             ? QStringLiteral("vectora-document")
+                             : QFileInfo(m_filePath).completeBaseName();
+    const PackageReport report = packageDocument(currentDocument(), directory, name);
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Упаковка документа"));
+    dialog.resize(620, 480);
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *text = new QTextBrowser(&dialog);
+    text->setPlainText(report.ok ? report.text
+                                 : (report.error.isEmpty() ? report.text
+                                                           : report.error + QLatin1Char('\n')
+                                                                 + report.text));
+    layout->addWidget(text, 1);
+    auto *buttons = new QHBoxLayout;
+    auto *openFolder = new QPushButton(QStringLiteral("Открыть папку"), &dialog);
+    openFolder->setEnabled(report.ok);
+    auto *close = new QPushButton(QStringLiteral("Закрыть"), &dialog);
+    buttons->addWidget(openFolder);
+    buttons->addStretch(1);
+    buttons->addWidget(close);
+    layout->addLayout(buttons);
+    connect(openFolder, &QPushButton::clicked, &dialog, [&report]() {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(report.folder));
+    });
+    connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
+    dialog.exec();
+    if (report.ok)
+        statusBar()->showMessage(QStringLiteral("Документ упакован: %1").arg(report.folder),
+                                 5000);
+}
+
+void MainWindow::showPreferences()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Настройки"));
+    auto *form = new QFormLayout(&dialog);
+
+    QSettings settings;
+    auto *autosaveEnabled = new QCheckBox(QStringLiteral("Автосохранение"), &dialog);
+    autosaveEnabled->setChecked(
+        settings.value(QStringLiteral("autosave/enabled"), true).toBool());
+    auto *autosaveInterval = new QSpinBox(&dialog);
+    autosaveInterval->setRange(10, 3600);
+    autosaveInterval->setSuffix(QStringLiteral(" с"));
+    autosaveInterval->setValue(
+        settings.value(QStringLiteral("autosave/interval"), 120).toInt());
+    auto *autosaveBackups = new QSpinBox(&dialog);
+    autosaveBackups->setRange(1, 50);
+    autosaveBackups->setValue(
+        settings.value(QStringLiteral("autosave/backups"), 5).toInt());
+    auto *persistHistory = new QCheckBox(
+        QStringLiteral("Сохранять историю между сеансами"), &dialog);
+    persistHistory->setChecked(
+        settings.value(QStringLiteral("history/persist"), true).toBool());
+    auto *historyLimit = new QSpinBox(&dialog);
+    historyLimit->setRange(5, 100);
+    historyLimit->setValue(settings.value(QStringLiteral("history/limit"), 20).toInt());
+    auto *checkUpdates = new QCheckBox(
+        QStringLiteral("Проверять обновления при запуске"), &dialog);
+    checkUpdates->setChecked(
+        settings.value(QStringLiteral("updates/checkOnStartup"), true).toBool());
+
+    form->addRow(autosaveEnabled);
+    form->addRow(QStringLiteral("Интервал автосохранения"), autosaveInterval);
+    form->addRow(QStringLiteral("Резервных копий"), autosaveBackups);
+    form->addRow(persistHistory);
+    form->addRow(QStringLiteral("Глубина истории"), historyLimit);
+    form->addRow(checkUpdates);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok
+                                             | QDialogButtonBox::Cancel,
+                                         &dialog);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    settings.setValue(QStringLiteral("autosave/enabled"), autosaveEnabled->isChecked());
+    settings.setValue(QStringLiteral("autosave/interval"), autosaveInterval->value());
+    settings.setValue(QStringLiteral("autosave/backups"), autosaveBackups->value());
+    settings.setValue(QStringLiteral("history/persist"), persistHistory->isChecked());
+    settings.setValue(QStringLiteral("history/limit"), historyLimit->value());
+    settings.setValue(QStringLiteral("updates/checkOnStartup"), checkUpdates->isChecked());
+    setupAutosave();
+    statusBar()->showMessage(QStringLiteral("Настройки сохранены."), 3000);
 }
 
 // ---------------------------------------------------------------------------
@@ -3588,10 +5096,12 @@ void MainWindow::pasteClipboard()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
-    if (maybeSave())
-        event->accept();
-    else
+    if (!maybeSave()) {
         event->ignore();
+        return;
+    }
+    clearAutosave();
+    event->accept();
 }
 
 void MainWindow::showShortcuts()
@@ -3671,7 +5181,7 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("О программе"),
         QStringLiteral(
-            "<h3>Vectora 0.2.0</h3>"
+            "<h3>Vectora 0.2.1</h3>"
             "<p>Кроссплатформенный векторный редактор на C++ и Qt 6.</p>"
             "<p>Логические операции, нож, ластик, Shape Builder, контур и "
             "конверт; градиенты всех типов, цветовые пространства и палитры; "

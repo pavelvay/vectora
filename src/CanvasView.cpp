@@ -1,6 +1,12 @@
 #include "CanvasView.h"
 
 #include <QColorDialog>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QFile>
+#include <QImageReader>
+#include <QMimeData>
+#include <QUrl>
 #include <QContextMenuEvent>
 #include <QGraphicsScene>
 #include <QGuiApplication>
@@ -20,6 +26,8 @@
 
 #include <algorithm>
 
+#include "Patterns.h"
+#include "SvgImporter.h"
 #include "VectorItem.h"
 
 namespace {
@@ -83,6 +91,9 @@ QPen previewPen()
 CanvasView::CanvasView(QWidget *parent)
     : QGraphicsView(parent)
 {
+    setAcceptDrops(true);
+    if (viewport())
+        viewport()->setAcceptDrops(true);
     auto *graphicsScene = new QGraphicsScene(this);
     setScene(graphicsScene);
     setSceneRect(-kMargin, -kMargin, m_pageSize.width() + 2 * kMargin,
@@ -97,6 +108,10 @@ CanvasView::CanvasView(QWidget *parent)
     setBackgroundBrush(QColor(0x17, 0x18, 0x1b));
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
+
+    // Dimensions follow the geometry they were attached to; update them before
+    // the history snapshot is taken so undo/redo stores the final state.
+    connect(this, &CanvasView::endEdit, this, [this]() { updateAllDimensions(); });
 
     connect(graphicsScene, &QGraphicsScene::selectionChanged, this, [this]() {
         if (selectedVectorItems().isEmpty()) {
@@ -297,6 +312,25 @@ void CanvasView::setActiveTool(Tool tool)
         m_envelopeDragIndex = -1;
         m_envelopeEditing = false;
     }
+    if (tool != Tool::Perspective) {
+        m_perspectiveItem = nullptr;
+        m_perspectiveCorner = -1;
+    }
+    if (tool != Tool::Extrude) {
+        m_extrudeDragging = false;
+        m_extrudeItem = nullptr;
+        m_extrudeEffect = -1;
+    }
+    if (tool != Tool::Shadow) {
+        m_shadowDragging = false;
+        m_shadowItem = nullptr;
+    }
+    if (tool != Tool::Dimension) {
+        m_dimensionPoints.clear();
+        m_dimensionRefs.clear();
+        m_dimensionAnchors.clear();
+        m_dimensionHasCursor = false;
+    }
 
     m_tool = tool;
     setDragMode(tool == Tool::Select ? QGraphicsView::RubberBandDrag
@@ -422,12 +456,50 @@ void CanvasView::drawBackground(QPainter *painter, const QRectF &rect)
     }
 
     if (m_grid) {
+        painter->save();
+        painter->setClipRect(page);
         painter->setPen(QPen(QColor(0x4f, 0x7c, 0xc0, 26), 1.0));
-        const qreal step = qMax<qreal>(1.0, m_gridStep);
-        for (qreal x = page.left() + step; x < page.right(); x += step)
-            painter->drawLine(QPointF(x, page.top()), QPointF(x, page.bottom()));
-        for (qreal y = page.top() + step; y < page.bottom(); y += step)
-            painter->drawLine(QPointF(page.left(), y), QPointF(page.right(), y));
+        const qreal step = qMax<qreal>(2.0, m_gridStep);
+
+        if (m_gridType == 1) {
+            // Polar grid: concentric circles and rays from the origin.
+            const QPointF center = page.center() + m_gridOrigin;
+            const qreal maxRadius = std::hypot(page.width(), page.height());
+            for (qreal radius = step; radius <= maxRadius; radius += step)
+                painter->drawEllipse(center, radius, radius);
+            const qreal angleStep = qMax<qreal>(1.0, m_gridAngle);
+            for (qreal angle = 0.0; angle < 360.0; angle += angleStep) {
+                const qreal radians = angle * kPi / 180.0;
+                painter->drawLine(center,
+                                  center + QPointF(std::cos(radians), std::sin(radians))
+                                               * maxRadius);
+            }
+        } else if (m_gridType == 2) {
+            // Isometric grid: two families of lines at 30 degrees.
+            const QPointF center = page.center() + m_gridOrigin;
+            const qreal radians = 30.0 * kPi / 180.0;
+            const QPointF u(std::cos(radians), std::sin(radians));
+            const QPointF v(-std::cos(radians), std::sin(radians));
+            const qreal diagonal = std::hypot(page.width(), page.height());
+            const int range = int(diagonal / step) + 2;
+            for (int n = -range; n <= range; ++n) {
+                const QPointF first = center + v * (n * step);
+                painter->drawLine(first - u * diagonal, first + u * diagonal);
+                const QPointF second = center + u * (n * step);
+                painter->drawLine(second - v * diagonal, second + v * diagonal);
+            }
+        } else {
+            const QPointF base = page.topLeft() + m_gridOrigin;
+            const qreal startX = base.x()
+                                 + std::floor((page.left() - base.x()) / step) * step;
+            const qreal startY = base.y()
+                                 + std::floor((page.top() - base.y()) / step) * step;
+            for (qreal x = startX; x <= page.right(); x += step)
+                painter->drawLine(QPointF(x, page.top()), QPointF(x, page.bottom()));
+            for (qreal y = startY; y <= page.bottom(); y += step)
+                painter->drawLine(QPointF(page.left(), y), QPointF(page.right(), y));
+        }
+        painter->restore();
     }
 
     if (m_showPrintableArea) {
@@ -582,6 +654,9 @@ void CanvasView::drawPreview(QPainter *painter)
 
     drawShapeBuilderOverlay(painter);
     drawEnvelopeOverlay(painter);
+    drawPerspectiveOverlay(painter);
+    drawDimensionPreview(painter);
+    drawSnapHint(painter);
 
     if (!m_drawing)
         return;
@@ -824,6 +899,10 @@ VectorItem *CanvasView::addVectorObject(const VectorObject &object, bool record,
     item->setZValue(m_nextZ++);
     connect(item, &VectorItem::editStarted, this, &CanvasView::beginEdit);
     connect(item, &VectorItem::editFinished, this, &CanvasView::endEdit);
+    connect(item, &VectorItem::editFinished, this, [this, item]() {
+        updateBlendsFor(item);
+        updateDimensionsFor(item);
+    });
     connect(item, &VectorItem::textEditRequested, this, &CanvasView::editTextItem);
 
     if (select) {
@@ -957,6 +1036,21 @@ int CanvasView::duplicatePage(int index)
         }
     }
 
+    // Duplicated symbol instances become independent copies on the new page.
+    QMap<int, int> instanceMap;
+    QVector<SymbolInstance> newInstances;
+    for (const SymbolInstance &instance : m_instances) {
+        if (instance.page != index)
+            continue;
+        SymbolInstance copy = instance;
+        copy.id = m_nextInstanceId++;
+        copy.page = index + 1;
+        copy.group = m_nextGroupId++;
+        instanceMap.insert(instance.id, copy.id);
+        m_groups.append({copy.group, 0});
+        newInstances.append(copy);
+    }
+
     scene()->clearSelection();
     for (VectorItem *item : items) {
         VectorObject copy = item->object();
@@ -964,8 +1058,17 @@ int CanvasView::duplicatePage(int index)
         copy.id = m_nextObjectId++;
         copy.masterId = 0;
         copy.group = 0;
+        if (copy.instanceId > 0 && instanceMap.contains(copy.instanceId)) {
+            for (const SymbolInstance &instance : newInstances) {
+                if (instance.symbolId == copy.symbolId
+                    && instanceMap.value(item->object().instanceId) == instance.id)
+                    copy.group = instance.group;
+            }
+            copy.instanceId = instanceMap.value(copy.instanceId);
+        }
         addVectorObject(copy, false, false);
     }
+    m_instances.append(newInstances);
     emit endEdit();
     setCurrentPage(index + 1);
     return index + 1;
@@ -988,6 +1091,13 @@ void CanvasView::removePage(int index)
         if (object.page > removedPage) {
             object.page -= 1;
             item->setObject(object);
+        }
+    }
+    for (int i = m_instances.size() - 1; i >= 0; --i) {
+        if (m_instances.at(i).page == removedPage) {
+            m_instances.removeAt(i);
+        } else if (m_instances.at(i).page > removedPage) {
+            m_instances[i].page -= 1;
         }
     }
     m_pages.removeAt(index);
@@ -1022,6 +1132,18 @@ void CanvasView::movePage(int from, int to)
             object.page = page;
             item->setObject(object);
         }
+    }
+    for (SymbolInstance &instance : m_instances) {
+        if (instance.page < 0)
+            continue;
+        int page = instance.page;
+        if (page == from)
+            page = to;
+        else if (from < to && page > from && page <= to)
+            page -= 1;
+        else if (from > to && page >= to && page < from)
+            page += 1;
+        instance.page = page;
     }
     emit endEdit();
     setCurrentPage(to);
@@ -1211,12 +1333,27 @@ void CanvasView::setDocument(const Document &document)
         m_currentPage = m_pages.size() - 1;
 
     setPageSize(m_pages.at(m_currentPage).size);
+    m_drawingScale = document.drawingScale > 0.0 ? document.drawingScale : 1.0;
+    setBlends(document.blends);
+    m_symbols = document.symbols;
+    m_instances = document.instances;
+    m_nextSymbolId = 1;
+    for (const SymbolDefinition &symbol : m_symbols)
+        m_nextSymbolId = qMax(m_nextSymbolId, symbol.id + 1);
+    m_nextInstanceId = 1;
+    for (const SymbolInstance &instance : m_instances)
+        m_nextInstanceId = qMax(m_nextInstanceId, instance.id + 1);
+    m_patterns = document.patterns;
+    m_nextPatternId = 1;
+    for (const PatternDefinition &pattern : m_patterns)
+        m_nextPatternId = qMax(m_nextPatternId, pattern.id + 1);
     for (const VectorObject &object : document.objects) {
         VectorObject copy = object;
         if (copy.page == -9999)
             copy.page = 0;
         addVectorObject(copy, false, false);
     }
+    updateAllBlends();
     normalizeZOrder();
     for (int i = 0; i < m_layers.size(); ++i)
         applyLayerState(i);
@@ -1261,6 +1398,23 @@ void CanvasView::deleteSelectedObjects()
             object.masterId = 0;
             item->setObject(object);
         }
+    }
+    for (int i = m_blends.size() - 1; i >= 0; --i) {
+        if (removedIds.contains(m_blends.at(i).fromId)
+            || removedIds.contains(m_blends.at(i).toId)) {
+            removeBlend(m_blends.at(i).id);
+        }
+    }
+    for (int i = m_instances.size() - 1; i >= 0; --i) {
+        bool alive = false;
+        for (VectorItem *item : vectorItems()) {
+            if (item->object().instanceId == m_instances.at(i).id) {
+                alive = true;
+                break;
+            }
+        }
+        if (!alive)
+            m_instances.removeAt(i);
     }
     normalizeZOrder();
     emit endEdit();
@@ -2098,6 +2252,299 @@ void CanvasView::toggleShadowAt(const QPointF &scenePos)
     emit statusHint(on ? QStringLiteral("Тень включена.") : QStringLiteral("Тень выключена."));
 }
 
+namespace {
+QPolygonF identityQuad()
+{
+    return QPolygonF({QPointF(0.0, 0.0), QPointF(1.0, 0.0),
+                      QPointF(1.0, 1.0), QPointF(0.0, 1.0)});
+}
+} // namespace
+
+QPolygonF CanvasView::perspectiveQuad(const VectorObject &object) const
+{
+    for (const Effect &effect : object.effects) {
+        if (effect.type == QLatin1String("perspective") && effect.quad.size() == 4)
+            return effect.quad;
+    }
+    return identityQuad();
+}
+
+int CanvasView::perspectiveEffectIndex(VectorItem *item) const
+{
+    if (!item)
+        return -1;
+    const QVector<Effect> effects = item->effects();
+    for (int i = 0; i < effects.size(); ++i) {
+        if (effects.at(i).type == QLatin1String("perspective"))
+            return i;
+    }
+    return -1;
+}
+
+QPointF CanvasView::perspectiveCornerScene(VectorItem *item, int corner) const
+{
+    if (!item)
+        return QPointF();
+    const QRectF bounds = item->object().localBounds();
+    const QPolygonF quad = perspectiveQuad(item->object());
+    const QPointF normalised = quad.value(corner, QPointF());
+    const QPointF local(bounds.left() + normalised.x() * bounds.width(),
+                        bounds.top() + normalised.y() * bounds.height());
+    return item->mapToScene(local);
+}
+
+bool CanvasView::perspectivePress(const QPointF &scenePos)
+{
+    const qreal tolerance = 13.0 / (m_zoom > 0.0 ? m_zoom : 1.0);
+
+    if (m_perspectiveItem) {
+        for (int corner = 0; corner < 4; ++corner) {
+            if (QLineF(scenePos, perspectiveCornerScene(m_perspectiveItem, corner))
+                    .length() <= tolerance) {
+                m_perspectiveCorner = corner;
+                m_perspectiveLastScene = scenePos;
+                emit beginEdit();
+                viewport()->update();
+                return true;
+            }
+        }
+    }
+
+    VectorItem *item = itemAtScene(scenePos);
+    if (!item) {
+        m_perspectiveItem = nullptr;
+        m_perspectiveCorner = -1;
+        viewport()->update();
+        return false;
+    }
+
+    m_perspectiveItem = item;
+    scene()->clearSelection();
+    item->setSelected(true);
+    emit selectionChanged(1);
+
+    if (perspectiveEffectIndex(item) < 0) {
+        QPolygonF quad;
+        quad << QPointF(0.0, 0.0) << QPointF(1.0, 0.0)
+             << QPointF(1.0, 1.0) << QPointF(0.0, 1.0);
+        Effect effect = makeEffect(QStringLiteral("perspective"));
+        effect.quad = quad;
+        emit beginEdit();
+        QVector<Effect> effects = item->effects();
+        effects.append(effect);
+        item->setEffects(effects);
+        emit endEdit();
+        emit statusHint(QStringLiteral(
+            "Потяните угловые маркеры, чтобы построить перспективу. "
+            "Shift+двойной клик сбрасывает искажение."));
+    }
+
+    m_perspectiveCorner = -1;
+    viewport()->update();
+    return true;
+}
+
+void CanvasView::perspectiveMove(const QPointF &scenePos)
+{
+    if (!m_perspectiveItem || m_perspectiveCorner < 0)
+        return;
+    const int index = perspectiveEffectIndex(m_perspectiveItem);
+    if (index < 0)
+        return;
+
+    const QRectF bounds = m_perspectiveItem->object().localBounds();
+    if (bounds.width() < 1.0 || bounds.height() < 1.0)
+        return;
+
+    QVector<Effect> effects = m_perspectiveItem->effects();
+    if (index >= effects.size())
+        return;
+
+    QPolygonF quad = effects.at(index).quad;
+    if (quad.size() != 4)
+        quad = identityQuad();
+
+    const QPointF local = m_perspectiveItem->mapFromScene(scenePos);
+    const QPointF normalised((local.x() - bounds.left()) / bounds.width(),
+                             (local.y() - bounds.top()) / bounds.height());
+    quad[m_perspectiveCorner] = QPointF(qBound(-2.0, normalised.x(), 3.0),
+                                        qBound(-2.0, normalised.y(), 3.0));
+    effects[index].quad = quad;
+    m_perspectiveItem->setEffects(effects);
+    m_perspectiveLastScene = scenePos;
+    viewport()->update();
+}
+
+void CanvasView::perspectiveRelease()
+{
+    if (m_perspectiveCorner < 0)
+        return;
+    m_perspectiveCorner = -1;
+    emit endEdit();
+    emit statusHint(QStringLiteral("Перспектива обновлена."));
+    viewport()->update();
+}
+
+void CanvasView::drawPerspectiveOverlay(QPainter *painter)
+{
+    if (m_tool != Tool::Perspective)
+        return;
+
+    QList<VectorItem *> targets;
+    if (m_perspectiveItem)
+        targets.append(m_perspectiveItem);
+    else
+        targets = selectedVectorItems();
+
+    const qreal s = transform().m11() > 0 ? transform().m11() : 1.0;
+    const qreal handle = 8.0 / s;
+
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing, true);
+    for (VectorItem *item : targets) {
+        if (!item)
+            continue;
+        QPolygonF quad;
+        for (int corner = 0; corner < 4; ++corner)
+            quad << perspectiveCornerScene(item, corner);
+
+        QPen outline(QColor(0xff, 0xb3, 0x47), 1.4 / s);
+        outline.setStyle(Qt::DashLine);
+        painter->setPen(outline);
+        painter->setBrush(Qt::NoBrush);
+        painter->drawPolygon(quad);
+
+        painter->setPen(QPen(QColor(0x1b, 0x1d, 0x21), 1.2 / s));
+        for (int corner = 0; corner < 4; ++corner) {
+            const bool active = item == m_perspectiveItem
+                                && corner == m_perspectiveCorner;
+            painter->setBrush(active ? QColor(0xff, 0xb3, 0x47)
+                                     : QColor(0x7f, 0xae, 0xf7));
+            painter->drawRect(QRectF(quad.at(corner) - QPointF(handle / 2, handle / 2),
+                                     QSizeF(handle, handle)));
+        }
+    }
+    painter->restore();
+}
+
+bool CanvasView::extrudePress(const QPointF &scenePos)
+{
+    VectorItem *item = itemAtScene(scenePos);
+    if (!item)
+        return false;
+
+    scene()->clearSelection();
+    item->setSelected(true);
+    emit selectionChanged(1);
+
+    QVector<Effect> effects = item->effects();
+    int index = -1;
+    for (int i = 0; i < effects.size(); ++i) {
+        if (effects.at(i).type == QLatin1String("extrude")) {
+            index = i;
+            break;
+        }
+    }
+
+    emit beginEdit();
+    if (index < 0) {
+        effects.append(makeEffect(QStringLiteral("extrude")));
+        index = effects.size() - 1;
+        item->setEffects(effects);
+    }
+
+    m_extrudeDragging = true;
+    m_extrudeItem = item;
+    m_extrudeEffect = index;
+    m_extrudeStart = scenePos;
+    emit statusHint(QStringLiteral(
+        "Потяните от объекта, чтобы задать глубину и направление экструзии."));
+    viewport()->update();
+    return true;
+}
+
+void CanvasView::extrudeMove(const QPointF &scenePos)
+{
+    if (!m_extrudeDragging || !m_extrudeItem || m_extrudeEffect < 0)
+        return;
+
+    const QPointF delta = scenePos - m_extrudeStart;
+    const qreal distance = std::hypot(delta.x(), delta.y());
+    if (distance < 3.0)
+        return;
+
+    QVector<Effect> effects = m_extrudeItem->effects();
+    if (m_extrudeEffect >= effects.size())
+        return;
+
+    Effect &effect = effects[m_extrudeEffect];
+    effect.distance = qBound(1.0, distance, 800.0);
+    effect.angle = std::atan2(delta.y(), delta.x()) * 180.0 / kPi;
+    m_extrudeItem->setEffects(effects);
+    emit scenePosChanged(scenePos);
+    viewport()->update();
+}
+
+void CanvasView::extrudeRelease()
+{
+    if (!m_extrudeDragging)
+        return;
+    m_extrudeDragging = false;
+    m_extrudeItem = nullptr;
+    m_extrudeEffect = -1;
+    emit endEdit();
+    emit statusHint(QStringLiteral("Экструзия обновлена."));
+    viewport()->update();
+}
+
+bool CanvasView::shadowPress(const QPointF &scenePos)
+{
+    VectorItem *item = itemAtScene(scenePos);
+    if (!item) {
+        emit statusHint(QStringLiteral("Щёлкните по объекту, чтобы задать тень."));
+        return false;
+    }
+    scene()->clearSelection();
+    item->setSelected(true);
+    emit selectionChanged(1);
+
+    VectorObject object = item->object();
+    if (!object.shadow) {
+        object.shadow = true;
+        item->setObject(object);
+    }
+    emit beginEdit();
+    m_shadowDragging = true;
+    m_shadowItem = item;
+    m_shadowStart = scenePos;
+    m_shadowStartOffset = object.shadowOffset;
+    emit statusHint(QStringLiteral(
+        "Потяните от объекта, чтобы задать сдвиг тени; отпустите — готово."));
+    viewport()->update();
+    return true;
+}
+
+void CanvasView::shadowMove(const QPointF &scenePos)
+{
+    if (!m_shadowDragging || !m_shadowItem)
+        return;
+    const QPointF offset = m_shadowStartOffset + (scenePos - m_shadowStart);
+    m_shadowItem->setShadowOffset(offset);
+    emit scenePosChanged(scenePos);
+    viewport()->update();
+}
+
+void CanvasView::shadowRelease()
+{
+    if (!m_shadowDragging)
+        return;
+    m_shadowDragging = false;
+    m_shadowItem = nullptr;
+    emit endEdit();
+    emit statusHint(QStringLiteral("Тень обновлена."));
+    viewport()->update();
+}
+
 void CanvasView::bringToFront()
 {
     if (selectedVectorItems().isEmpty())
@@ -2313,77 +2760,338 @@ void CanvasView::setSmartGuides(const QVector<QLineF> &lines)
     viewport()->update();
 }
 
+namespace {
+
+struct SnapCandidate {
+    QPointF point;
+    QString kind;
+};
+
+} // namespace
+
+QPointF CanvasView::gridSnapPoint(const QPointF &scenePos) const
+{
+    const QRectF page = scene()->property("pageRect").toRectF();
+    const QRectF area = page.isValid() ? page : QRectF(QPointF(0, 0), m_pageSize);
+    const qreal step = qMax<qreal>(2.0, m_gridStep);
+
+    if (m_gridType == 1) {
+        const QPointF origin = area.center() + m_gridOrigin;
+        const QPointF delta = scenePos - origin;
+        const qreal radius = std::hypot(delta.x(), delta.y());
+        const qreal snappedRadius = qRound(radius / step) * step;
+        const qreal angleStep = qMax<qreal>(1.0, m_gridAngle);
+        qreal degrees = std::atan2(delta.y(), delta.x()) * 180.0 / kPi;
+        degrees = qRound(degrees / angleStep) * angleStep;
+        const qreal radians = degrees * kPi / 180.0;
+        return origin + QPointF(std::cos(radians) * snappedRadius,
+                                std::sin(radians) * snappedRadius);
+    }
+    if (m_gridType == 2) {
+        const QPointF origin = area.center() + m_gridOrigin;
+        const qreal radians = 30.0 * kPi / 180.0;
+        const QPointF u(std::cos(radians) * step, std::sin(radians) * step);
+        const QPointF v(-std::cos(radians) * step, std::sin(radians) * step);
+        const QPointF delta = scenePos - origin;
+        // Solve delta = i*u + j*v.
+        const qreal a = delta.x() / (step * std::cos(radians));
+        const qreal b = delta.y() / (step * std::sin(radians));
+        const qreal iIndex = qRound((a + b) / 2.0);
+        const qreal jIndex = qRound((b - a) / 2.0);
+        return origin + u * iIndex + v * jIndex;
+    }
+
+    const QPointF origin = area.topLeft() + m_gridOrigin;
+    return QPointF(origin.x() + qRound((scenePos.x() - origin.x()) / step) * step,
+                   origin.y() + qRound((scenePos.y() - origin.y()) / step) * step);
+}
+
 QPointF CanvasView::snapNodePoint(const QPointF &scenePos, VectorItem *exclude) const
 {
     if (!m_snapEnabled)
         return scenePos;
 
-    QVector<qreal> xs = m_guidesX;
-    QVector<qreal> ys = m_guidesY;
-    const QRectF page = scene()->property("pageRect").toRectF();
-    xs << page.left() << page.center().x() << page.right();
-    ys << page.top() << page.center().y() << page.bottom();
+    QVector<qreal> xs;
+    QVector<qreal> ys;
+    QVector<SnapCandidate> candidates;
 
+    const QRectF page = scene()->property("pageRect").toRectF();
+    if (page.isValid()) {
+        xs << page.left() << page.center().x() << page.right();
+        ys << page.top() << page.center().y() << page.bottom();
+    }
+
+    QVector<QRectF> nearbyBounds;
+    const qreal nearbyDistance = 320.0;
     for (VectorItem *item : vectorItems()) {
         if (item == exclude || !item->isVisible())
             continue;
         const QRectF bounds = item->mapRectToScene(item->localBounds());
-        xs << bounds.left() << bounds.center().x() << bounds.right();
-        ys << bounds.top() << bounds.center().y() << bounds.bottom();
-        const QVector<QPainterPath::Element> elements = item->pathElements();
-        for (const auto &element : elements) {
-            const QPointF node = item->mapToScene(QPointF(element.x, element.y));
-            xs << node.x();
-            ys << node.y();
+        if (!bounds.isValid() || bounds.width() < 0.2 || bounds.height() < 0.2)
+            continue;
+
+        const QPointF center = bounds.center();
+        if (m_snapObjects) {
+            xs << bounds.left() << center.x() << bounds.right();
+            ys << bounds.top() << center.y() << bounds.bottom();
+        }
+        if ((center - scenePos).manhattanLength() > nearbyDistance * 2.0)
+            continue;
+        nearbyBounds.append(bounds);
+
+        if (m_snapCenters)
+            candidates.append({center, QStringLiteral("Центр")});
+        if (m_snapMidpoints) {
+            candidates.append({QPointF(bounds.center().x(), bounds.top()),
+                               QStringLiteral("Середина")});
+            candidates.append({QPointF(bounds.right(), bounds.center().y()),
+                               QStringLiteral("Середина")});
+            candidates.append({QPointF(bounds.center().x(), bounds.bottom()),
+                               QStringLiteral("Середина")});
+            candidates.append({QPointF(bounds.left(), bounds.center().y()),
+                               QStringLiteral("Середина")});
+        }
+        if (m_snapEdges) {
+            candidates.append({QPointF(qBound(bounds.left(), scenePos.x(), bounds.right()),
+                                       bounds.top()), QStringLiteral("Край")});
+            candidates.append({QPointF(qBound(bounds.left(), scenePos.x(), bounds.right()),
+                                       bounds.bottom()), QStringLiteral("Край")});
+            candidates.append({QPointF(bounds.left(),
+                                       qBound(bounds.top(), scenePos.y(), bounds.bottom())),
+                               QStringLiteral("Край")});
+            candidates.append({QPointF(bounds.right(),
+                                       qBound(bounds.top(), scenePos.y(), bounds.bottom())),
+                               QStringLiteral("Край")});
+        }
+        if (m_snapTangents && item->object().type == ShapeType::Ellipse) {
+            const qreal rx = bounds.width() / 2.0;
+            const qreal ry = bounds.height() / 2.0;
+            candidates.append({center + QPointF(rx, 0), QStringLiteral("Касание")});
+            candidates.append({center + QPointF(-rx, 0), QStringLiteral("Касание")});
+            candidates.append({center + QPointF(0, ry), QStringLiteral("Касание")});
+            candidates.append({center + QPointF(0, -ry), QStringLiteral("Касание")});
+        }
+        if (m_snapNodes) {
+            for (const QPainterPath::Element &element : item->pathElements()) {
+                candidates.append({item->mapToScene(QPointF(element.x, element.y)),
+                                   QStringLiteral("Узел")});
+            }
         }
     }
 
-    qreal bestX = scenePos.x();
-    qreal bestY = scenePos.y();
-    qreal bestDx = m_snapThreshold + 1.0;
-    qreal bestDy = m_snapThreshold + 1.0;
-    const qreal grid = qMax<qreal>(1.0, m_gridStep);
-
-    const qreal gridX = qRound(scenePos.x() / grid) * grid;
-    if (qAbs(gridX - scenePos.x()) < bestDx) {
-        bestDx = qAbs(gridX - scenePos.x());
-        bestX = gridX;
-    }
-    const qreal gridY = qRound(scenePos.y() / grid) * grid;
-    if (qAbs(gridY - scenePos.y()) < bestDy) {
-        bestDy = qAbs(gridY - scenePos.y());
-        bestY = gridY;
-    }
-    for (qreal target : xs) {
-        if (qAbs(target - scenePos.x()) < bestDx) {
-            bestDx = qAbs(target - scenePos.x());
-            bestX = target;
+    if (m_snapIntersections) {
+        for (int a = 0; a < nearbyBounds.size(); ++a) {
+            for (int b = a + 1; b < nearbyBounds.size(); ++b) {
+                const QRectF first = nearbyBounds.at(a);
+                const QRectF second = nearbyBounds.at(b);
+                const auto addIntersection = [&candidates](const QPointF &point) {
+                    candidates.append({point, QStringLiteral("Пересечение")});
+                };
+                for (qreal x : {first.left(), first.right()}) {
+                    for (qreal y : {second.top(), second.bottom()}) {
+                        if (x >= second.left() && x <= second.right()
+                            && y >= first.top() && y <= first.bottom())
+                            addIntersection(QPointF(x, y));
+                    }
+                }
+                for (qreal x : {second.left(), second.right()}) {
+                    for (qreal y : {first.top(), first.bottom()}) {
+                        if (x >= first.left() && x <= first.right()
+                            && y >= second.top() && y <= second.bottom())
+                            addIntersection(QPointF(x, y));
+                    }
+                }
+            }
         }
     }
-    for (qreal target : ys) {
-        if (qAbs(target - scenePos.y()) < bestDy) {
-            bestDy = qAbs(target - scenePos.y());
-            bestY = target;
+
+    if (m_snapGuides) {
+        xs << m_guidesX;
+        ys << m_guidesY;
+    }
+
+    QString kind;
+    QPointF snapPoint = scenePos;
+    if (m_snapGrid) {
+        const QPointF gridPoint = gridSnapPoint(scenePos);
+        const QPointF delta = gridPoint - scenePos;
+        if (std::hypot(delta.x(), delta.y()) <= m_snapThreshold) {
+            snapPoint = gridPoint;
+            kind = m_gridType == 1 ? QStringLiteral("Полярная сетка")
+                                   : (m_gridType == 2 ? QStringLiteral("Изометрия")
+                                                      : QStringLiteral("Сетка"));
+        }
+    }
+
+    if (kind.isEmpty()) {
+        qreal bestDistance = m_snapThreshold + 1.0;
+        for (const SnapCandidate &candidate : candidates) {
+            const qreal distance = QLineF(candidate.point, scenePos).length();
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                snapPoint = candidate.point;
+                kind = candidate.kind;
+            }
+        }
+        if (bestDistance > m_snapThreshold)
+            kind.clear();
+    }
+
+    if (kind.isEmpty()) {
+        // Fall back to independent horizontal/vertical edge snapping.
+        qreal bestX = scenePos.x();
+        qreal bestY = scenePos.y();
+        qreal bestDx = m_snapThreshold + 1.0;
+        qreal bestDy = m_snapThreshold + 1.0;
+        for (qreal target : xs) {
+            if (qAbs(target - scenePos.x()) < bestDx) {
+                bestDx = qAbs(target - scenePos.x());
+                bestX = target;
+            }
+        }
+        for (qreal target : ys) {
+            if (qAbs(target - scenePos.y()) < bestDy) {
+                bestDy = qAbs(target - scenePos.y());
+                bestY = target;
+            }
+        }
+        if (bestDx <= m_snapThreshold || bestDy <= m_snapThreshold) {
+            snapPoint = QPointF(bestDx <= m_snapThreshold ? bestX : scenePos.x(),
+                                bestDy <= m_snapThreshold ? bestY : scenePos.y());
+            kind = QStringLiteral("Край");
         }
     }
 
     QVector<QLineF> lines;
     const QRectF area = sceneRect();
-    if (bestDx <= m_snapThreshold)
-        lines.append(QLineF(bestX, area.top(), bestX, area.bottom()));
-    if (bestDy <= m_snapThreshold)
-        lines.append(QLineF(area.left(), bestY, area.right(), bestY));
-    const_cast<CanvasView *>(this)->setSmartGuides(lines);
+    if (!kind.isEmpty()) {
+        lines.append(QLineF(snapPoint.x(), area.top(), snapPoint.x(), area.bottom()));
+        lines.append(QLineF(area.left(), snapPoint.y(), area.right(), snapPoint.y()));
+    }
+    CanvasView *self = const_cast<CanvasView *>(this);
+    self->setSmartGuides(lines);
+    self->m_snapPoint = snapPoint;
+    self->m_snapKind = kind;
+    self->m_snapValid = !kind.isEmpty();
 
-    return QPointF(bestDx <= m_snapThreshold ? bestX : scenePos.x(),
-                   bestDy <= m_snapThreshold ? bestY : scenePos.y());
+    return kind.isEmpty() ? scenePos : snapPoint;
 }
+
+void CanvasView::setGridType(int type)
+{
+    m_gridType = qBound(0, type, 2);
+    updateSnapSettings();
+    viewport()->update();
+}
+
+void CanvasView::setGridAngle(qreal degrees)
+{
+    m_gridAngle = qBound(1.0, degrees, 90.0);
+    updateSnapSettings();
+    viewport()->update();
+}
+
+void CanvasView::setGridOrigin(const QPointF &origin)
+{
+    m_gridOrigin = origin;
+    updateSnapSettings();
+    viewport()->update();
+}
+
+bool CanvasView::snapOption(const QString &key) const
+{
+    if (key == QLatin1String("grid")) return m_snapGrid;
+    if (key == QLatin1String("guides")) return m_snapGuides;
+    if (key == QLatin1String("objects")) return m_snapObjects;
+    if (key == QLatin1String("nodes")) return m_snapNodes;
+    if (key == QLatin1String("centers")) return m_snapCenters;
+    if (key == QLatin1String("midpoints")) return m_snapMidpoints;
+    if (key == QLatin1String("intersections")) return m_snapIntersections;
+    if (key == QLatin1String("edges")) return m_snapEdges;
+    if (key == QLatin1String("tangents")) return m_snapTangents;
+    return false;
+}
+
+void CanvasView::setSnapOption(const QString &key, bool on)
+{
+    if (key == QLatin1String("grid")) m_snapGrid = on;
+    else if (key == QLatin1String("guides")) m_snapGuides = on;
+    else if (key == QLatin1String("objects")) m_snapObjects = on;
+    else if (key == QLatin1String("nodes")) m_snapNodes = on;
+    else if (key == QLatin1String("centers")) m_snapCenters = on;
+    else if (key == QLatin1String("midpoints")) m_snapMidpoints = on;
+    else if (key == QLatin1String("intersections")) m_snapIntersections = on;
+    else if (key == QLatin1String("edges")) m_snapEdges = on;
+    else if (key == QLatin1String("tangents")) m_snapTangents = on;
+}
+
+void CanvasView::setDrawingScale(qreal scale)
+{
+    m_drawingScale = qBound(0.01, scale, 1000.0);
+    updateAllDimensions();
+    viewport()->update();
+    emit statusHint(QStringLiteral("Масштаб чертежа: 1:%1")
+                        .arg(m_drawingScale, 0, 'g', 6));
+}
+
+void CanvasView::drawSnapHint(QPainter *painter)
+{
+    if (!m_snapValid || m_snapKind.isEmpty())
+        return;
+    if (m_tool != Tool::Node && m_tool != Tool::Dimension && !m_drawing)
+        return;
+
+    const qreal scale = transform().m11() > 0 ? transform().m11() : 1.0;
+    const qreal size = 6.0 / scale;
+    const qreal fontSize = 11.0 / scale;
+
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing, true);
+    painter->setPen(QPen(QColor(0xff, 0x66, 0x99), 1.3 / scale));
+    painter->setBrush(QColor(0x1b, 0x1d, 0x21, 220));
+    if (m_snapKind == QLatin1String("Центр"))
+        painter->drawEllipse(m_snapPoint, size, size);
+    else if (m_snapKind == QLatin1String("Середина"))
+        painter->drawPolygon(QPolygonF({m_snapPoint + QPointF(0, -size),
+                                        m_snapPoint + QPointF(size, size),
+                                        m_snapPoint + QPointF(-size, size)}));
+    else if (m_snapKind == QLatin1String("Пересечение"))
+        painter->drawLine(m_snapPoint + QPointF(-size, -size),
+                          m_snapPoint + QPointF(size, size)),
+        painter->drawLine(m_snapPoint + QPointF(-size, size),
+                          m_snapPoint + QPointF(size, -size));
+    else if (m_snapKind == QLatin1String("Узел"))
+        painter->drawRect(QRectF(m_snapPoint - QPointF(size, size) / 2.0,
+                                 QSizeF(size, size)));
+    else
+        painter->drawEllipse(m_snapPoint, size * 0.8, size * 0.8);
+
+    QFont font = painter->font();
+    font.setPixelSize(qMax(6, qRound(fontSize)));
+    painter->setFont(font);
+    const QFontMetricsF metrics(font);
+    const QRectF textRect = metrics.boundingRect(m_snapKind);
+    const QRectF background(m_snapPoint.x() + 9.0 / scale,
+                            m_snapPoint.y() - 24.0 / scale,
+                            textRect.width() + 8.0 / scale,
+                            textRect.height() + 4.0 / scale);
+    painter->setPen(Qt::NoPen);
+    painter->setBrush(QColor(0x1b, 0x1d, 0x21, 225));
+    painter->drawRoundedRect(background, 3.0 / scale, 3.0 / scale);
+    painter->setPen(QColor(0xff, 0x9a, 0xc0));
+    painter->drawText(background.adjusted(4.0 / scale, 2.0 / scale, 0, 0),
+                      Qt::AlignLeft | Qt::AlignVCenter, m_snapKind);
+    painter->restore();
+}
+
+
 
 void CanvasView::updateSnapSettings()
 {
     for (VectorItem *item : vectorItems())
         item->setSnapSettings(m_snapEnabled, m_gridStep, m_guidesX, m_guidesY,
-                              m_snapThreshold);
+                              m_snapThreshold, m_gridType, m_gridOrigin,
+                              m_gridAngle);
 }
 
 void CanvasView::setItemLocked(VectorItem *item, bool locked)
@@ -2510,6 +3218,12 @@ void CanvasView::duplicateSelection(int count, const QPointF &offset)
             object.masterId = 0;
             object.group = 0;
             object.locked = false;
+            if (object.type == ShapeType::Dimension) {
+                object.dimAssociative = false;
+                object.dimRefA = 0;
+                object.dimRefB = 0;
+                object.dimRefC = 0;
+            }
             VectorItem *copy = addVectorObject(object, false, false);
             if (copy)
                 copy->setSelected(true);
@@ -3802,31 +4516,152 @@ void CanvasView::blendSelected(int steps)
 {
     steps = qBound(1, steps, 80);
     const QList<VectorItem *> selected = selectedVectorItems();
-    if (selected.size() != 2) {
-        emit statusHint(QStringLiteral("Для перетекания выделите ровно два объекта."));
+    if (selected.size() < 2) {
+        emit statusHint(QStringLiteral("Для перетекания выделите два или более объектов."));
         return;
     }
 
-    VectorItem *from = selected.at(0);
-    VectorItem *to = selected.at(1);
+    const auto ensureId = [this](VectorItem *item) {
+        VectorObject object = item->object();
+        if (object.id <= 0) {
+            object.id = m_nextObjectId++;
+            item->setObject(object);
+        }
+        return object.id;
+    };
+
+    emit beginEdit();
+    int created = 0;
+    for (int i = 0; i + 1 < selected.size(); ++i) {
+        const int fromId = ensureId(selected.at(i));
+        const int toId = ensureId(selected.at(i + 1));
+        if (fromId == toId)
+            continue;
+
+        int existing = -1;
+        for (int r = 0; r < m_blends.size(); ++r) {
+            const BlendRecord &record = m_blends.at(r);
+            const bool same = (record.fromId == fromId && record.toId == toId)
+                              || (record.fromId == toId && record.toId == fromId);
+            if (same) {
+                existing = r;
+                break;
+            }
+        }
+        if (existing >= 0) {
+            m_blends[existing].steps = steps;
+            m_blends[existing].spacing = 0.0;
+            m_blends[existing].active = true;
+            updateBlend(m_blends.at(existing).id);
+        } else {
+            BlendRecord record;
+            record.id = m_nextBlendId++;
+            record.fromId = fromId;
+            record.toId = toId;
+            record.steps = steps;
+            m_blends.append(record);
+            updateBlend(record.id);
+            ++created;
+        }
+    }
+    emit endEdit();
+    if (created == 0)
+        emit statusHint(QStringLiteral("Перетекание обновлено."));
+    else
+        emit statusHint(QStringLiteral("Создано перетеканий: %1.").arg(created));
+}
+
+
+void CanvasView::updateBlend(int blendId)
+{
+    if (m_updatingBlends)
+        return;
+    int index = -1;
+    for (int i = 0; i < m_blends.size(); ++i) {
+        if (m_blends.at(i).id == blendId) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0)
+        return;
+    const BlendRecord record = m_blends.at(index);
+    if (!record.active)
+        return;
+
+    VectorItem *from = nullptr;
+    VectorItem *to = nullptr;
+    for (VectorItem *item : vectorItems()) {
+        const int id = item->object().id;
+        if (id == record.fromId)
+            from = item;
+        else if (id == record.toId)
+            to = item;
+    }
+    if (!from || !to) {
+        removeBlend(blendId);
+        return;
+    }
+
+    m_updatingBlends = true;
+
+    const QList<VectorItem *> existing = vectorItems();
+    for (VectorItem *item : existing) {
+        if (item->object().blendId == blendId) {
+            scene()->removeItem(item);
+            delete item;
+        }
+    }
+
     const VectorObject base = from->object();
     const VectorObject target = to->object();
     const QRectF fromBounds = base.localBounds();
     const QRectF toBounds = target.localBounds();
 
-    emit beginEdit();
+    int steps = qBound(1, record.steps, 80);
+    if (record.spacing > 0.5) {
+        const QPointF delta = target.pos - base.pos;
+        const qreal distance = std::hypot(delta.x(), delta.y());
+        steps = qBound(1, qRound(distance / record.spacing) - 1, 80);
+    }
+
     for (int i = 1; i <= steps; ++i) {
         const qreal t = qreal(i) / qreal(steps + 1);
         VectorObject object = base;
         object.pos = base.pos + (target.pos - base.pos) * t;
         object.rotation = base.rotation + (target.rotation - base.rotation) * t;
-        object.fill = interpolateColor(base.fill, target.fill, t);
-        object.stroke = interpolateColor(base.stroke, target.stroke, t);
         object.opacity = base.opacity + (target.opacity - base.opacity) * t;
-        object.shadow = false;
+        object.fillOpacity =
+            base.fillOpacity + (target.fillOpacity - base.fillOpacity) * t;
+        object.strokeOpacity =
+            base.strokeOpacity + (target.strokeOpacity - base.strokeOpacity) * t;
+        object.fill = interpolateColor(base.fill, target.fill, t);
+        object.fill2 = interpolateColor(base.fill2, target.fill2, t);
+        object.stroke = interpolateColor(base.stroke, target.stroke, t);
+        object.shadowColor =
+            interpolateColor(base.shadowColor, target.shadowColor, t);
+        object.shadowOpacity =
+            base.shadowOpacity + (target.shadowOpacity - base.shadowOpacity) * t;
 
-        if (fromBounds.width() > 1.0 && fromBounds.height() > 1.0
-            && !object.path.isEmpty()) {
+        if (!base.gradientStops.isEmpty()
+            && base.gradientStops.size() == target.gradientStops.size()) {
+            for (int s = 0; s < object.gradientStops.size(); ++s) {
+                object.gradientStops[s].position =
+                    base.gradientStops.at(s).position
+                    + (target.gradientStops.at(s).position
+                       - base.gradientStops.at(s).position) * t;
+                object.gradientStops[s].color =
+                    interpolateColor(base.gradientStops.at(s).color,
+                                     target.gradientStops.at(s).color, t);
+                object.gradientStops[s].opacity =
+                    base.gradientStops.at(s).opacity
+                    + (target.gradientStops.at(s).opacity
+                       - base.gradientStops.at(s).opacity) * t;
+            }
+        }
+
+        if (!object.path.isEmpty() && fromBounds.width() > 1.0
+            && fromBounds.height() > 1.0) {
             const qreal scaleX = 1.0 + (toBounds.width() / fromBounds.width() - 1.0) * t;
             const qreal scaleY = 1.0 + (toBounds.height() / fromBounds.height() - 1.0) * t;
             QTransform transform;
@@ -3834,12 +4669,1808 @@ void CanvasView::blendSelected(int steps)
             transform.scale(scaleX, scaleY);
             transform.translate(-fromBounds.center().x(), -fromBounds.center().y());
             object.path = transform.map(base.path);
+        } else if (object.type == ShapeType::Text || object.type == ShapeType::Image) {
+            const QSizeF size(fromBounds.width() + (toBounds.width() - fromBounds.width()) * t,
+                              fromBounds.height() + (toBounds.height() - fromBounds.height()) * t);
+            object.textBox.setSize(size);
+            if (object.type == ShapeType::Text && base.font.pixelSize() > 0
+                && target.font.pixelSize() > 0) {
+                QFont font = base.font;
+                font.setPixelSize(qRound(base.font.pixelSize()
+                                         + (target.font.pixelSize() - base.font.pixelSize()) * t));
+                object.font = font;
+            }
         }
+
+        if (base.effects.size() == target.effects.size()) {
+            for (int e = 0; e < object.effects.size(); ++e) {
+                const Effect &a = base.effects.at(e);
+                const Effect &b = target.effects.at(e);
+                if (a.type != b.type)
+                    continue;
+                Effect &effect = object.effects[e];
+                effect.opacity = a.opacity + (b.opacity - a.opacity) * t;
+                effect.radius = a.radius + (b.radius - a.radius) * t;
+                effect.intensity = a.intensity + (b.intensity - a.intensity) * t;
+                effect.angle = a.angle + (b.angle - a.angle) * t;
+                effect.distance = a.distance + (b.distance - a.distance) * t;
+                effect.amount = a.amount + (b.amount - a.amount) * t;
+                effect.offset = a.offset + (b.offset - a.offset) * t;
+                effect.color = interpolateColor(a.color, b.color, t);
+            }
+        }
+
+        object.blendId = blendId;
+        object.id = 0;
+        object.masterId = 0;
+        object.group = 0;
+        object.symbolId = 0;
+        object.instanceId = 0;
         addVectorObject(object, false, false);
     }
-    emit endEdit();
-    emit statusHint(QStringLiteral("Создано %1 промежуточных объектов.").arg(steps));
+
+    m_updatingBlends = false;
 }
+
+void CanvasView::updateAllBlends()
+{
+    if (m_updatingBlends)
+        return;
+    const QVector<BlendRecord> copy = m_blends;
+    for (const BlendRecord &record : copy)
+        updateBlend(record.id);
+}
+
+void CanvasView::updateBlendsFor(VectorItem *item)
+{
+    if (!item || m_updatingBlends)
+        return;
+    const int id = item->object().id;
+    if (id <= 0)
+        return;
+    const QVector<BlendRecord> copy = m_blends;
+    for (const BlendRecord &record : copy) {
+        if (record.fromId == id || record.toId == id)
+            updateBlend(record.id);
+    }
+}
+
+void CanvasView::removeBlend(int blendId)
+{
+    for (int i = 0; i < m_blends.size(); ++i) {
+        if (m_blends.at(i).id == blendId) {
+            m_blends.removeAt(i);
+            break;
+        }
+    }
+    const QList<VectorItem *> items = vectorItems();
+    for (VectorItem *item : items) {
+        if (item->object().blendId == blendId) {
+            scene()->removeItem(item);
+            delete item;
+        }
+    }
+}
+
+void CanvasView::setBlends(const QVector<BlendRecord> &blends)
+{
+    m_blends = blends;
+    m_nextBlendId = 1;
+    for (const BlendRecord &record : m_blends)
+        m_nextBlendId = qMax(m_nextBlendId, record.id + 1);
+}
+
+void CanvasView::setBlendSteps(int blendId, int steps)
+{
+    for (BlendRecord &record : m_blends) {
+        if (record.id != blendId)
+            continue;
+        record.steps = qBound(1, steps, 80);
+        record.spacing = 0.0;
+        emit beginEdit();
+        updateBlend(blendId);
+        emit endEdit();
+        return;
+    }
+}
+
+void CanvasView::setBlendSpacing(int blendId, qreal spacing)
+{
+    for (BlendRecord &record : m_blends) {
+        if (record.id != blendId)
+            continue;
+        record.spacing = qMax<qreal>(0.0, spacing);
+        emit beginEdit();
+        updateBlend(blendId);
+        emit endEdit();
+        return;
+    }
+}
+
+int CanvasView::blendIdFor(VectorItem *item) const
+{
+    return item ? item->object().blendId : 0;
+}
+
+namespace {
+
+QRectF symbolVisualBounds(VectorItem *item)
+{
+    if (!item)
+        return QRectF();
+    return item->mapToScene(item->object().localBounds()).boundingRect();
+}
+
+QPainterPath scalePathToBox(const QPainterPath &path, const QRectF &target)
+{
+    const QRectF bounds = path.boundingRect();
+    if (bounds.width() < 0.01 || bounds.height() < 0.01)
+        return path;
+    QTransform transform;
+    transform.translate(target.left(), target.top());
+    transform.scale(target.width() / bounds.width(), target.height() / bounds.height());
+    transform.translate(-bounds.left(), -bounds.top());
+    return transform.map(path);
+}
+
+// Maps a symbol object from the definition box into an instance box. Keeps the
+// object's own style and rotation, so every instance can scale independently.
+VectorObject mappedSymbolObject(const VectorObject &source, const QRectF &sourceBox,
+                                const QRectF &targetBox)
+{
+    VectorObject object = source;
+    const QRectF local = source.localBounds();
+    if (sourceBox.width() < 0.01 || sourceBox.height() < 0.01
+        || local.width() < 0.01 || local.height() < 0.01)
+        return object;
+
+    const qreal scaleX = targetBox.width() / sourceBox.width();
+    const qreal scaleY = targetBox.height() / sourceBox.height();
+    const QPointF sourceTopLeft(local.left() + source.pos.x(),
+                                local.top() + source.pos.y());
+    const QPointF relative = sourceTopLeft - sourceBox.topLeft();
+    const QPointF targetTopLeft(targetBox.left() + relative.x() * scaleX,
+                                targetBox.top() + relative.y() * scaleY);
+
+    if (!object.path.isEmpty()) {
+        object.path = scalePathToBox(object.path,
+                                     QRectF(0.0, 0.0, local.width() * scaleX,
+                                            local.height() * scaleY));
+    } else if (object.type == ShapeType::Text || object.type == ShapeType::Image) {
+        object.textBox = QRectF(0.0, 0.0, local.width() * scaleX,
+                                local.height() * scaleY);
+        if (object.type == ShapeType::Text && object.font.pixelSize() > 0) {
+            QFont font = object.font;
+            font.setPixelSize(qMax(4, qRound(object.font.pixelSize()
+                                             * (scaleX + scaleY) / 2.0)));
+            object.font = font;
+        }
+    }
+
+    object.pos = targetTopLeft;
+    return object;
+}
+
+} // namespace
+
+QStringList CanvasView::symbolNames() const
+{
+    QStringList names;
+    for (const SymbolDefinition &symbol : m_symbols)
+        names.append(symbol.name);
+    return names;
+}
+
+int CanvasView::createSymbolFromSelection(const QString &name)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty()) {
+        emit statusHint(QStringLiteral("Выделите объекты для символа."));
+        return 0;
+    }
+
+    QRectF bounds;
+    for (VectorItem *item : selected) {
+        const QRectF box = symbolVisualBounds(item);
+        bounds = bounds.isNull() ? box : bounds.united(box);
+    }
+    if (bounds.width() < 1.0 || bounds.height() < 1.0) {
+        emit statusHint(QStringLiteral("У выделения нет геометрии для символа."));
+        return 0;
+    }
+
+    SymbolDefinition definition;
+    definition.id = m_nextSymbolId++;
+    definition.name = name.trimmed().isEmpty()
+                          ? QStringLiteral("Символ %1").arg(definition.id)
+                          : name.trimmed();
+    definition.bounds = bounds;
+    for (VectorItem *item : selected) {
+        VectorObject object = item->object();
+        object.page = m_currentPage;
+        object.symbolId = 0;
+        object.instanceId = 0;
+        object.group = 0;
+        definition.objects.append(object);
+    }
+
+    const int group = m_nextGroupId++;
+    const int instanceId = m_nextInstanceId++;
+
+    emit beginEdit();
+    m_symbols.append(definition);
+    m_groups.append({group, 0});
+    SymbolInstance instance;
+    instance.id = instanceId;
+    instance.symbolId = definition.id;
+    instance.bounds = bounds;
+    instance.rotation = selected.first()->object().rotation;
+    instance.page = m_currentPage;
+    instance.group = group;
+    m_instances.append(instance);
+
+    for (VectorItem *item : selected) {
+        VectorObject object = item->object();
+        object.symbolId = definition.id;
+        object.instanceId = instanceId;
+        object.group = group;
+        item->setObject(object);
+    }
+    emit endEdit();
+
+    emit statusHint(QStringLiteral("Символ «%1» создан (%2 объектов).")
+                        .arg(definition.name)
+                        .arg(definition.objects.size()));
+    emit symbolsChanged();
+    return definition.id;
+}
+
+int CanvasView::insertSymbol(int symbolId, const QPointF &topLeft)
+{
+    int definitionIndex = -1;
+    for (int i = 0; i < m_symbols.size(); ++i) {
+        if (m_symbols.at(i).id == symbolId) {
+            definitionIndex = i;
+            break;
+        }
+    }
+    if (definitionIndex < 0) {
+        emit statusHint(QStringLiteral("Символ не найден."));
+        return 0;
+    }
+
+    const SymbolDefinition definition = m_symbols.at(definitionIndex);
+    QSizeF size = definition.bounds.size();
+    if (size.width() < 1.0 || size.height() < 1.0) {
+        emit statusHint(QStringLiteral("У символа пустая рамка."));
+        return 0;
+    }
+
+    QPointF position = topLeft;
+    if (position.isNull()) {
+        position = QPointF((m_pageSize.width() - size.width()) / 2.0,
+                           (m_pageSize.height() - size.height()) / 2.0);
+    }
+    const QRectF target(position, size);
+    const int group = m_nextGroupId++;
+    const int instanceId = m_nextInstanceId++;
+
+    emit beginEdit();
+    m_groups.append({group, 0});
+    for (const VectorObject &source : definition.objects) {
+        VectorObject object = mappedSymbolObject(source, definition.bounds, target);
+        object.symbolId = definition.id;
+        object.instanceId = instanceId;
+        object.group = group;
+        object.page = m_currentPage;
+        object.layer = m_activeLayer;
+        object.id = 0;
+        object.masterId = 0;
+        object.blendId = 0;
+        addVectorObject(object, false, false);
+    }
+
+    SymbolInstance instance;
+    instance.id = instanceId;
+    instance.symbolId = definition.id;
+    instance.bounds = target;
+    instance.rotation = 0.0;
+    instance.page = m_currentPage;
+    instance.group = group;
+    m_instances.append(instance);
+    emit endEdit();
+
+    scene()->clearSelection();
+    for (VectorItem *item : vectorItems()) {
+        if (item->object().instanceId == instanceId)
+            item->setSelected(true);
+    }
+    emit selectionChanged(selectedVectorItems().size());
+    emit statusHint(QStringLiteral("Вставлен экземпляр символа «%1».")
+                        .arg(definition.name));
+    emit symbolsChanged();
+    viewport()->update();
+    return instanceId;
+}
+
+void CanvasView::rebuildSymbolInstance(int instanceId)
+{
+    int instanceIndex = -1;
+    for (int i = 0; i < m_instances.size(); ++i) {
+        if (m_instances.at(i).id == instanceId) {
+            instanceIndex = i;
+            break;
+        }
+    }
+    if (instanceIndex < 0)
+        return;
+
+    SymbolInstance record = m_instances.at(instanceIndex);
+    int definitionIndex = -1;
+    for (int i = 0; i < m_symbols.size(); ++i) {
+        if (m_symbols.at(i).id == record.symbolId) {
+            definitionIndex = i;
+            break;
+        }
+    }
+    if (definitionIndex < 0)
+        return;
+    const SymbolDefinition definition = m_symbols.at(definitionIndex);
+
+    QList<VectorItem *> copies;
+    QRectF current;
+    qreal rotation = 0.0;
+    for (VectorItem *item : vectorItems()) {
+        if (item->object().instanceId != instanceId)
+            continue;
+        copies.append(item);
+        const QRectF box = symbolVisualBounds(item);
+        current = current.isNull() ? box : current.united(box);
+    }
+    if (copies.isEmpty())
+        current = record.bounds;
+    if (current.width() < 1.0 || current.height() < 1.0)
+        current = record.bounds;
+    if (!copies.isEmpty() && !definition.objects.isEmpty()) {
+        rotation = copies.first()->object().rotation
+                   - definition.objects.first().rotation;
+    }
+
+    const int group = record.group;
+    int page = record.page == -9999 ? m_currentPage : record.page;
+    int layer = m_activeLayer;
+    if (!copies.isEmpty())
+        layer = copies.first()->object().layer;
+    for (VectorItem *item : copies) {
+        scene()->removeItem(item);
+        delete item;
+    }
+
+    for (const VectorObject &source : definition.objects) {
+        VectorObject object = mappedSymbolObject(source, definition.bounds, current);
+        object.symbolId = definition.id;
+        object.instanceId = instanceId;
+        object.group = group;
+        object.rotation = source.rotation + rotation;
+        object.page = page;
+        object.layer = layer;
+        object.id = 0;
+        object.masterId = 0;
+        object.blendId = 0;
+        addVectorObject(object, false, false);
+    }
+
+    m_instances[instanceIndex].bounds = current;
+    m_instances[instanceIndex].rotation = rotation;
+    m_instances[instanceIndex].page = page;
+    normalizeZOrder();
+    viewport()->update();
+}
+
+bool CanvasView::updateSymbolFromSelection(int symbolId)
+{
+    const int instanceId = selectedInstanceId();
+    if (instanceId <= 0) {
+        emit statusHint(QStringLiteral(
+            "Выделите экземпляр символа, чтобы обновить исходный символ."));
+        return false;
+    }
+
+    int instanceIndex = -1;
+    for (int i = 0; i < m_instances.size(); ++i) {
+        if (m_instances.at(i).id == instanceId) {
+            instanceIndex = i;
+            break;
+        }
+    }
+    if (instanceIndex < 0)
+        return false;
+
+    const int targetSymbol = symbolId > 0 ? symbolId : m_instances.at(instanceIndex).symbolId;
+    int definitionIndex = -1;
+    for (int i = 0; i < m_symbols.size(); ++i) {
+        if (m_symbols.at(i).id == targetSymbol) {
+            definitionIndex = i;
+            break;
+        }
+    }
+    if (definitionIndex < 0) {
+        emit statusHint(QStringLiteral("Исходный символ не найден."));
+        return false;
+    }
+
+    QList<VectorItem *> sourceItems;
+    QRectF bounds;
+    for (VectorItem *item : vectorItems()) {
+        if (item->object().instanceId != instanceId)
+            continue;
+        sourceItems.append(item);
+        const QRectF box = symbolVisualBounds(item);
+        bounds = bounds.isNull() ? box : bounds.united(box);
+    }
+    if (sourceItems.isEmpty() || bounds.width() < 1.0 || bounds.height() < 1.0) {
+        emit statusHint(QStringLiteral("Экземпляр не найден на холсте."));
+        return false;
+    }
+
+    emit beginEdit();
+    SymbolDefinition &definition = m_symbols[definitionIndex];
+    definition.bounds = bounds;
+    definition.objects.clear();
+    for (VectorItem *item : sourceItems) {
+        VectorObject object = item->object();
+        object.symbolId = 0;
+        object.instanceId = 0;
+        object.group = 0;
+        definition.objects.append(object);
+    }
+
+    for (int i = 0; i < m_instances.size(); ++i) {
+        if (m_instances.at(i).symbolId != targetSymbol
+            || m_instances.at(i).id == instanceId)
+            continue;
+        rebuildSymbolInstance(m_instances.at(i).id);
+    }
+    m_instances[instanceIndex].bounds = bounds;
+    emit endEdit();
+
+    emit statusHint(QStringLiteral("Символ «%1» обновлён, экземпляры пересобраны.")
+                        .arg(definition.name));
+    emit symbolsChanged();
+    return true;
+}
+
+void CanvasView::detachSelectedSymbolInstances()
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    QSet<int> instanceIds;
+    for (VectorItem *item : selected) {
+        const int id = item->object().instanceId;
+        if (id > 0)
+            instanceIds.insert(id);
+    }
+    if (instanceIds.isEmpty()) {
+        emit statusHint(QStringLiteral("Выделение не содержит экземпляров символа."));
+        return;
+    }
+
+    emit beginEdit();
+    for (VectorItem *item : vectorItems()) {
+        if (!instanceIds.contains(item->object().instanceId))
+            continue;
+        VectorObject object = item->object();
+        object.symbolId = 0;
+        object.instanceId = 0;
+        item->setObject(object);
+    }
+    for (int i = m_instances.size() - 1; i >= 0; --i) {
+        if (instanceIds.contains(m_instances.at(i).id))
+            m_instances.removeAt(i);
+    }
+    emit endEdit();
+    emit statusHint(QStringLiteral("Экземпляры отделены от символа."));
+    emit symbolsChanged();
+}
+
+void CanvasView::renameSymbol(int symbolId, const QString &name)
+{
+    if (name.trimmed().isEmpty())
+        return;
+    for (SymbolDefinition &symbol : m_symbols) {
+        if (symbol.id != symbolId)
+            continue;
+        if (symbol.name == name.trimmed())
+            return;
+        emit beginEdit();
+        symbol.name = name.trimmed();
+        emit endEdit();
+        emit symbolsChanged();
+        return;
+    }
+}
+
+void CanvasView::deleteSymbol(int symbolId)
+{
+    emit beginEdit();
+    QSet<int> instanceIds;
+    for (int i = m_instances.size() - 1; i >= 0; --i) {
+        if (m_instances.at(i).symbolId == symbolId) {
+            instanceIds.insert(m_instances.at(i).id);
+            m_instances.removeAt(i);
+        }
+    }
+    for (VectorItem *item : vectorItems()) {
+        if (!instanceIds.contains(item->object().instanceId))
+            continue;
+        VectorObject object = item->object();
+        object.symbolId = 0;
+        object.instanceId = 0;
+        item->setObject(object);
+    }
+    for (int i = m_symbols.size() - 1; i >= 0; --i) {
+        if (m_symbols.at(i).id == symbolId)
+            m_symbols.removeAt(i);
+    }
+    emit endEdit();
+    emit statusHint(QStringLiteral("Символ удалён, его экземпляры стали обычными объектами."));
+    emit symbolsChanged();
+}
+
+int CanvasView::selectedSymbolId() const
+{
+    for (VectorItem *item : selectedVectorItems()) {
+        if (item->object().symbolId > 0)
+            return item->object().symbolId;
+    }
+    return 0;
+}
+
+int CanvasView::selectedInstanceId() const
+{
+    for (VectorItem *item : selectedVectorItems()) {
+        if (item->object().instanceId > 0)
+            return item->object().instanceId;
+    }
+    return 0;
+}
+
+QImage CanvasView::renderSymbolImage(int symbolId, const QSize &size) const
+{
+    QImage image(size, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    const SymbolDefinition *definition = nullptr;
+    for (const SymbolDefinition &symbol : m_symbols) {
+        if (symbol.id == symbolId) {
+            definition = &symbol;
+            break;
+        }
+    }
+    if (!definition || definition->bounds.width() < 1.0
+        || definition->bounds.height() < 1.0)
+        return image;
+
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::TextAntialiasing, true);
+    const qreal scale = qMin(size.width() / definition->bounds.width(),
+                             size.height() / definition->bounds.height()) * 0.88;
+    painter.translate(size.width() / 2.0, size.height() / 2.0);
+    painter.scale(scale, scale);
+    painter.translate(-definition->bounds.center());
+    for (const VectorObject &object : definition->objects) {
+        painter.save();
+        const QRectF bounds = object.localBounds();
+        painter.translate(object.pos - bounds.topLeft());
+        painter.rotate(object.rotation);
+        Document::paintObject(&painter, object);
+        painter.restore();
+    }
+    painter.end();
+    return image;
+}
+
+namespace {
+
+QString formattedMeasurement(qreal pixels, int units, int precision, qreal scale)
+{
+    qreal value = pixels;
+    QString suffix;
+    const qreal pxPerMm = 3.7795275591;
+    if (units == 3) {
+        suffix = QStringLiteral(" px");
+    } else if (units == 2) {
+        value = pixels / 96.0 * scale;
+        suffix = QStringLiteral(" in");
+    } else if (units == 1) {
+        value = pixels / pxPerMm * 10.0 * scale;
+        suffix = QStringLiteral(" см");
+    } else {
+        value = pixels / pxPerMm * scale;
+        suffix = QStringLiteral(" мм");
+    }
+    return QString::number(value, 'f', qBound(0, precision, 4)) + suffix;
+}
+
+} // namespace
+
+QString CanvasView::measurementText(qreal pixels) const
+{
+    return formattedMeasurement(pixels, m_dimensionUnits, m_dimensionPrecision,
+                                m_drawingScale);
+}
+
+void CanvasView::setDimensionMode(DimensionMode mode)
+{
+    m_dimensionMode = mode;
+    m_dimensionPoints.clear();
+    m_dimensionRefs.clear();
+    m_dimensionAnchors.clear();
+    m_dimensionHasCursor = false;
+    viewport()->update();
+}
+
+void CanvasView::setDimensionUnits(int units)
+{
+    m_dimensionUnits = qBound(0, units, 3);
+}
+
+void CanvasView::setDimensionPrecision(int digits)
+{
+    m_dimensionPrecision = qBound(0, digits, 4);
+}
+
+void CanvasView::setDimensionOffset(qreal offset)
+{
+    m_dimensionOffset = qBound(-300.0, offset, 300.0);
+}
+
+void CanvasView::setDimensionAssociative(bool on)
+{
+    m_dimensionAssociative = on;
+}
+
+QPointF CanvasView::anchorScenePoint(VectorItem *item, const QPointF &anchor) const
+{
+    if (!item)
+        return QPointF();
+    const QRectF bounds = item->object().localBounds();
+    if (bounds.width() < 0.01 || bounds.height() < 0.01)
+        return item->scenePos();
+    const QPointF local(bounds.left() + bounds.width() * anchor.x(),
+                        bounds.top() + bounds.height() * anchor.y());
+    return item->mapToScene(local);
+}
+
+bool CanvasView::resolveDimension(VectorObject &object) const
+{
+    if (object.type != ShapeType::Dimension)
+        return false;
+
+    const auto findItem = [this](int id) -> VectorItem * {
+        if (id <= 0)
+            return nullptr;
+        for (VectorItem *item : vectorItems()) {
+            if (item->object().id == id)
+                return item;
+        }
+        return nullptr;
+    };
+
+    bool changed = false;
+    if (object.dimRefA > 0) {
+        if (VectorItem *ref = findItem(object.dimRefA)) {
+            object.dimA = anchorScenePoint(ref, object.dimAnchorA);
+            changed = true;
+        } else {
+            object.dimRefA = 0;
+        }
+    }
+    if (object.dimRefB > 0) {
+        if (VectorItem *ref = findItem(object.dimRefB)) {
+            object.dimB = anchorScenePoint(ref, object.dimAnchorB);
+            changed = true;
+        } else {
+            object.dimRefB = 0;
+        }
+    }
+    if (object.dimRefC > 0) {
+        if (VectorItem *ref = findItem(object.dimRefC)) {
+            object.dimC = anchorScenePoint(ref, object.dimAnchorC);
+            changed = true;
+        } else {
+            object.dimRefC = 0;
+        }
+    }
+    return changed;
+}
+
+void CanvasView::updateDimensionsFor(VectorItem *item)
+{
+    if (!item || m_updatingDimensions)
+        return;
+    const int id = item->object().id;
+    if (id <= 0)
+        return;
+
+    m_updatingDimensions = true;
+    for (VectorItem *dimensionItem : vectorItems()) {
+        VectorObject object = dimensionItem->object();
+        if (object.type != ShapeType::Dimension || !object.dimAssociative)
+            continue;
+        if (object.dimRefA != id && object.dimRefB != id && object.dimRefC != id)
+            continue;
+        if (resolveDimension(object))
+            dimensionItem->setObject(object);
+    }
+    m_updatingDimensions = false;
+    viewport()->update();
+}
+
+void CanvasView::updateAllDimensions()
+{
+    if (m_updatingDimensions)
+        return;
+    m_updatingDimensions = true;
+    for (VectorItem *item : vectorItems()) {
+        VectorObject object = item->object();
+        if (object.type != ShapeType::Dimension)
+            continue;
+        bool changed = false;
+        if (object.dimScale != m_drawingScale) {
+            object.dimScale = m_drawingScale;
+            changed = true;
+        }
+        if (object.dimAssociative && resolveDimension(object))
+            changed = true;
+        if (changed)
+            item->setObject(object);
+    }
+    m_updatingDimensions = false;
+}
+
+void CanvasView::applyDimensionSettingsToSelection()
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    bool any = false;
+    for (VectorItem *item : selected) {
+        if (item->object().type == ShapeType::Dimension) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) {
+        emit statusHint(QStringLiteral("Выделите размерные объекты."));
+        return;
+    }
+
+    emit beginEdit();
+    for (VectorItem *item : selected) {
+        VectorObject object = item->object();
+        if (object.type != ShapeType::Dimension)
+            continue;
+        object.dimUnits = m_dimensionUnits;
+        object.dimPrecision = m_dimensionPrecision;
+        object.dimOffset = m_dimensionOffset;
+        object.dimScale = m_drawingScale;
+        object.dimAssociative = m_dimensionAssociative;
+        item->setObject(object);
+    }
+    emit endEdit();
+    emit statusHint(QStringLiteral("Параметры размеров применены."));
+}
+
+void CanvasView::dimensionPress(const QPointF &scenePos)
+{
+    const QPointF snapped = snapNodePoint(scenePos, nullptr);
+
+    const auto pickAnchor = [this, &snapped](QPointF *point) {
+        *point = snapped;
+        int refId = 0;
+        QPointF anchor(-1.0, -1.0);
+        VectorItem *item = itemAtScene(snapped);
+        if (item) {
+            const QRectF bounds = item->object().localBounds();
+            if (bounds.width() > 0.5 && bounds.height() > 0.5) {
+                const QPointF local = item->mapFromScene(snapped);
+                const QPointF normalised((local.x() - bounds.left()) / bounds.width(),
+                                         (local.y() - bounds.top()) / bounds.height());
+                if (normalised.x() > -0.08 && normalised.x() < 1.08
+                    && normalised.y() > -0.08 && normalised.y() < 1.08) {
+                    anchor = QPointF(qBound(0.0, normalised.x(), 1.0),
+                                     qBound(0.0, normalised.y(), 1.0));
+                    refId = item->object().id;
+                    *point = anchorScenePoint(item, anchor);
+                }
+            }
+        }
+        return qMakePair(refId, anchor);
+    };
+
+    if (m_dimensionMode == DimensionMode::Radius
+        || m_dimensionMode == DimensionMode::Diameter) {
+        VectorItem *item = itemAtScene(snapped);
+        if (!item) {
+            emit statusHint(QStringLiteral(
+                "Щёлкните по окружности или эллипсу для радиального размера."));
+            return;
+        }
+        const QRectF bounds = item->object().localBounds();
+        if (bounds.width() < 1.0 || bounds.height() < 1.0)
+            return;
+        const QPointF center = bounds.center();
+        const qreal rx = bounds.width() / 2.0;
+        const qreal ry = bounds.height() / 2.0;
+        const QPointF local = item->mapFromScene(snapped);
+        QPointF direction = local - center;
+        if (direction.manhattanLength() < 0.01)
+            direction = QPointF(rx, 0);
+        const qreal divisor = std::hypot(direction.x() / rx, direction.y() / ry);
+        const QPointF edge = divisor > 0.0001
+                                 ? center + direction / divisor
+                                 : center + QPointF(rx, 0);
+
+        VectorObject dimension;
+        dimension.type = ShapeType::Dimension;
+        dimension.dimensionType = m_dimensionMode == DimensionMode::Radius ? 4 : 5;
+        dimension.dimA = item->mapToScene(center);
+        dimension.dimB = item->mapToScene(edge);
+        dimension.dimOffset = m_dimensionOffset;
+        dimension.dimUnits = m_dimensionUnits;
+        dimension.dimPrecision = m_dimensionPrecision;
+        dimension.dimScale = m_drawingScale;
+        dimension.dimAssociative = m_dimensionAssociative;
+        dimension.dimRefA = item->object().id;
+        dimension.dimRefB = item->object().id;
+        dimension.dimAnchorA = QPointF(0.5, 0.5);
+        dimension.dimAnchorB = QPointF((edge.x() - bounds.left()) / bounds.width(),
+                                       (edge.y() - bounds.top()) / bounds.height());
+        dimension.stroke = m_stroke;
+        dimension.strokeWidth = 1.0;
+        dimension.hasFill = false;
+        dimension.hasStroke = true;
+        dimension.fill = m_stroke;
+        dimension.font = QFont(QStringLiteral("Adwaita Sans"));
+        dimension.font.setPixelSize(11);
+        dimension.page = m_currentPage;
+        dimension.layer = m_activeLayer;
+        dimension.pos = QPointF();
+
+        emit beginEdit();
+        addVectorObject(dimension, false, true);
+        emit endEdit();
+        emit statusHint(QStringLiteral("Радиальный размер создан."));
+        viewport()->update();
+        return;
+    }
+
+    QPointF point;
+    const QPair<int, QPointF> anchorInfo = pickAnchor(&point);
+    m_dimensionPoints.append(point);
+    m_dimensionRefs.append(anchorInfo.first);
+    m_dimensionAnchors.append(anchorInfo.second);
+
+    const int needed = m_dimensionMode == DimensionMode::Angular ? 3 : 2;
+    if (m_dimensionPoints.size() < needed) {
+        if (m_dimensionMode == DimensionMode::Angular && m_dimensionPoints.size() == 1)
+            emit statusHint(QStringLiteral("Укажите точку первой стороны угла."));
+        else if (m_dimensionMode == DimensionMode::Angular)
+            emit statusHint(QStringLiteral("Укажите точку второй стороны угла."));
+        else
+            emit statusHint(QStringLiteral("Укажите вторую точку размера."));
+        viewport()->update();
+        return;
+    }
+
+    VectorObject dimension;
+    dimension.type = ShapeType::Dimension;
+    dimension.dimensionType = static_cast<int>(m_dimensionMode);
+    dimension.dimA = m_dimensionPoints.at(0);
+    dimension.dimB = m_dimensionPoints.at(1);
+    if (m_dimensionMode == DimensionMode::Angular)
+        dimension.dimC = m_dimensionPoints.at(2);
+    else
+        dimension.dimC = QPointF();
+    dimension.dimOffset = m_dimensionOffset;
+    dimension.dimUnits = m_dimensionUnits;
+    dimension.dimPrecision = m_dimensionPrecision;
+    dimension.dimScale = m_drawingScale;
+    dimension.dimAssociative = m_dimensionAssociative;
+    dimension.dimRefA = m_dimensionRefs.value(0);
+    dimension.dimRefB = m_dimensionRefs.value(1);
+    dimension.dimRefC = m_dimensionRefs.value(2);
+    dimension.dimAnchorA = m_dimensionAnchors.value(0, QPointF(-1.0, -1.0));
+    dimension.dimAnchorB = m_dimensionAnchors.value(1, QPointF(-1.0, -1.0));
+    dimension.dimAnchorC = m_dimensionAnchors.value(2, QPointF(-1.0, -1.0));
+    dimension.stroke = m_stroke;
+    dimension.strokeWidth = 1.0;
+    dimension.hasFill = false;
+    dimension.hasStroke = true;
+    dimension.fill = m_stroke;
+    dimension.font = QFont(QStringLiteral("Adwaita Sans"));
+    dimension.font.setPixelSize(11);
+    dimension.page = m_currentPage;
+    dimension.layer = m_activeLayer;
+    dimension.pos = QPointF();
+
+    m_dimensionPoints.clear();
+    m_dimensionRefs.clear();
+    m_dimensionAnchors.clear();
+    m_dimensionHasCursor = false;
+
+    emit beginEdit();
+    addVectorObject(dimension, false, true);
+    emit endEdit();
+    emit statusHint(QStringLiteral("Размер создан."));
+    viewport()->update();
+}
+
+void CanvasView::drawDimensionPreview(QPainter *painter)
+{
+    if (m_tool != Tool::Dimension || m_dimensionPoints.isEmpty())
+        return;
+
+    const qreal scale = transform().m11() > 0 ? transform().m11() : 1.0;
+    const qreal size = 4.0 / scale;
+    QPen pen(QColor(0x00, 0xb8, 0xd9), 1.3 / scale);
+    pen.setStyle(Qt::DashLine);
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing, true);
+    painter->setPen(pen);
+    painter->setBrush(QColor(0x1b, 0x1d, 0x21));
+    for (const QPointF &point : m_dimensionPoints)
+        painter->drawRect(QRectF(point - QPointF(size, size), QSizeF(size * 2, size * 2)));
+
+    painter->setBrush(Qt::NoBrush);
+    if (m_dimensionPoints.size() >= 2) {
+        painter->drawLine(m_dimensionPoints.at(0), m_dimensionPoints.at(1));
+        if (m_dimensionMode == DimensionMode::Angular)
+            painter->drawLine(m_dimensionPoints.at(0), m_dimensionPoints.at(1));
+    }
+    if (m_dimensionHasCursor) {
+        painter->setPen(QPen(QColor(0xff, 0x66, 0x99), 1.0 / scale));
+        painter->drawLine(m_dimensionPoints.last(), m_dimensionCursor);
+        QString label;
+        if (m_dimensionMode == DimensionMode::Angular && m_dimensionPoints.size() >= 2) {
+            const QPointF a = m_dimensionPoints.at(0);
+            const QPointF b = m_dimensionPoints.at(1);
+            const qreal a1 = std::atan2(b.y() - a.y(), b.x() - a.x());
+            const qreal a2 = std::atan2(m_dimensionCursor.y() - a.y(),
+                                        m_dimensionCursor.x() - a.x());
+            qreal degrees = qAbs(a2 - a1) * 180.0 / kPi;
+            if (degrees > 180.0)
+                degrees = 360.0 - degrees;
+            label = QString::number(degrees, 'f', m_dimensionPrecision)
+                    + QStringLiteral("°");
+        } else {
+            label = measurementText(QLineF(m_dimensionPoints.last(),
+                                           m_dimensionCursor).length());
+        }
+        QFont font = painter->font();
+        font.setPixelSize(qMax(6, qRound(11.0 / scale)));
+        painter->setFont(font);
+        painter->setPen(QColor(0x9d, 0xc0, 0xf2));
+        painter->drawText(m_dimensionCursor + QPointF(10.0 / scale, -10.0 / scale),
+                          label);
+    }
+    painter->restore();
+}
+
+VectorItem *CanvasView::addConstructedPath(const QPainterPath &path, bool closed)
+{
+    if (path.isEmpty())
+        return nullptr;
+
+    VectorObject object;
+    object.type = ShapeType::Bezier;
+    object.path = path;
+    object.pos = QPointF();
+    object.hasFill = closed;
+    object.fill = m_fill;
+    object.hasStroke = true;
+    object.stroke = m_stroke;
+    object.strokeWidth = m_strokeWidth;
+    object.page = m_currentPage;
+    object.layer = m_activeLayer;
+    object.id = 0;
+
+    emit beginEdit();
+    scene()->clearSelection();
+    VectorItem *item = addVectorObject(object, false, true);
+    emit endEdit();
+    viewport()->update();
+    return item;
+}
+
+void CanvasView::constructLine(const QPointF &a, const QPointF &b)
+{
+    QPainterPath path;
+    path.moveTo(a);
+    path.lineTo(b);
+    if (addConstructedPath(path, false))
+        emit statusHint(QStringLiteral("Линия построена по координатам."));
+}
+
+void CanvasView::constructLineFrom(const QPointF &start, qreal length, qreal angleDegrees)
+{
+    const qreal radians = angleDegrees * kPi / 180.0;
+    const QPointF end = start + QPointF(std::cos(radians), std::sin(radians)) * length;
+    QPainterPath path;
+    path.moveTo(start);
+    path.lineTo(end);
+    if (addConstructedPath(path, false))
+        emit statusHint(QStringLiteral("Линия %1 px под углом %2° построена.")
+                            .arg(length, 0, 'f', 1)
+                            .arg(angleDegrees, 0, 'f', 1));
+}
+
+void CanvasView::constructCircle(const QPointF &center, qreal radius)
+{
+    QPainterPath path;
+    path.addEllipse(center, radius, radius);
+    if (addConstructedPath(path, true))
+        emit statusHint(QStringLiteral("Окружность R%1 построена.")
+                            .arg(radius, 0, 'f', 1));
+}
+
+void CanvasView::constructArc(const QPointF &center, qreal radius,
+                              qreal startDegrees, qreal sweepDegrees)
+{
+    const QRectF box(center.x() - radius, center.y() - radius,
+                     radius * 2.0, radius * 2.0);
+    QPainterPath path;
+    path.arcMoveTo(box, startDegrees);
+    path.arcTo(box, startDegrees, sweepDegrees);
+    if (addConstructedPath(path, false))
+        emit statusHint(QStringLiteral("Дуга R%1 построена.").arg(radius, 0, 'f', 1));
+}
+
+void CanvasView::constructPolygon(const QPointF &center, int sides, qreal radius)
+{
+    const QRectF box(center.x() - radius, center.y() - radius,
+                     radius * 2.0, radius * 2.0);
+    const QPainterPath path = buildPolygonPath(box, qBound(3, sides, 64));
+    if (addConstructedPath(path, true))
+        emit statusHint(QStringLiteral("Правильный %1-угольник построен.").arg(sides));
+}
+
+bool CanvasView::createParallelFromSelection(qreal offset)
+{
+    VectorItem *lineItem = nullptr;
+    for (VectorItem *item : selectedVectorItems()) {
+        if (!item->object().path.isEmpty()) {
+            lineItem = item;
+            break;
+        }
+    }
+    if (!lineItem) {
+        emit statusHint(QStringLiteral("Выделите линию или контур для параллели."));
+        return false;
+    }
+    const QPainterPath path = lineItem->object().path;
+    const QPointF a = lineItem->mapToScene(path.pointAtPercent(0.0));
+    const QPointF b = lineItem->mapToScene(path.pointAtPercent(1.0));
+    QPointF direction = b - a;
+    const qreal length = std::hypot(direction.x(), direction.y());
+    if (length < 1.0) {
+        emit statusHint(QStringLiteral("Линия слишком короткая."));
+        return false;
+    }
+    direction /= length;
+    const QPointF normal(-direction.y(), direction.x());
+    QPainterPath parallel;
+    parallel.moveTo(a + normal * offset);
+    parallel.lineTo(b + normal * offset);
+    if (!addConstructedPath(parallel, false))
+        return false;
+    emit statusHint(QStringLiteral("Параллельная линия построена."));
+    return true;
+}
+
+bool CanvasView::createPerpendicularFromSelection(qreal length)
+{
+    VectorItem *lineItem = nullptr;
+    for (VectorItem *item : selectedVectorItems()) {
+        if (!item->object().path.isEmpty()) {
+            lineItem = item;
+            break;
+        }
+    }
+    if (!lineItem) {
+        emit statusHint(QStringLiteral("Выделите линию для перпендикуляра."));
+        return false;
+    }
+    const QPainterPath path = lineItem->object().path;
+    const QPointF a = lineItem->mapToScene(path.pointAtPercent(0.0));
+    const QPointF b = lineItem->mapToScene(path.pointAtPercent(1.0));
+    QPointF direction = b - a;
+    const qreal baseLength = std::hypot(direction.x(), direction.y());
+    if (baseLength < 1.0) {
+        emit statusHint(QStringLiteral("Линия слишком короткая."));
+        return false;
+    }
+    direction /= baseLength;
+    const QPointF normal(-direction.y(), direction.x());
+    const QPointF middle = (a + b) / 2.0;
+    QPainterPath perpendicular;
+    perpendicular.moveTo(middle - normal * (length / 2.0));
+    perpendicular.lineTo(middle + normal * (length / 2.0));
+    if (!addConstructedPath(perpendicular, false))
+        return false;
+    emit statusHint(QStringLiteral("Перпендикуляр построен из середины линии."));
+    return true;
+}
+
+bool CanvasView::createTangentFromSelection(const QPointF &externalPoint)
+{
+    VectorItem *shapeItem = nullptr;
+    for (VectorItem *item : selectedVectorItems()) {
+        const ShapeType type = item->object().type;
+        if (type == ShapeType::Ellipse || type == ShapeType::Rectangle) {
+            shapeItem = item;
+            break;
+        }
+    }
+    if (!shapeItem) {
+        emit statusHint(QStringLiteral("Выделите окружность или эллипс для касательной."));
+        return false;
+    }
+    const QRectF bounds = shapeItem->mapRectToScene(shapeItem->object().localBounds());
+    const QPointF center = bounds.center();
+    const qreal rx = bounds.width() / 2.0;
+    const qreal ry = bounds.height() / 2.0;
+    if (rx < 0.5 || ry < 0.5)
+        return false;
+
+    const qreal dx = (externalPoint.x() - center.x()) / rx;
+    const qreal dy = (externalPoint.y() - center.y()) / ry;
+    const qreal distanceSquared = dx * dx + dy * dy;
+    if (distanceSquared <= 1.01) {
+        emit statusHint(QStringLiteral("Точка должна лежать вне фигуры."));
+        return false;
+    }
+    const qreal root = std::sqrt(distanceSquared - 1.0);
+    const QVector<QPointF> unitPoints = {
+        QPointF((dx - root * dy) / distanceSquared, (dy + root * dx) / distanceSquared),
+        QPointF((dx + root * dy) / distanceSquared, (dy - root * dx) / distanceSquared),
+    };
+
+    emit beginEdit();
+    for (const QPointF &unit : unitPoints) {
+        const QPointF tangent(center.x() + unit.x() * rx,
+                              center.y() + unit.y() * ry);
+        QPainterPath path;
+        path.moveTo(externalPoint);
+        path.lineTo(tangent);
+        VectorObject object;
+        object.type = ShapeType::Bezier;
+        object.path = path;
+        object.pos = QPointF();
+        object.hasFill = false;
+        object.hasStroke = true;
+        object.stroke = m_stroke;
+        object.strokeWidth = m_strokeWidth;
+        object.page = m_currentPage;
+        object.layer = m_activeLayer;
+        addVectorObject(object, false, true);
+    }
+    emit endEdit();
+    emit statusHint(QStringLiteral("Касательные построены."));
+    return true;
+}
+
+void CanvasView::scaleSelectionBy(qreal factor)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty() || factor <= 0.0) {
+        emit statusHint(QStringLiteral("Выделите объекты для масштабирования."));
+        return;
+    }
+
+    QRectF bounds;
+    for (VectorItem *item : selected) {
+        const QRectF visual = item->mapRectToScene(item->localBounds());
+        bounds = bounds.isNull() ? visual : bounds.united(visual);
+    }
+    if (bounds.width() < 0.5 || bounds.height() < 0.5)
+        return;
+    const QPointF pivot = bounds.center();
+
+    emit beginEdit();
+    for (VectorItem *item : selected) {
+        if (item->object().type == ShapeType::Dimension)
+            continue;
+        const QRectF local = item->object().localBounds();
+        const QRectF visual = item->mapRectToScene(local);
+        const QPointF oldCenter = visual.center();
+        item->setFrameSize(QSizeF(qMax<qreal>(1.0, local.width() * factor),
+                                  qMax<qreal>(1.0, local.height() * factor)));
+        const QPointF currentCenter = item->mapToScene(item->object().localBounds().center());
+        const QPointF wanted = pivot + (oldCenter - pivot) * factor;
+        item->moveBy(wanted.x() - currentCenter.x(), wanted.y() - currentCenter.y());
+    }
+    emit endEdit();
+    emit statusHint(QStringLiteral("Выделение масштабировано в %1×.")
+                        .arg(factor, 0, 'f', 3));
+}
+
+int CanvasView::createPatternFromSelection(const QString &name)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty()) {
+        emit statusHint(QStringLiteral("Выделите объекты для узора."));
+        return 0;
+    }
+    QVector<VectorObject> objects;
+    for (VectorItem *item : selected)
+        objects.append(item->object());
+    PatternDefinition definition = patternFromObjects(objects, name);
+    if (definition.objects.isEmpty()) {
+        emit statusHint(QStringLiteral("У выделения нет геометрии для узора."));
+        return 0;
+    }
+
+    emit beginEdit();
+    definition.id = m_nextPatternId++;
+    m_patterns.append(definition);
+    emit endEdit();
+    emit statusHint(QStringLiteral("Узор «%1» создан в документе.")
+                        .arg(definition.name));
+    return definition.id;
+}
+
+int CanvasView::storePatternDefinition(const PatternDefinition &pattern)
+{
+    if (pattern.objects.isEmpty())
+        return 0;
+    emit beginEdit();
+    PatternDefinition definition = pattern;
+    int index = -1;
+    for (int i = 0; i < m_patterns.size(); ++i) {
+        if (m_patterns.at(i).id == definition.id) {
+            index = i;
+            break;
+        }
+    }
+    if (definition.id <= 0 || index < 0) {
+        definition.id = m_nextPatternId++;
+        m_patterns.append(definition);
+    } else {
+        m_patterns[index] = definition;
+    }
+    emit endEdit();
+    return definition.id;
+}
+
+bool CanvasView::applyPatternToSelection(int patternId)
+{
+    const PatternDefinition definition = patternDefinition(patternId);
+    if (definition.objects.isEmpty()) {
+        emit statusHint(QStringLiteral("Узор не найден."));
+        return false;
+    }
+    return applyPatternDefinitionToSelection(definition);
+}
+
+bool CanvasView::applyPatternDefinitionToSelection(const PatternDefinition &pattern)
+{
+    if (pattern.objects.isEmpty()) {
+        emit statusHint(QStringLiteral("В узоре нет объектов."));
+        return false;
+    }
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty()) {
+        emit statusHint(QStringLiteral("Выделите объекты для заливки узором."));
+        return false;
+    }
+
+    emit beginEdit();
+    PatternDefinition definition = pattern;
+    int index = -1;
+    for (int i = 0; i < m_patterns.size(); ++i) {
+        if (m_patterns.at(i).id == definition.id) {
+            index = i;
+            break;
+        }
+    }
+    if (definition.id <= 0 || index < 0) {
+        definition.id = m_nextPatternId++;
+        m_patterns.append(definition);
+    } else {
+        m_patterns[index] = definition;
+    }
+
+    const QVector<PatternShape> shapes = bakePatternShapes(definition);
+    int applied = 0;
+    for (VectorItem *item : selected) {
+        VectorObject object = item->object();
+        if (object.path.isEmpty()
+            || object.type == ShapeType::Dimension
+            || object.type == ShapeType::Image)
+            continue;
+        object.patternId = definition.id;
+        object.pattern = definition.settings;
+        object.patternShapes = shapes;
+        object.hasFill = true;
+        item->setObject(object);
+        ++applied;
+    }
+    emit endEdit();
+
+    if (applied == 0) {
+        emit statusHint(QStringLiteral(
+            "Для узорной заливки нужны фигуры с замкнутым контуром."));
+        return false;
+    }
+    emit statusHint(QStringLiteral("Узор «%1» применён к объектам: %2.")
+                        .arg(definition.name)
+                        .arg(applied));
+    viewport()->update();
+    return true;
+}
+
+void CanvasView::updatePatternDefinition(const PatternDefinition &pattern)
+{
+    if (pattern.id <= 0)
+        return;
+    int index = -1;
+    for (int i = 0; i < m_patterns.size(); ++i) {
+        if (m_patterns.at(i).id == pattern.id) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0)
+        return;
+
+    emit beginEdit();
+    m_patterns[index] = pattern;
+    const QVector<PatternShape> shapes = bakePatternShapes(pattern);
+    for (VectorItem *item : vectorItems()) {
+        VectorObject object = item->object();
+        if (object.patternId != pattern.id)
+            continue;
+        object.pattern = pattern.settings;
+        object.patternShapes = shapes;
+        item->setObject(object);
+    }
+    emit endEdit();
+    viewport()->update();
+}
+
+bool CanvasView::updatePatternFromSelection(int patternId)
+{
+    const PatternDefinition existing = patternDefinition(patternId);
+    if (existing.id <= 0) {
+        emit statusHint(QStringLiteral("Узор не найден."));
+        return false;
+    }
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty()) {
+        emit statusHint(QStringLiteral("Выделите новые элементы узора."));
+        return false;
+    }
+    QVector<VectorObject> objects;
+    for (VectorItem *item : selected)
+        objects.append(item->object());
+    PatternDefinition updated = patternFromObjects(objects, existing.name);
+    updated.id = existing.id;
+    updated.settings = existing.settings;
+    updatePatternDefinition(updated);
+    emit statusHint(QStringLiteral("Исходные элементы узора обновлены."));
+    return true;
+}
+
+int CanvasView::expandSelectedPatterns()
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    int expanded = 0;
+    for (VectorItem *item : selected) {
+        if (!item->object().patternShapes.isEmpty())
+            ++expanded;
+    }
+    if (expanded == 0) {
+        emit statusHint(QStringLiteral("Выделите объекты с узорной заливкой."));
+        return 0;
+    }
+
+    emit beginEdit();
+    scene()->clearSelection();
+    int created = 0;
+    for (VectorItem *item : selected) {
+        VectorObject object = item->object();
+        if (object.patternShapes.isEmpty())
+            continue;
+        const QVector<VectorObject> pieces = expandPatternObject(object);
+        if (pieces.isEmpty())
+            continue;
+        const int group = pieces.size() > 1 ? m_nextGroupId++ : 0;
+        if (group > 0)
+            m_groups.append({group, 0});
+        scene()->removeItem(item);
+        delete item;
+        for (VectorObject piece : pieces) {
+            piece.group = group;
+            piece.id = 0;
+            piece.masterId = 0;
+            piece.blendId = 0;
+            piece.symbolId = 0;
+            piece.instanceId = 0;
+            if (VectorItem *copy = addVectorObject(piece, false, true)) {
+                copy->setSelected(true);
+                ++created;
+            }
+        }
+    }
+    emit endEdit();
+    emit statusHint(QStringLiteral("Узор разобран на объекты: %1.").arg(created));
+    viewport()->update();
+    return created;
+}
+
+void CanvasView::removePattern(int patternId)
+{
+    emit beginEdit();
+    for (VectorItem *item : vectorItems()) {
+        VectorObject object = item->object();
+        if (object.patternId != patternId)
+            continue;
+        object.patternId = 0;
+        object.patternShapes.clear();
+        object.pattern = PatternSettings();
+        item->setObject(object);
+    }
+    for (int i = m_patterns.size() - 1; i >= 0; --i) {
+        if (m_patterns.at(i).id == patternId)
+            m_patterns.removeAt(i);
+    }
+    emit endEdit();
+}
+
+int CanvasView::selectedPatternId() const
+{
+    for (VectorItem *item : selectedVectorItems()) {
+        if (item->object().patternId > 0)
+            return item->object().patternId;
+    }
+    return 0;
+}
+
+PatternDefinition CanvasView::patternDefinition(int patternId) const
+{
+    for (const PatternDefinition &pattern : m_patterns) {
+        if (pattern.id == patternId)
+            return pattern;
+    }
+    return PatternDefinition();
+}
+
+QString CanvasView::selectionToSvg() const
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty())
+        return QString();
+
+    QRectF box;
+    for (VectorItem *item : selected) {
+        const QRectF current = symbolVisualBounds(item);
+        box = box.isNull() ? current : box.united(current);
+    }
+    if (box.width() < 0.5 || box.height() < 0.5)
+        return QString();
+
+    Document document;
+    document.pageSize = box.size();
+    document.pages.clear();
+    for (VectorItem *item : selected) {
+        VectorObject object = item->object();
+        object.pos -= box.topLeft();
+        object.page = 0;
+        object.layer = 0;
+        object.group = 0;
+        object.symbolId = 0;
+        object.instanceId = 0;
+        object.masterId = 0;
+        object.blendId = 0;
+        document.objects.append(object);
+    }
+    return document.toSvg(false);
+}
+
+VectorItem *CanvasView::addCodeObject(const VectorObject &object)
+{
+    VectorObject code = object;
+    code.type = ShapeType::Code;
+    code.page = m_currentPage;
+    code.layer = m_activeLayer;
+    code.id = 0;
+    emit beginEdit();
+    scene()->clearSelection();
+    VectorItem *item = addVectorObject(code, false, true);
+    emit endEdit();
+    emit statusHint(QStringLiteral("Код добавлен на страницу."));
+    viewport()->update();
+    return item;
+}
+
+void CanvasView::renameItem(VectorItem *item, const QString &name)
+{
+    if (!item)
+        return;
+    VectorObject object = item->object();
+    object.name = name.trimmed();
+    emit beginEdit();
+    item->setObject(object);
+    emit endEdit();
+    emit statusHint(object.name.isEmpty()
+                        ? QStringLiteral("Имя объекта сброшено.")
+                        : QStringLiteral("Объект переименован: %1").arg(object.name));
+}
+
+void CanvasView::focusItem(VectorItem *item)
+{
+    if (!item)
+        return;
+    const VectorObject object = item->object();
+    if (object.page >= 0 && object.page < m_pages.size())
+        setCurrentPage(object.page);
+    if (object.layer >= 0 && object.layer < m_layers.size())
+        setActiveLayer(object.layer);
+    if (object.group > 0)
+        selectGroupItems(object.group);
+    else {
+        scene()->clearSelection();
+        item->setSelected(true);
+    }
+    ensureVisible(item, 80, 80);
+    centerOn(item);
+    viewport()->update();
+}
+
+void CanvasView::updateCodeItem(VectorItem *item, const VectorObject &object)
+{
+    if (!item)
+        return;
+    VectorObject updated = object;
+    updated.type = ShapeType::Code;
+    const VectorObject current = item->object();
+    updated.id = current.id;
+    updated.pos = current.pos;
+    updated.rotation = current.rotation;
+    updated.page = current.page;
+    updated.layer = current.layer;
+    updated.locked = current.locked;
+    updated.effects = current.effects;
+    emit beginEdit();
+    item->setObject(updated);
+    emit endEdit();
+    emit statusHint(QStringLiteral("Код обновлён."));
+    viewport()->update();
+}
+
+int CanvasView::insertSvgAsset(const QString &svg, const QPointF &centre)
+{
+    Document imported;
+    QString error;
+    if (!importSvgData(svg.toUtf8(), &imported, &error) || imported.objects.isEmpty()) {
+        emit statusHint(error.isEmpty()
+                            ? QStringLiteral("В ресурсе нет объектов.")
+                            : QStringLiteral("Не удалось вставить ресурс: %1").arg(error));
+        return 0;
+    }
+
+    QRectF box;
+    for (const VectorObject &object : imported.objects) {
+        const QRectF current = object.localBounds().translated(object.pos);
+        box = box.isNull() ? current : box.united(current);
+    }
+    if (box.width() < 0.5 || box.height() < 0.5)
+        return 0;
+
+    const QPointF offset = centre - box.center();
+    emit beginEdit();
+    scene()->clearSelection();
+    int added = 0;
+    for (VectorObject object : imported.objects) {
+        object.pos += offset;
+        object.page = m_currentPage;
+        object.layer = m_activeLayer;
+        object.group = 0;
+        object.symbolId = 0;
+        object.instanceId = 0;
+        object.masterId = 0;
+        object.blendId = 0;
+        object.id = 0;
+        if (VectorItem *item = addVectorObject(object, false, false)) {
+            item->setSelected(true);
+            ++added;
+        }
+    }
+    emit endEdit();
+    emit selectionChanged(added);
+    emit statusHint(QStringLiteral("Вставлено объектов из библиотеки: %1.").arg(added));
+    viewport()->update();
+    return added;
+}
+
+void CanvasView::dragEnterEvent(QDragEnterEvent *event)
+{
+    if (event->mimeData()->hasFormat(QStringLiteral("application/x-vectora-asset"))
+        || event->mimeData()->hasUrls()) {
+        event->acceptProposedAction();
+        return;
+    }
+    QGraphicsView::dragEnterEvent(event);
+}
+
+void CanvasView::dragMoveEvent(QDragMoveEvent *event)
+{
+    if (event->mimeData()->hasFormat(QStringLiteral("application/x-vectora-asset"))
+        || event->mimeData()->hasUrls()) {
+        event->acceptProposedAction();
+        return;
+    }
+    QGraphicsView::dragMoveEvent(event);
+}
+
+void CanvasView::dropEvent(QDropEvent *event)
+{
+    const QPointF scenePos = mapToScene(event->position().toPoint());
+
+    if (event->mimeData()->hasFormat(QStringLiteral("application/x-vectora-asset"))) {
+        const QString svg = QString::fromUtf8(
+            event->mimeData()->data(QStringLiteral("application/x-vectora-asset")));
+        if (insertSvgAsset(svg, scenePos) > 0)
+            event->acceptProposedAction();
+        return;
+    }
+
+    if (event->mimeData()->hasUrls()) {
+        bool inserted = false;
+        for (const QUrl &url : event->mimeData()->urls()) {
+            if (!url.isLocalFile())
+                continue;
+            const QString path = url.toLocalFile();
+            if (path.endsWith(QStringLiteral(".svg"), Qt::CaseInsensitive)) {
+                QFile file(path);
+                if (file.open(QIODevice::ReadOnly))
+                    inserted = insertSvgAsset(QString::fromUtf8(file.readAll()), scenePos) > 0
+                               || inserted;
+            } else {
+                QImageReader reader(path);
+                const QImage image = reader.read();
+                if (image.isNull())
+                    continue;
+                VectorObject object;
+                object.type = ShapeType::Image;
+                object.image = image;
+                object.textBox = QRectF(0, 0, image.width(), image.height());
+                object.pos = scenePos - QPointF(image.width() / 2.0, image.height() / 2.0);
+                object.page = m_currentPage;
+                object.layer = m_activeLayer;
+                object.id = 0;
+                emit beginEdit();
+                if (addVectorObject(object, false, true))
+                    inserted = true;
+                emit endEdit();
+            }
+        }
+        if (inserted) {
+            event->acceptProposedAction();
+            return;
+        }
+    }
+    QGraphicsView::dropEvent(event);
+}
+
+QVector<Effect> CanvasView::selectionEffects() const
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty())
+        return {};
+    return selected.first()->effects();
+}
+
+void CanvasView::setSelectionEffects(const QVector<Effect> &effects)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty()) {
+        emit statusHint(QStringLiteral("Выберите объекты."));
+        return;
+    }
+    emit beginEdit();
+    for (VectorItem *item : selected)
+        item->setEffects(effects);
+    emit endEdit();
+}
+
+void CanvasView::addEffectToSelection(const Effect &effect)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty()) {
+        emit statusHint(QStringLiteral("Выберите объекты для эффекта."));
+        return;
+    }
+    emit beginEdit();
+    for (VectorItem *item : selected) {
+        QVector<Effect> list = item->effects();
+        list.append(effect);
+        item->setEffects(list);
+    }
+    emit endEdit();
+    emit statusHint(QStringLiteral("Эффект «%1» добавлен.").arg(effectDisplayName(effect.type)));
+}
+
+void CanvasView::removeEffectFromSelection(int index)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty())
+        return;
+    emit beginEdit();
+    for (VectorItem *item : selected) {
+        QVector<Effect> list = item->effects();
+        if (index >= 0 && index < list.size()) {
+            list.removeAt(index);
+            item->setEffects(list);
+        }
+    }
+    emit endEdit();
+}
+
+void CanvasView::moveEffectInSelection(int index, int delta)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.isEmpty())
+        return;
+    emit beginEdit();
+    for (VectorItem *item : selected) {
+        QVector<Effect> list = item->effects();
+        const int target = index + delta;
+        if (index < 0 || index >= list.size() || target < 0 || target >= list.size())
+            continue;
+        list.move(index, target);
+        item->setEffects(list);
+    }
+    emit endEdit();
+}
+
+void CanvasView::applyMaskFromSelection(const QString &type)
+{
+    const QList<VectorItem *> selected = selectedVectorItems();
+    if (selected.size() < 2) {
+        emit statusHint(QStringLiteral("Выберите объект и фигуру-маску."));
+        return;
+    }
+    VectorItem *maskItem = selected.first();
+    VectorItem *target = selected.last();
+    if (!maskItem || !target || maskItem == target)
+        return;
+    const VectorObject maskObject = maskItem->object();
+    QPainterPath sceneMask =
+        maskItem->mapToScene(maskObject.type == ShapeType::Text
+                                 ? buildTextPath(maskObject)
+                                 : maskObject.path);
+    if (sceneMask.isEmpty()) {
+        emit statusHint(QStringLiteral("У маски нет геометрии."));
+        return;
+    }
+    const QPainterPath localMask = target->mapFromScene(sceneMask);
+
+    Effect effect = makeEffect(type);
+    effect.mask = localMask;
+    effect.opacity = 1.0;
+
+    emit beginEdit();
+    QVector<Effect> effects = target->effects();
+    effects.append(effect);
+    target->setEffects(effects);
+    scene()->removeItem(maskItem);
+    delete maskItem;
+    emit endEdit();
+    emit statusHint(type == QLatin1String("clip-mask")
+                        ? QStringLiteral("Обтравочная маска применена.")
+                        : QStringLiteral("Маска прозрачности применена."));
+}
+
 
 void CanvasView::cropTo(const QRectF &rect)
 {
@@ -4665,10 +7296,19 @@ void CanvasView::mousePressEvent(QMouseEvent *event)
         applyOutlineAt(scenePos);
         break;
     case Tool::Shadow:
-        toggleShadowAt(scenePos);
+        shadowPress(scenePos);
         break;
     case Tool::Blend:
         blendSelected();
+        break;
+    case Tool::Dimension:
+        dimensionPress(scenePos);
+        break;
+    case Tool::Perspective:
+        perspectivePress(scenePos);
+        break;
+    case Tool::Extrude:
+        extrudePress(scenePos);
         break;
     case Tool::Transparency: {
         VectorItem *item = itemAtScene(scenePos);
@@ -4697,6 +7337,12 @@ void CanvasView::mouseMoveEvent(QMouseEvent *event)
 {
     const QPointF scenePos = mapToScene(event->pos());
 
+    if (m_tool == Tool::Dimension) {
+        m_dimensionCursor = snapNodePoint(scenePos, nullptr);
+        m_dimensionHasCursor = true;
+        viewport()->update();
+    }
+
     if (m_panning) {
         const QPoint delta = event->pos() - m_panAnchor;
         m_panAnchor = event->pos();
@@ -4710,6 +7356,21 @@ void CanvasView::mouseMoveEvent(QMouseEvent *event)
         m_groupPivot = scenePos;
         viewport()->update();
         emit scenePosChanged(scenePos);
+        return;
+    }
+
+    if (m_perspectiveCorner >= 0) {
+        perspectiveMove(scenePos);
+        return;
+    }
+
+    if (m_extrudeDragging) {
+        extrudeMove(scenePos);
+        return;
+    }
+
+    if (m_shadowDragging) {
+        shadowMove(scenePos);
         return;
     }
 
@@ -4871,6 +7532,24 @@ void CanvasView::mouseReleaseEvent(QMouseEvent *event)
         return;
     }
 
+    if (m_perspectiveCorner >= 0) {
+        perspectiveRelease();
+        event->accept();
+        return;
+    }
+
+    if (m_extrudeDragging) {
+        extrudeRelease();
+        event->accept();
+        return;
+    }
+
+    if (m_shadowDragging) {
+        shadowRelease();
+        event->accept();
+        return;
+    }
+
     if (m_nodeDragging) {
         m_nodeDragging = false;
         setSmartGuides({});
@@ -4955,6 +7634,35 @@ void CanvasView::mouseReleaseEvent(QMouseEvent *event)
 
 void CanvasView::mouseDoubleClickEvent(QMouseEvent *event)
 {
+    if (m_tool == Tool::Select) {
+        VectorItem *item = itemAtScene(mapToScene(event->pos()));
+        if (item && item->object().type == ShapeType::Code) {
+            emit codeEditRequested(item);
+            event->accept();
+            return;
+        }
+    }
+
+    if (m_tool == Tool::Perspective) {
+        const QPointF scenePos = mapToScene(event->pos());
+        VectorItem *item = itemAtScene(scenePos);
+        if (item && item->object().effects.size() > 0) {
+            const int index = perspectiveEffectIndex(item);
+            if (index >= 0) {
+                QVector<Effect> effects = item->effects();
+                effects[index].quad = identityQuad();
+                emit beginEdit();
+                item->setEffects(effects);
+                emit endEdit();
+                m_perspectiveItem = item;
+                viewport()->update();
+                emit statusHint(QStringLiteral("Перспектива сброшена."));
+                event->accept();
+                return;
+            }
+        }
+    }
+
     if (m_tool == Tool::Envelope && m_envelopeItem) {
         resetEnvelope();
         emit statusHint(QStringLiteral("Конверт сброшен."));
@@ -5018,6 +7726,17 @@ void CanvasView::keyPressEvent(QKeyEvent *event)
         }
     }
     if (event->key() == Qt::Key_Escape) {
+        if (m_tool == Tool::Dimension && !m_dimensionPoints.isEmpty()) {
+            m_dimensionPoints.clear();
+            m_dimensionRefs.clear();
+            m_dimensionAnchors.clear();
+            m_dimensionHasCursor = false;
+            setSmartGuides({});
+            viewport()->update();
+            emit statusHint(QStringLiteral("Построение размера отменено."));
+            event->accept();
+            return;
+        }
         if (m_bezierActive) {
             cancelBezier();
             event->accept();

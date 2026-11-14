@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QDateTime>
 #include <QHash>
 #include <QJsonObject>
 #include <QMainWindow>
@@ -7,14 +8,17 @@
 #include <QVector>
 
 #include "Document.h"
+#include "DocumentTools.h"
 #include "Tools.h"
 
 class QAction;
+class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QDockWidget;
 class QGraphicsScene;
 class QLabel;
+class QSpinBox;
 class QStackedWidget;
 class QToolBar;
 class QTreeWidget;
@@ -24,6 +28,8 @@ class CanvasView;
 class ColorPalette;
 class PageBar;
 class DockPanels;
+class AssetPanel;
+class UpdateChecker;
 class Ruler;
 class ToolPalette;
 class VectorItem;
@@ -46,6 +52,10 @@ private:
     void createMenus();
     void createMainToolBar();
     void createPropertyBar();
+    void startDimensionTool(int type);
+    void updateScaleLabel();
+    void updateRulers();
+    void openCodeDialog(VectorItem *item, int kind);
     void createDocks();
     void createCanvas();
     void createStatusBar();
@@ -72,6 +82,19 @@ private:
     void undo();
     void redo();
     void resetHistory();
+    void setupAutosave();
+    void performAutosave();
+    void clearAutosave();
+    void recoverAutosaves();
+    void saveHistorySidecar();
+    void loadHistorySidecar();
+    void restoreHistoryIndex(int index);
+    void openHistoryDialog();
+    void openVersionDialog();
+    void openTemplateDialog();
+    void openResourceSearch();
+    void packageCurrentDocument();
+    void showPreferences();
     void updateHistoryActions();
     void onPaletteColor(const QColor &color);
     void applyFillToSelection(const QColor &color);
@@ -120,6 +143,8 @@ private:
     QDockWidget *m_toolsDock = nullptr;
     QDockWidget *m_paletteDock = nullptr;
     DockPanels *m_dockPanels = nullptr;
+    QDockWidget *m_assetDock = nullptr;
+    AssetPanel *m_assetPanel = nullptr;
     QStackedWidget *m_centralStack = nullptr;
     QWidget *m_editorPage = nullptr;
     WelcomeWidget *m_welcome = nullptr;
@@ -153,6 +178,7 @@ private:
     int m_starPageIndex = 7;
     int m_spiralPageIndex = 8;
     int m_nodePageIndex = 9;
+    int m_dimensionPageIndex = 10;
     Tool m_currentTool = Tool::Select;
     bool m_updatingShapeOptions = false;
     QDoubleSpinBox *m_rectRadius = nullptr;
@@ -160,6 +186,15 @@ private:
     QDoubleSpinBox *m_starPoints = nullptr;
     QDoubleSpinBox *m_starRatio = nullptr;
     QDoubleSpinBox *m_spiralTurns = nullptr;
+    QDoubleSpinBox *m_dimensionOffsetSpin = nullptr;
+    QComboBox *m_dimensionTypeCombo = nullptr;
+    QComboBox *m_dimensionUnitsCombo = nullptr;
+    QSpinBox *m_dimensionPrecisionSpin = nullptr;
+    QCheckBox *m_dimensionAssocCheck = nullptr;
+    QLabel *m_scaleLabel = nullptr;
+    UpdateChecker *m_updateChecker = nullptr;
+    bool m_manualUpdateCheck = false;
+    bool m_updateDialogOpen = false;
 
     QString m_filePath;
     bool m_modified = false;
@@ -167,6 +202,15 @@ private:
     bool m_restoring = false;
     QVector<QJsonObject> m_undoStack;
     QVector<QJsonObject> m_redoStack;
+    QStringList m_undoLabels;
+    QStringList m_redoLabels;
+    QVector<QDateTime> m_undoTimes;
+    QVector<QDateTime> m_redoTimes;
+    QString m_lastHint;
+    QDateTime m_lastHintTime;
+    QVector<DocumentVersion> m_versions;
+    QString m_autosaveSession;
+    class QTimer *m_autosaveTimer = nullptr;
     QJsonObject m_pendingSnapshot;
     QVector<VectorObject> m_clipboard;
 };

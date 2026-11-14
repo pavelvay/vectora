@@ -283,6 +283,49 @@ void paintTool(QPainter &p, const QString &id, const QColor &c)
             p.setBrush(mid);
             p.drawEllipse(QPointF(9.6 + i * 2.4, 12.0), 1.1, 1.1);
         }
+    } else if (id == QLatin1String("dimension")) {
+        p.drawLine(QPointF(4.0, 6.0), QPointF(4.0, 15.0));
+        p.drawLine(QPointF(20.0, 6.0), QPointF(20.0, 15.0));
+        p.drawLine(QPointF(4.0, 12.0), QPointF(20.0, 12.0));
+        QPolygonF left;
+        left << QPointF(4.0, 12.0) << QPointF(8.0, 10.0) << QPointF(8.0, 14.0);
+        QPolygonF right;
+        right << QPointF(20.0, 12.0) << QPointF(16.0, 10.0) << QPointF(16.0, 14.0);
+        p.setPen(Qt::NoPen);
+        p.setBrush(c);
+        p.drawPolygon(left);
+        p.drawPolygon(right);
+        p.setPen(stroke(c, 1.4));
+        p.drawLine(QPointF(4.0, 18.5), QPointF(20.0, 18.5));
+    } else if (id == QLatin1String("extrude")) {
+        QPainterPath face;
+        face.moveTo(4.0, 9.0);
+        face.lineTo(14.0, 9.0);
+        face.lineTo(14.0, 18.0);
+        face.lineTo(4.0, 18.0);
+        face.closeSubpath();
+        p.setBrush(QColor(c.red(), c.green(), c.blue(), 60));
+        p.drawPath(face);
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(face);
+        p.drawLine(QPointF(4.0, 9.0), QPointF(9.5, 4.0));
+        p.drawLine(QPointF(14.0, 9.0), QPointF(19.5, 4.0));
+        p.drawLine(QPointF(14.0, 18.0), QPointF(19.5, 13.0));
+        p.drawLine(QPointF(9.5, 4.0), QPointF(19.5, 4.0));
+        p.drawLine(QPointF(19.5, 4.0), QPointF(19.5, 13.0));
+    } else if (id == QLatin1String("perspective")) {
+        p.setBrush(Qt::NoBrush);
+        QPolygonF frame;
+        frame << QPointF(3.5, 6.5) << QPointF(15.0, 3.5)
+              << QPointF(20.5, 17.0) << QPointF(8.0, 20.0);
+        p.drawPolygon(frame);
+        p.setPen(Qt::NoPen);
+        p.setBrush(c);
+        for (const QPointF &point : frame)
+            p.drawRect(QRectF(point - QPointF(1.4, 1.4), QSizeF(2.8, 2.8)));
+        p.setPen(stroke(c, 1.0));
+        p.drawLine(QPointF(3.5, 6.5), QPointF(20.5, 17.0));
+        p.drawLine(QPointF(15.0, 3.5), QPointF(8.0, 20.0));
     } else if (id == QLatin1String("zoom") || id == QLatin1String("zoom-in")
                || id == QLatin1String("zoom-out")) {
         p.drawEllipse(QRectF(3.6, 3.4, 12.2, 12.2));
@@ -611,6 +654,16 @@ void paintAction(QPainter &p, const QString &id, const QColor &c)
 
 QIcon Icons::appIcon()
 {
+    const QPixmap source(QStringLiteral(":/icons/vectora.png"));
+    if (!source.isNull()) {
+        QIcon icon;
+        for (int size : {16, 24, 32, 48, 64, 128, 256, 512}) {
+            icon.addPixmap(source.scaled(size, size, Qt::KeepAspectRatio,
+                                         Qt::SmoothTransformation));
+        }
+        return icon;
+    }
+
     QSvgRenderer renderer(QStringLiteral(":/icons/vectora.svg"));
     if (renderer.isValid()) {
         QIcon icon;

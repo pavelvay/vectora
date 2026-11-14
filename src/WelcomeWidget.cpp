@@ -1,5 +1,7 @@
 #include "WelcomeWidget.h"
 
+#include <QCoreApplication>
+
 #include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -165,7 +167,8 @@ WelcomeWidget::WelcomeWidget(QWidget *parent)
 
     left->addStretch(1);
     left->addWidget(mutedLabel(
-        QStringLiteral("Vectora 0.1.11 · Linux · Windows · macOS · .vct, SVG, PNG, PDF"),
+        QStringLiteral("Vectora %1 · Linux · Windows · macOS · .vct, SVG, PNG, PDF")
+            .arg(QCoreApplication::applicationVersion()),
         this));
 
     root->addLayout(left, 1);

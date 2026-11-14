@@ -22,6 +22,8 @@ public:
 
     VectorObject object() const;
     void setObject(const VectorObject &object);
+    QVector<Effect> effects() const { return m_object.effects; }
+    void setEffects(const QVector<Effect> &effects);
     void setText(const QString &text);
     void setFillColor(const QColor &color);
     void setGradientFill(int style, const QColor &second, qreal angle);
@@ -58,7 +60,9 @@ public:
     void setPivot(const QPointF &normalised);
     QPointF pivotPoint() const;
     void setSnapSettings(bool enabled, qreal step, const QVector<qreal> &guidesX,
-                         const QVector<qreal> &guidesY, qreal threshold);
+                         const QVector<qreal> &guidesY, qreal threshold,
+                         int gridType = 0, const QPointF &gridOrigin = QPointF(),
+                         qreal gridAngle = 15.0);
     bool isLocked() const { return m_object.locked; }
     int shapeTypeValue() const { return int(m_object.type); }
     void setPath(const QPainterPath &path);
@@ -97,6 +101,9 @@ private:
     bool m_snapEnabled = false;
     qreal m_snapStep = 20.0;
     qreal m_snapThreshold = 6.0;
+    int m_snapGridType = 0;
+    QPointF m_snapGridOrigin;
+    qreal m_snapGridAngle = 15.0;
     QVector<qreal> m_snapGuidesX;
     QVector<qreal> m_snapGuidesY;
     Interaction m_interaction = Interaction::None;

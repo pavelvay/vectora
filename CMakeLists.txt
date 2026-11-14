@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(Vectora VERSION 0.2.0 LANGUAGES CXX)
+project(Vectora VERSION 0.2.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,7 +10,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Svg PrintSupport)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Svg PrintSupport Network)
 
 qt_standard_project_setup()
 
@@ -33,6 +33,30 @@ qt_add_executable(vectora
     src/MainWindow.h
     src/Document.cpp
     src/Document.h
+    src/Effects.cpp
+    src/Effects.h
+    src/AssetLibrary.cpp
+    src/AssetLibrary.h
+    src/AssetPanel.cpp
+    src/AssetPanel.h
+    src/Patterns.cpp
+    src/Patterns.h
+    src/PatternStore.cpp
+    src/PatternStore.h
+    src/PatternDialog.cpp
+    src/PatternDialog.h
+    src/CodeGenerator.cpp
+    src/CodeGenerator.h
+    src/CodeDialog.cpp
+    src/CodeDialog.h
+    src/UpdateChecker.cpp
+    src/UpdateChecker.h
+    src/DocumentTools.cpp
+    src/DocumentTools.h
+    src/DocumentDialogs.cpp
+    src/DocumentDialogs.h
+    src/TemplateStore.cpp
+    src/TemplateStore.h
     src/VectorItem.cpp
     src/VectorItem.h
     src/SelfTest.cpp
@@ -66,6 +90,8 @@ if(WIN32)
     target_sources(vectora PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vectora.rc)
 endif()
 
+target_link_libraries(vectora PRIVATE Qt6::Network)
+
 set_target_properties(vectora PROPERTIES
     WIN32_EXECUTABLE ON
     MACOSX_BUNDLE ON
@@ -88,6 +114,14 @@ if(UNIX AND NOT APPLE)
     install(FILES resources/vectora.svg
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps
         RENAME vectora.svg
+    )
+    install(FILES resources/vectora-256.png
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps
+        RENAME vectora.png
+    )
+    install(FILES resources/vectora-512.png
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/512x512/apps
+        RENAME vectora.png
     )
 endif()
 

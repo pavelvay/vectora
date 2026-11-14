@@ -78,6 +78,78 @@ public:
     void editTextItem(VectorItem *item);
 
     void blendSelected(int steps = 7);
+    QVector<Effect> selectionEffects() const;
+    void setSelectionEffects(const QVector<Effect> &effects);
+    void addEffectToSelection(const Effect &effect);
+    void removeEffectFromSelection(int index);
+    void moveEffectInSelection(int index, int delta);
+    void applyMaskFromSelection(const QString &type);
+    QVector<BlendRecord> blends() const { return m_blends; }
+    QVector<SymbolDefinition> symbols() const { return m_symbols; }
+    QVector<PatternDefinition> patterns() const { return m_patterns; }
+    int createPatternFromSelection(const QString &name);
+    int storePatternDefinition(const PatternDefinition &pattern);
+    bool applyPatternToSelection(int patternId);
+    bool applyPatternDefinitionToSelection(const PatternDefinition &pattern);
+    void updatePatternDefinition(const PatternDefinition &pattern);
+    bool updatePatternFromSelection(int patternId);
+    int expandSelectedPatterns();
+    void removePattern(int patternId);
+    int selectedPatternId() const;
+    PatternDefinition patternDefinition(int patternId) const;
+    QVector<SymbolInstance> instances() const { return m_instances; }
+    int createSymbolFromSelection(const QString &name);
+    int insertSymbol(int symbolId, const QPointF &topLeft = QPointF());
+    bool updateSymbolFromSelection(int symbolId = 0);
+    void detachSelectedSymbolInstances();
+    void renameSymbol(int symbolId, const QString &name);
+    void deleteSymbol(int symbolId);
+    void rebuildSymbolInstance(int instanceId);
+    int selectedSymbolId() const;
+    int selectedInstanceId() const;
+    QImage renderSymbolImage(int symbolId, const QSize &size) const;
+    QStringList symbolNames() const;
+    QString selectionToSvg() const;
+    int insertSvgAsset(const QString &svg, const QPointF &centre);
+    VectorItem *addCodeObject(const VectorObject &object);
+    void updateCodeItem(VectorItem *item, const VectorObject &object);
+    void renameItem(VectorItem *item, const QString &name);
+    void focusItem(VectorItem *item);
+    void setBlends(const QVector<BlendRecord> &blends);
+    void setBlendSteps(int blendId, int steps);
+    void setBlendSpacing(int blendId, qreal spacing);
+    void updateBlend(int blendId);
+    void updateAllBlends();
+    void removeBlend(int blendId);
+    int blendIdFor(VectorItem *item) const;
+
+    enum class DimensionMode { Horizontal, Vertical, Aligned, Angular, Radius, Diameter };
+    void setDimensionMode(DimensionMode mode);
+    DimensionMode dimensionMode() const { return m_dimensionMode; }
+    void setDimensionUnits(int units);
+    int dimensionUnits() const { return m_dimensionUnits; }
+    void setDimensionPrecision(int digits);
+    int dimensionPrecision() const { return m_dimensionPrecision; }
+    void setDimensionOffset(qreal offset);
+    qreal dimensionOffset() const { return m_dimensionOffset; }
+    void setDimensionAssociative(bool on);
+    bool dimensionAssociative() const { return m_dimensionAssociative; }
+    void applyDimensionSettingsToSelection();
+    void updateAllDimensions();
+    QString measurementText(qreal pixels) const;
+
+    // Exact construction commands.
+    void constructLine(const QPointF &a, const QPointF &b);
+    void constructLineFrom(const QPointF &start, qreal length, qreal angleDegrees);
+    bool createParallelFromSelection(qreal offset);
+    bool createPerpendicularFromSelection(qreal length);
+    void constructCircle(const QPointF &center, qreal radius);
+    void constructArc(const QPointF &center, qreal radius,
+                      qreal startDegrees, qreal sweepDegrees);
+    void constructPolygon(const QPointF &center, int sides, qreal radius);
+    bool createTangentFromSelection(const QPointF &externalPoint);
+    void scaleSelectionBy(qreal factor);
+
     void raiseSelection();
     void lowerSelection();
 
@@ -97,6 +169,16 @@ public:
     void setGridStep(int step);
     qreal snapThreshold() const { return m_snapThreshold; }
     void setSnapThreshold(qreal threshold);
+    int gridType() const { return m_gridType; }
+    void setGridType(int type);
+    qreal gridAngle() const { return m_gridAngle; }
+    void setGridAngle(qreal degrees);
+    QPointF gridOrigin() const { return m_gridOrigin; }
+    void setGridOrigin(const QPointF &origin);
+    bool snapOption(const QString &key) const;
+    void setSnapOption(const QString &key, bool on);
+    qreal drawingScale() const { return m_drawingScale; }
+    void setDrawingScale(qreal scale);
     void setSmartGuides(const QVector<QLineF> &lines);
     QPointF snapNodePoint(const QPointF &scenePos, VectorItem *exclude) const;
     int activeLayer() const { return m_activeLayer; }
@@ -192,6 +274,8 @@ signals:
     void selectionChanged(int count);
     void colorPicked(const QColor &color);
     void contextMenuRequested(const QPoint &globalPos, VectorItem *item);
+    void symbolsChanged();
+    void codeEditRequested(VectorItem *item);
 
 protected:
     void drawBackground(QPainter *painter, const QRectF &rect) override;
@@ -243,17 +327,48 @@ private:
     void applyFillAt(const QPointF &scenePos);
     void applyOutlineAt(const QPointF &scenePos);
     void toggleShadowAt(const QPointF &scenePos);
+    bool shadowPress(const QPointF &scenePos);
+    void shadowMove(const QPointF &scenePos);
+    void shadowRelease();
     void cropTo(const QRectF &rect);
+
+    // Interactive perspective / extrusion tools.
+    bool perspectivePress(const QPointF &scenePos);
+    void perspectiveMove(const QPointF &scenePos);
+    void perspectiveRelease();
+    void drawPerspectiveOverlay(QPainter *painter);
+    bool extrudePress(const QPointF &scenePos);
+    void extrudeMove(const QPointF &scenePos);
+    void extrudeRelease();
+    QPolygonF perspectiveQuad(const VectorObject &object) const;
+    QPointF perspectiveCornerScene(VectorItem *item, int corner) const;
+    int perspectiveEffectIndex(VectorItem *item) const;
 
     void addBezierNode(const QPointF &scenePos);
     void cancelBezier();
     QPainterPath buildBezierPath() const;
     QPainterPath buildFreehandPath(const QVector<QPointF> &points) const;
 
+    void updateBlendsFor(VectorItem *item);
+    void updateDimensionsFor(VectorItem *item);
+    bool resolveDimension(VectorObject &object) const;
+    void dimensionPress(const QPointF &scenePos);
+    void drawDimensionPreview(QPainter *painter);
+    void drawSnapHint(QPainter *painter);
+    QPointF gridSnapPoint(const QPointF &scenePos) const;
+    QPointF anchorScenePoint(VectorItem *item, const QPointF &anchor) const;
+    VectorItem *addConstructedPath(const QPainterPath &path, bool closed);
     bool nodePress(const QPointF &scenePos);
     void insertNodeAt(const QPointF &scenePos, bool nearestSegment);
     void drawNodeOverlay(QPainter *painter);
     void drawPreview(QPainter *painter);
+
+protected:
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dragMoveEvent(QDragMoveEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
+
+private:
 
     qreal m_zoom = 1.0;
     QSizeF m_pageSize = QSizeF(794.0, 1123.0);
@@ -298,6 +413,20 @@ private:
     qreal m_transparencyStartValue = 1.0;
     qreal m_transparencyStartX = 0.0;
 
+    VectorItem *m_perspectiveItem = nullptr;
+    int m_perspectiveCorner = -1;
+    QPointF m_perspectiveLastScene;
+
+    bool m_shadowDragging = false;
+    VectorItem *m_shadowItem = nullptr;
+    QPointF m_shadowStart;
+    QPointF m_shadowStartOffset;
+
+    bool m_extrudeDragging = false;
+    VectorItem *m_extrudeItem = nullptr;
+    int m_extrudeEffect = -1;
+    QPointF m_extrudeStart;
+
     qreal m_nextZ = 1.0;
     QTextEdit *m_textEditor = nullptr;
     VectorItem *m_textItem = nullptr;
@@ -332,6 +461,34 @@ private:
     int m_gridStep = 20;
     qreal m_snapThreshold = 6.0;
     QVector<QLineF> m_smartGuides;
+    int m_gridType = 0;              // 0 cartesian, 1 polar, 2 isometric
+    qreal m_gridAngle = 15.0;        // polar angular step, degrees
+    QPointF m_gridOrigin;
+    qreal m_drawingScale = 1.0;      // 1:N drawing scale
+    bool m_snapGrid = true;
+    bool m_snapGuides = true;
+    bool m_snapObjects = true;
+    bool m_snapNodes = true;
+    bool m_snapCenters = true;
+    bool m_snapMidpoints = true;
+    bool m_snapIntersections = true;
+    bool m_snapEdges = true;
+    bool m_snapTangents = true;
+    QPointF m_snapPoint;
+    QString m_snapKind;
+    bool m_snapValid = false;
+
+    DimensionMode m_dimensionMode = DimensionMode::Horizontal;
+    QPointF m_dimensionCursor;
+    bool m_dimensionHasCursor = false;
+    QVector<QPointF> m_dimensionPoints;
+    QVector<int> m_dimensionRefs;
+    QVector<QPointF> m_dimensionAnchors;
+    int m_dimensionUnits = 0;
+    int m_dimensionPrecision = 1;
+    qreal m_dimensionOffset = 24.0;
+    bool m_dimensionAssociative = true;
+    bool m_updatingDimensions = false;
     QVector<QPainterPath> regionize(const QVector<QPainterPath> &sources) const;
     bool shapeBuilderPress(const QPointF &scenePos);
     void shapeBuilderMove(const QPointF &scenePos);
@@ -363,6 +520,18 @@ private:
     QPointF m_knifeCurrent;
     bool m_eraserActive = false;
     QVector<QPointF> m_eraserPoints;
+
+    QVector<BlendRecord> m_blends;
+    int m_nextBlendId = 1;
+
+    QVector<SymbolDefinition> m_symbols;
+    QVector<SymbolInstance> m_instances;
+    int m_nextSymbolId = 1;
+    int m_nextInstanceId = 1;
+
+    QVector<PatternDefinition> m_patterns;
+    int m_nextPatternId = 1;
+    bool m_updatingBlends = false;
 
     bool m_guidePreview = false;
     bool m_guidesVisible = true;

@@ -21,6 +21,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMainWindow>
+#include <QMenu>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSignalBlocker>
@@ -33,6 +34,8 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QAbstractItemView>
+
+#include <functional>
 #include <QMessageBox>
 
 #include <algorithm>
@@ -90,6 +93,8 @@ QFrame *separator(QWidget *parent)
 
 QString vectorName(const VectorObject &object)
 {
+    if (!object.name.trimmed().isEmpty())
+        return object.name.trimmed();
     switch (object.type) {
     case ShapeType::Rectangle: return QStringLiteral("Прямоугольник");
     case ShapeType::Ellipse: return QStringLiteral("Эллипс");
@@ -101,6 +106,8 @@ QString vectorName(const VectorObject &object)
     case ShapeType::Freehand: return QStringLiteral("Свободная форма");
     case ShapeType::Artistic: return QStringLiteral("Мазок");
     case ShapeType::Image: return QStringLiteral("Изображение");
+    case ShapeType::Dimension: return QStringLiteral("Размер");
+    case ShapeType::Code: return QStringLiteral("Код");
     case ShapeType::Text: {
         QString first = object.text.section(QLatin1Char('\n'), 0, 0).trimmed();
         if (first.size() > 22)
@@ -1674,20 +1681,28 @@ void DockPanels::buildEffectsDocker()
     auto *stepsRow = new QHBoxLayout;
     stepsRow->addWidget(fieldLabel(QStringLiteral("Шагов"), blendTab));
     m_blendSteps = new QSpinBox(blendTab);
-    m_blendSteps->setRange(2, 40);
+    m_blendSteps->setRange(2, 80);
     m_blendSteps->setValue(7);
     stepsRow->addWidget(m_blendSteps);
     stepsRow->addStretch(1);
     blendLayout->addLayout(stepsRow);
 
+    auto *spacingRow = new QHBoxLayout;
+    spacingRow->addWidget(fieldLabel(QStringLiteral("Интервал"), blendTab));
+    m_blendSpacing = spinField(blendTab, 0, 800, 0, QStringLiteral(" px"), 0, 70);
+    spacingRow->addWidget(m_blendSpacing);
+    spacingRow->addStretch(1);
+    blendLayout->addLayout(spacingRow);
+
     auto *blendApply = new QToolButton(blendTab);
-    blendApply->setText(QStringLiteral("Создать перетекание"));
+    blendApply->setText(QStringLiteral("Создать / обновить перетекание"));
     blendApply->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     blendLayout->addWidget(blendApply);
 
     auto *blendHint = new QLabel(QStringLiteral(
-        "Выделите два объекта. Промежуточные копии получат "
-        "позицию, размер и цвет между крайними."),
+        "Выделите два объекта. Промежуточные копии получат позицию, "
+        "размер, поворот, цвет и прозрачность между крайними. "
+        "Измените количество шагов или интервал, чтобы обновить результат."),
         blendTab);
     blendHint->setWordWrap(true);
     blendHint->setStyleSheet(QStringLiteral("color:#757b85; font-size:11px;"));
@@ -1695,13 +1710,134 @@ void DockPanels::buildEffectsDocker()
     blendLayout->addStretch(1);
 
     connect(blendApply, &QToolButton::clicked, this, [this]() {
+        const QList<VectorItem *> selected = selection();
+        if (selected.size() == 1) {
+            const int blendId = m_view->blendIdFor(selected.first());
+            if (blendId > 0) {
+                if (m_blendSpacing->value() > 0.5)
+                    m_view->setBlendSpacing(blendId, m_blendSpacing->value());
+                else
+                    m_view->setBlendSteps(blendId, m_blendSteps->value());
+                refresh();
+                return;
+            }
+        }
         m_view->blendSelected(m_blendSteps->value());
         refresh();
+    });
+
+    // Non-destructive vector effects
+    auto *effectsTab = new QWidget(tabs);
+    auto *effectsLayout = new QVBoxLayout(effectsTab);
+    effectsLayout->setContentsMargins(8, 10, 8, 8);
+    effectsLayout->setSpacing(6);
+
+    m_effectList = new QListWidget(effectsTab);
+    m_effectList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_effectList->setMinimumHeight(84);
+    m_effectList->setMaximumHeight(120);
+    effectsLayout->addWidget(m_effectList);
+
+    auto *effectButtons = new QHBoxLayout;
+    const auto effectButton = [&](const QString &text, const QString &tip) {
+        auto *button = new QToolButton(effectsTab);
+        button->setText(text);
+        button->setToolTip(tip);
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        effectButtons->addWidget(button);
+        return button;
+    };
+    m_effectAdd = effectButton(QStringLiteral("+"), QStringLiteral("Добавить эффект"));
+    m_effectRemove = effectButton(QStringLiteral("−"), QStringLiteral("Удалить эффект"));
+    m_effectUp = effectButton(QStringLiteral("↑"), QStringLiteral("Выше"));
+    m_effectDown = effectButton(QStringLiteral("↓"), QStringLiteral("Ниже"));
+
+    auto *addMenu = new QMenu(m_effectAdd);
+    for (const QString &type : effectTypeList()) {
+        QAction *action = addMenu->addAction(effectDisplayName(type));
+        connect(action, &QAction::triggered, this, [this, type]() {
+            if (selection().isEmpty()) {
+                emit status(QStringLiteral("Сначала выберите объекты."));
+                return;
+            }
+            m_view->addEffectToSelection(makeEffect(type));
+            refresh();
+            if (m_effectList && m_effectList->count() > 0)
+                m_effectList->setCurrentRow(m_effectList->count() - 1);
+        });
+    }
+    m_effectAdd->setMenu(addMenu);
+    m_effectAdd->setPopupMode(QToolButton::InstantPopup);
+    effectsLayout->addLayout(effectButtons);
+
+    auto *effectScroll = new QScrollArea(effectsTab);
+    effectScroll->setWidgetResizable(true);
+    effectScroll->setFrameShape(QFrame::NoFrame);
+    effectScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_effectEditor = new QWidget(effectScroll);
+    m_effectForm = new QFormLayout(m_effectEditor);
+    m_effectForm->setContentsMargins(0, 4, 0, 0);
+    m_effectForm->setVerticalSpacing(5);
+    effectScroll->setWidget(m_effectEditor);
+    effectsLayout->addWidget(effectScroll, 1);
+
+    auto *effectsHint = new QLabel(QStringLiteral(
+        "Эффекты применяются в порядке списка и не меняют исходную "
+        "геометрию. Порядок можно менять стрелками."),
+        effectsTab);
+    effectsHint->setWordWrap(true);
+    effectsHint->setStyleSheet(QStringLiteral("color:#757b85; font-size:11px;"));
+    effectsLayout->addWidget(effectsHint);
+
+    connect(m_effectList, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (m_effectUpdating)
+            return;
+        m_effectIndex = row;
+        rebuildEffectEditor();
+    });
+    connect(m_effectList, &QListWidget::itemChanged, this, [this](QListWidgetItem *item) {
+        if (m_effectUpdating || !item)
+            return;
+        const int index = item->data(Qt::UserRole).toInt();
+        QVector<Effect> effects = m_view->selectionEffects();
+        if (index < 0 || index >= effects.size())
+            return;
+        const bool enabled = item->checkState() == Qt::Checked;
+        if (effects.at(index).enabled == enabled)
+            return;
+        effects[index].enabled = enabled;
+        m_view->setSelectionEffects(effects);
+    });
+    connect(m_effectRemove, &QToolButton::clicked, this, [this]() {
+        const int index = m_effectList ? m_effectList->currentRow() : -1;
+        if (index < 0)
+            return;
+        m_view->removeEffectFromSelection(index);
+        refresh();
+    });
+    connect(m_effectUp, &QToolButton::clicked, this, [this]() {
+        const int index = m_effectList ? m_effectList->currentRow() : -1;
+        if (index <= 0)
+            return;
+        m_view->moveEffectInSelection(index, -1);
+        refresh();
+        if (m_effectList)
+            m_effectList->setCurrentRow(qMax(0, index - 1));
+    });
+    connect(m_effectDown, &QToolButton::clicked, this, [this]() {
+        const int index = m_effectList ? m_effectList->currentRow() : -1;
+        if (index < 0 || index + 1 >= m_effectList->count())
+            return;
+        m_view->moveEffectInSelection(index, 1);
+        refresh();
+        if (m_effectList)
+            m_effectList->setCurrentRow(qMin(m_effectList->count() - 1, index + 1));
     });
 
     tabs->addTab(shadowTab, QStringLiteral("Тень"));
     tabs->addTab(transparencyTab, QStringLiteral("Прозрачность"));
     tabs->addTab(blendTab, QStringLiteral("Перетекание"));
+    tabs->addTab(effectsTab, QStringLiteral("Эффекты"));
     layout->addWidget(tabs);
 
     createDock(QStringLiteral("Эффекты"), content);
@@ -1821,7 +1957,271 @@ void DockPanels::refreshEffects()
     }
 
     m_updating = false;
+    refreshEffectList();
 }
+
+void DockPanels::refreshEffectList()
+{
+    if (!m_effectList)
+        return;
+    m_effectUpdating = true;
+    const QVector<Effect> effects = m_view->selectionEffects();
+    const int previous = m_effectIndex;
+    m_effectList->clear();
+    for (int i = 0; i < effects.size(); ++i) {
+        const Effect &effect = effects.at(i);
+        auto *item = new QListWidgetItem(effectDisplayName(effect.type), m_effectList);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(effect.enabled ? Qt::Checked : Qt::Unchecked);
+        item->setData(Qt::UserRole, i);
+        if (!effect.enabled)
+            item->setForeground(QColor(0x8b, 0x92, 0x9d));
+    }
+    if (!effects.isEmpty()) {
+        m_effectIndex = qBound(0, previous < 0 ? 0 : previous, effects.size() - 1);
+        m_effectList->setCurrentRow(m_effectIndex);
+    } else {
+        m_effectIndex = -1;
+    }
+    m_effectUpdating = false;
+    rebuildEffectEditor();
+}
+
+void DockPanels::rebuildEffectEditor()
+{
+    if (!m_effectForm || !m_effectEditor)
+        return;
+    while (QLayoutItem *layoutItem = m_effectForm->takeAt(0)) {
+        if (QWidget *widget = layoutItem->widget())
+            widget->deleteLater();
+        delete layoutItem;
+    }
+
+    const int index = m_effectList ? m_effectList->currentRow() : -1;
+    const QVector<Effect> effects = m_view->selectionEffects();
+    if (index < 0 || index >= effects.size())
+        return;
+    const Effect current = effects.at(index);
+    const QString type = current.type;
+
+    using Setter = std::function<void(Effect &, qreal)>;
+    const auto commit = [this, index](const Effect &changed) {
+        QVector<Effect> list = m_view->selectionEffects();
+        if (index < 0 || index >= list.size())
+            return;
+        list[index] = changed;
+        m_view->setSelectionEffects(list);
+    };
+
+    const auto addSpin = [&](const QString &label, qreal minimum, qreal maximum,
+                             qreal value, const QString &suffix,
+                             const Setter &setter) {
+        auto *spin = new QDoubleSpinBox(m_effectEditor);
+        spin->setRange(minimum, maximum);
+        spin->setDecimals(1);
+        spin->setValue(value);
+        if (!suffix.isEmpty())
+            spin->setSuffix(suffix);
+        m_effectForm->addRow(label, spin);
+        connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+                [this, index, setter, commit](double value) {
+                    if (m_effectUpdating)
+                        return;
+                    QVector<Effect> list = m_view->selectionEffects();
+                    if (index < 0 || index >= list.size())
+                        return;
+                    Effect effect = list.at(index);
+                    setter(effect, value);
+                    commit(effect);
+                });
+    };
+
+    const auto addColor = [&](const QColor &color, const QString &title) {
+        auto *button = new QToolButton(m_effectEditor);
+        QColor initial = color;
+        button->setText(initial.name(QColor::HexArgb).toUpper());
+        button->setStyleSheet(QStringLiteral("text-align:left; padding:4px;"));
+        m_effectForm->addRow(QStringLiteral("Цвет"), button);
+        connect(button, &QToolButton::clicked, this, [this, index, button, title, commit, initial]() mutable {
+            const QColor picked = QColorDialog::getColor(initial, m_host, title,
+                                                         QColorDialog::ShowAlphaChannel);
+            if (!picked.isValid())
+                return;
+            initial = picked;
+            button->setText(initial.name(QColor::HexArgb).toUpper());
+            QVector<Effect> list = m_view->selectionEffects();
+            if (index < 0 || index >= list.size())
+                return;
+            Effect effect = list.at(index);
+            effect.color = picked;
+            commit(effect);
+        });
+    };
+
+    if (type == QLatin1String("shadow") || type == QLatin1String("inner-shadow")) {
+        addSpin(QStringLiteral("Сдвиг X"), -400, 400, current.offset.x(),
+                QStringLiteral(" px"), [](Effect &e, qreal v) { e.offset.setX(v); });
+        addSpin(QStringLiteral("Сдвиг Y"), -400, 400, current.offset.y(),
+                QStringLiteral(" px"), [](Effect &e, qreal v) { e.offset.setY(v); });
+        addSpin(QStringLiteral("Радиус"), 0, 200, current.radius,
+                QStringLiteral(" px"), [](Effect &e, qreal v) { e.radius = v; });
+        addSpin(QStringLiteral("Непрозрачность"), 0, 100, current.opacity * 100.0,
+                QStringLiteral(" %"), [](Effect &e, qreal v) { e.opacity = v / 100.0; });
+        addColor(current.color, QStringLiteral("Цвет эффекта"));
+    } else if (type == QLatin1String("glow")
+               || type == QLatin1String("inner-glow")) {
+        addSpin(QStringLiteral("Радиус"), 0, 300, current.radius,
+                QStringLiteral(" px"), [](Effect &e, qreal v) { e.radius = v; });
+        addSpin(QStringLiteral("Интенсивность"), 0.1, 4.0, current.intensity,
+                QString(), [](Effect &e, qreal v) { e.intensity = v; });
+        addSpin(QStringLiteral("Непрозрачность"), 0, 100, current.opacity * 100.0,
+                QStringLiteral(" %"), [](Effect &e, qreal v) { e.opacity = v / 100.0; });
+        addColor(current.color, QStringLiteral("Цвет свечения"));
+    } else if (type == QLatin1String("blur")) {
+        addSpin(QStringLiteral("Радиус"), 0, 300, current.radius,
+                QStringLiteral(" px"), [](Effect &e, qreal v) { e.radius = v; });
+    } else if (type == QLatin1String("motion-blur")) {
+        addSpin(QStringLiteral("Длина"), 0, 400, current.radius,
+                QStringLiteral(" px"), [](Effect &e, qreal v) { e.radius = v; });
+        addSpin(QStringLiteral("Угол"), 0, 360, current.angle,
+                QStringLiteral(" °"), [](Effect &e, qreal v) { e.angle = v; });
+    } else if (type == QLatin1String("offset-path")) {
+        addSpin(QStringLiteral("Смещение"), 0, 200, current.distance,
+                QStringLiteral(" px"), [](Effect &e, qreal v) { e.distance = v; });
+        addSpin(QStringLiteral("Непрозрачность"), 0, 100, current.opacity * 100.0,
+                QStringLiteral(" %"), [](Effect &e, qreal v) { e.opacity = v / 100.0; });
+        addColor(current.color, QStringLiteral("Цвет контура"));
+    } else if (type == QLatin1String("distortion")) {
+        addSpin(QStringLiteral("Амплитуда"), 0, 200, current.amount,
+                QStringLiteral(" px"), [](Effect &e, qreal v) { e.amount = v; });
+        addSpin(QStringLiteral("Период"), 4, 400, current.radius,
+                QStringLiteral(" px"), [](Effect &e, qreal v) { e.radius = v; });
+        addSpin(QStringLiteral("Угол"), 0, 360, current.angle,
+                QStringLiteral(" °"), [](Effect &e, qreal v) { e.angle = v; });
+    } else if (type == QLatin1String("warp")) {
+        addSpin(QStringLiteral("Сила"), -0.9, 2.0, current.amount, QString(),
+                [](Effect &e, qreal v) { e.amount = v; });
+        addSpin(QStringLiteral("Центр X"), 0, 100, current.center.x() * 100.0,
+                QStringLiteral(" %"), [](Effect &e, qreal v) { e.center.setX(v / 100.0); });
+        addSpin(QStringLiteral("Центр Y"), 0, 100, current.center.y() * 100.0,
+                QStringLiteral(" %"), [](Effect &e, qreal v) { e.center.setY(v / 100.0); });
+    } else if (type == QLatin1String("extrude")) {
+        addSpin(QStringLiteral("Глубина"), 0, 600, current.distance,
+                QStringLiteral(" px"), [](Effect &e, qreal v) { e.distance = v; });
+        addSpin(QStringLiteral("Направление"), 0, 360, current.angle,
+                QStringLiteral(" °"), [](Effect &e, qreal v) { e.angle = v; });
+        addSpin(QStringLiteral("Перспектива"), 0, 0.95, current.amount, QString(),
+                [](Effect &e, qreal v) { e.amount = v; });
+        addSpin(QStringLiteral("Точка схода X"), 0, 100,
+                current.center.x() * 100.0, QStringLiteral(" %"),
+                [](Effect &e, qreal v) { e.center.setX(v / 100.0); });
+        addSpin(QStringLiteral("Точка схода Y"), 0, 100,
+                current.center.y() * 100.0, QStringLiteral(" %"),
+                [](Effect &e, qreal v) { e.center.setY(v / 100.0); });
+        addSpin(QStringLiteral("Свет"), 0, 1, current.intensity, QString(),
+                [](Effect &e, qreal v) { e.intensity = v; });
+        addSpin(QStringLiteral("Непрозрачность"), 0, 100, current.opacity * 100.0,
+                QStringLiteral(" %"), [](Effect &e, qreal v) { e.opacity = v / 100.0; });
+        addColor(current.color, QStringLiteral("Цвет боковых граней"));
+    } else if (type == QLatin1String("perspective")) {
+        QPolygonF quad = current.quad;
+        if (quad.size() != 4) {
+            quad = QPolygonF({QPointF(0, 0), QPointF(1, 0),
+                              QPointF(1, 1), QPointF(0, 1)});
+        }
+        const QStringList names = {QStringLiteral("Левый верх"),
+                                   QStringLiteral("Правый верх"),
+                                   QStringLiteral("Правый низ"),
+                                   QStringLiteral("Левый низ")};
+        for (int corner = 0; corner < 4; ++corner) {
+            auto *row = new QWidget(m_effectEditor);
+            auto *rowLayout = new QHBoxLayout(row);
+            rowLayout->setContentsMargins(0, 0, 0, 0);
+            auto *xSpin = new QDoubleSpinBox(row);
+            xSpin->setRange(-200, 300);
+            xSpin->setDecimals(1);
+            xSpin->setSuffix(QStringLiteral(" %"));
+            xSpin->setValue(quad.at(corner).x() * 100.0);
+            auto *ySpin = new QDoubleSpinBox(row);
+            ySpin->setRange(-200, 300);
+            ySpin->setDecimals(1);
+            ySpin->setSuffix(QStringLiteral(" %"));
+            ySpin->setValue(quad.at(corner).y() * 100.0);
+            rowLayout->addWidget(xSpin);
+            rowLayout->addWidget(ySpin);
+            m_effectForm->addRow(names.at(corner), row);
+            const auto applyCorner = [this, index, corner, xSpin, ySpin, commit]() {
+                if (m_effectUpdating)
+                    return;
+                QVector<Effect> list = m_view->selectionEffects();
+                if (index < 0 || index >= list.size())
+                    return;
+                Effect effect = list.at(index);
+                if (effect.quad.size() != 4)
+                    effect.quad = QPolygonF({QPointF(0, 0), QPointF(1, 0),
+                                             QPointF(1, 1), QPointF(0, 1)});
+                effect.quad[corner] = QPointF(xSpin->value() / 100.0,
+                                              ySpin->value() / 100.0);
+                commit(effect);
+            };
+            connect(xSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+                    [applyCorner](double) { applyCorner(); });
+            connect(ySpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+                    [applyCorner](double) { applyCorner(); });
+        }
+    } else if (type == QLatin1String("clip-mask")
+               || type == QLatin1String("opacity-mask")) {
+        auto *info = new QLabel(current.mask.isEmpty()
+                                    ? QStringLiteral("Маска ещё не задана.")
+                                    : QStringLiteral("Маска задана (%1 элементов).")
+                                          .arg(current.mask.elementCount()),
+                                m_effectEditor);
+        info->setWordWrap(true);
+        m_effectForm->addRow(QStringLiteral("Состояние"), info);
+        auto *apply = new QToolButton(m_effectEditor);
+        apply->setText(QStringLiteral("Взять маску из выделения"));
+        apply->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        m_effectForm->addRow(apply);
+        connect(apply, &QToolButton::clicked, this, [this, index, type]() {
+            const QList<VectorItem *> selected = selection();
+            if (selected.size() < 2) {
+                emit status(QStringLiteral("Выберите объект и фигуру-маску."));
+                return;
+            }
+            VectorItem *maskItem = selected.first();
+            VectorItem *target = selected.last();
+            const VectorObject maskObject = maskItem->object();
+            const QPainterPath sceneMask =
+                maskItem->mapToScene(maskObject.type == ShapeType::Text
+                                         ? buildTextPath(maskObject)
+                                         : maskObject.path);
+            if (sceneMask.isEmpty()) {
+                emit status(QStringLiteral("У маски нет геометрии."));
+                return;
+            }
+            QVector<Effect> list = target->effects();
+            if (index < 0 || index >= list.size())
+                return;
+            emit beginEdit();
+            list[index].mask = target->mapFromScene(sceneMask);
+            target->setEffects(list);
+            emit endEdit();
+            refresh();
+        });
+        if (type == QLatin1String("opacity-mask")) {
+            addSpin(QStringLiteral("Сила маски"), 0, 100, current.opacity * 100.0,
+                    QStringLiteral(" %"), [](Effect &e, qreal v) { e.opacity = v / 100.0; });
+        }
+    }
+
+    if (m_effectForm->rowCount() == 0) {
+        auto *hint = new QLabel(QStringLiteral("Для этого эффекта нет параметров."),
+                                m_effectEditor);
+        hint->setStyleSheet(QStringLiteral("color:#757b85; font-size:11px;"));
+        m_effectForm->addRow(hint);
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Outline

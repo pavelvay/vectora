@@ -14,17 +14,31 @@
 #include <QTabWidget>
 #include <QMouseEvent>
 #include <QPageSize>
+#include <QProcess>
+#include <QStandardPaths>
 #include <QPainter>
 #include <QPdfWriter>
 #include <QSaveFile>
 #include <QTextStream>
 #include <QWidget>
 
+#include "AssetLibrary.h"
+#include "CodeDialog.h"
+#include "CodeGenerator.h"
+#include "DocumentDialogs.h"
+#include "DocumentTools.h"
+#include "TemplateStore.h"
+#include "UpdateChecker.h"
 #include "CanvasView.h"
 #include "ColorPalette.h"
 #include "Document.h"
+#include "PatternStore.h"
+#include "Patterns.h"
+#include "Effects.h"
+#include "Icons.h"
 #include "MainWindow.h"
 #include "PageDialog.h"
+#include "PatternDialog.h"
 #include "SvgImporter.h"
 #include "VectorItem.h"
 
@@ -67,6 +81,11 @@ void drag(CanvasView &view, const QPoint &from, const QPoint &to)
 
 int SelfTest::run(const QString &directory)
 {
+    // Keep asset libraries, settings and recent files of the real profile out
+    // of the test run.
+    QStandardPaths::setTestModeEnabled(true);
+    qputenv("VECTORA_NO_RECOVERY", "1");
+    qputenv("VECTORA_NO_UPDATE_CHECK", "1");
     QDir dir(directory);
     dir.mkpath(QStringLiteral("."));
 
@@ -421,6 +440,1471 @@ int SelfTest::run(const QString &directory)
     check(drawnLoaded.objects.size() == drawn.objects.size(),
           QStringLiteral("drawn objects preserved (%1)").arg(drawn.objects.size()));
 
+    // --- Non-destructive effects and blends --------------------------------
+    out << "\nEffects\n";
+    {
+        CanvasView fxView;
+        fxView.resize(900, 1200);
+        fxView.setPageSize(QSizeF(400, 400));
+
+        VectorObject card;
+        card.type = ShapeType::Rectangle;
+        card.id = 101;
+        card.path.addRect(QRectF(0, 0, 120, 90));
+        card.pos = QPointF(100, 100);
+        card.fill = QColor("#e0466b");
+        card.strokeWidth = 0;
+        card.hasStroke = false;
+
+        VectorObject other = card;
+        other.id = 102;
+        other.pos = QPointF(220, 260);
+        other.fill = QColor("#4f7cc0");
+
+        VectorItem *cardItem = fxView.addVectorObject(card, false, false);
+        VectorItem *otherItem = fxView.addVectorObject(other, false, false);
+        check(cardItem && otherItem, QStringLiteral("effect test objects added"));
+
+        // Stack: add, reorder, toggle.
+        fxView.scene()->clearSelection();
+        cardItem->setSelected(true);
+        fxView.addEffectToSelection(makeEffect(QStringLiteral("shadow")));
+        fxView.addEffectToSelection(makeEffect(QStringLiteral("glow")));
+        QVector<Effect> stack = cardItem->effects();
+        check(stack.size() == 2, QStringLiteral("two effects on one object"));
+        check(stack.at(0).type == QStringLiteral("shadow")
+                  && stack.at(1).type == QStringLiteral("glow"),
+              QStringLiteral("effects keep insertion order"));
+        fxView.moveEffectInSelection(1, -1);
+        stack = cardItem->effects();
+        check(stack.at(0).type == QStringLiteral("glow"),
+              QStringLiteral("effect order can be changed"));
+        fxView.moveEffectInSelection(0, 1);
+        check(cardItem->effects().at(1).type == QStringLiteral("glow"),
+              QStringLiteral("effect order restored"));
+
+        stack = cardItem->effects();
+        stack[0].enabled = false;
+        fxView.setSelectionEffects(stack);
+        check(!cardItem->effects().at(0).enabled,
+              QStringLiteral("effect can be disabled"));
+        stack[0].enabled = true;
+        fxView.setSelectionEffects(stack);
+        check(qAbs(effectBounds(cardItem->object()).width()
+                   - cardItem->object().localBounds().width()) > 10.0,
+              QStringLiteral("effect bounds expand past geometry"));
+
+        // Rendering: the glow reaches outside the original rectangle.
+        Document glowDoc;
+        glowDoc.pageSize = QSizeF(400, 400);
+        glowDoc.objects.append(cardItem->object());
+        QImage glowImage(400, 400, QImage::Format_ARGB32_Premultiplied);
+        glowImage.fill(Qt::white);
+        {
+            QPainter painter(&glowImage);
+            glowDoc.render(&painter);
+        }
+        Document plainDoc = glowDoc;
+        plainDoc.objects[0].effects.clear();
+        QImage plainImage(400, 400, QImage::Format_ARGB32_Premultiplied);
+        plainImage.fill(Qt::white);
+        {
+            QPainter painter(&plainImage);
+            plainDoc.render(&painter);
+        }
+        const QColor outside = glowImage.pixelColor(228, 145);
+        const QColor plainOutside = plainImage.pixelColor(228, 145);
+        check(outside != plainOutside,
+              QStringLiteral("shadow renders outside the geometry"));
+        check(glowImage.pixelColor(150, 140) == QColor("#e0466b"),
+              QStringLiteral("effect layer keeps the original fill"));
+
+        // Perspective quad + serialization round-trip.
+        Effect perspective = makeEffect(QStringLiteral("perspective"));
+        perspective.quad = QPolygonF({QPointF(0.1, 0.0), QPointF(0.9, 0.05),
+                                      QPointF(1.0, 1.0), QPointF(0.0, 0.95)});
+        stack = cardItem->effects();
+        stack.append(perspective);
+        cardItem->setEffects(stack);
+
+        Effect mask = makeEffect(QStringLiteral("clip-mask"));
+        QPainterPath maskPath;
+        maskPath.addRect(QRectF(0, 0, 60, 90));
+        mask.mask = maskPath;
+        stack = cardItem->effects();
+        stack.append(mask);
+        cardItem->setEffects(stack);
+
+        Document stored;
+        stored.pageSize = QSizeF(400, 400);
+        stored.objects.append(cardItem->object());
+        stored.blends.append(BlendRecord{7, 101, 102, 5, 0.0, true});
+        const QString effectPath = dir.filePath(QStringLiteral("effects.vct"));
+        check(stored.save(effectPath, &error),
+              QStringLiteral("document with effects saved"));
+        Document reloaded;
+        check(reloaded.load(effectPath, &error),
+              QStringLiteral("document with effects loaded"));
+        check(reloaded.objects.size() == 1
+                  && reloaded.objects.at(0).effects.size() == 4,
+              QStringLiteral("effect stack persists"));
+        if (reloaded.objects.size() == 1) {
+            const QVector<Effect> restored = reloaded.objects.at(0).effects;
+            check(restored.at(0).type == QStringLiteral("shadow")
+                      && restored.at(1).type == QStringLiteral("glow")
+                      && restored.at(2).type == QStringLiteral("perspective")
+                      && restored.at(3).type == QStringLiteral("clip-mask"),
+                  QStringLiteral("effect order persists"));
+            check(restored.at(2).quad.size() == 4
+                      && qAbs(restored.at(2).quad.at(1).x() - 0.9) < 0.001,
+                  QStringLiteral("perspective corners persist"));
+            check(!restored.at(3).mask.isEmpty(),
+                  QStringLiteral("mask geometry persists"));
+        }
+        check(reloaded.blends.size() == 1
+                  && reloaded.blends.at(0).steps == 5
+                  && reloaded.blends.at(0).fromId == 101,
+              QStringLiteral("blend record persists"));
+
+        // On-canvas perspective corners.
+        {
+            fxView.setActiveTool(Tool::Perspective);
+            const QRectF bounds = cardItem->object().localBounds();
+            const QPoint centre = fxView.mapFromScene(
+                cardItem->mapToScene(bounds.center()));
+            sendMouse(fxView.viewport(), QEvent::MouseButtonPress, centre,
+                      Qt::LeftButton, Qt::LeftButton);
+            sendMouse(fxView.viewport(), QEvent::MouseButtonRelease, centre,
+                      Qt::LeftButton, Qt::NoButton);
+            int perspectiveIndex = -1;
+            for (int i = 0; i < cardItem->effects().size(); ++i) {
+                if (cardItem->effects().at(i).type == QStringLiteral("perspective"))
+                    perspectiveIndex = i;
+            }
+            check(perspectiveIndex >= 0,
+                  QStringLiteral("perspective tool attaches an effect"));
+
+            const QPoint corner = fxView.mapFromScene(
+                cardItem->mapToScene(QPointF(bounds.right(), bounds.bottom())));
+            drag(fxView, corner, corner + QPoint(-42, -34));
+            if (perspectiveIndex >= 0) {
+                const QPolygonF quad = cardItem->effects().at(perspectiveIndex).quad;
+                check(quad.size() == 4
+                          && (qAbs(quad.at(2).x() - 1.0) > 0.05
+                              || qAbs(quad.at(2).y() - 1.0) > 0.05),
+                      QStringLiteral("perspective corner is dragged on canvas"));
+            }
+            fxView.setActiveTool(Tool::Select);
+        }
+
+        // Extrusion by dragging from the object.
+        {
+            fxView.setActiveTool(Tool::Extrude);
+            const QPoint start = fxView.mapFromScene(
+                cardItem->mapToScene(cardItem->object().localBounds().center()));
+            drag(fxView, start, start + QPoint(0, 70));
+            bool extruded = false;
+            for (const Effect &effect : cardItem->effects()) {
+                if (effect.type == QStringLiteral("extrude") && effect.distance > 20.0)
+                    extruded = true;
+            }
+            check(extruded, QStringLiteral("extrude drag sets depth and angle"));
+            fxView.setActiveTool(Tool::Select);
+        }
+
+        // Blend regeneration from live endpoints.
+        fxView.scene()->clearSelection();
+        cardItem->setSelected(true);
+        otherItem->setSelected(true);
+        fxView.blendSelected(3);
+        check(fxView.blends().size() == 1, QStringLiteral("blend record created"));
+        int generated = 0;
+        for (VectorItem *item : fxView.vectorItems()) {
+            if (item->object().blendId != 0)
+                ++generated;
+        }
+        check(generated == 3, QStringLiteral("blend generated requested steps"));
+
+        QPointF beforePos;
+        for (VectorItem *item : fxView.vectorItems()) {
+            if (item->object().blendId != 0) {
+                beforePos = item->pos();
+                break;
+            }
+        }
+        otherItem->setPos(otherItem->pos() + QPointF(120, 0));
+        fxView.updateAllBlends();
+        QPointF afterPos;
+        for (VectorItem *item : fxView.vectorItems()) {
+            if (item->object().blendId != 0) {
+                afterPos = item->pos();
+                break;
+            }
+        }
+        check(QLineF(beforePos, afterPos).length() > 10.0,
+              QStringLiteral("moving an endpoint regenerates the blend"));
+
+        fxView.setBlendSteps(fxView.blends().at(0).id, 5);
+        generated = 0;
+        for (VectorItem *item : fxView.vectorItems()) {
+            if (item->object().blendId != 0)
+                ++generated;
+        }
+        check(generated == 5, QStringLiteral("changing blend steps updates result"));
+
+        fxView.setBlendSpacing(fxView.blends().at(0).id, 80.0);
+        generated = 0;
+        for (VectorItem *item : fxView.vectorItems()) {
+            if (item->object().blendId != 0)
+                ++generated;
+        }
+        check(generated >= 1, QStringLiteral("blend spacing produces objects"));
+
+        // Clip mask limits painting to the mask shape.
+        Document maskDoc;
+        maskDoc.pageSize = QSizeF(400, 400);
+        VectorObject masked;
+        masked.type = ShapeType::Rectangle;
+        masked.path.addRect(QRectF(0, 0, 120, 90));
+        masked.pos = QPointF(100, 100);
+        masked.fill = QColor("#00a86b");
+        masked.hasStroke = false;
+        Effect clip = makeEffect(QStringLiteral("clip-mask"));
+        QPainterPath clipPath;
+        clipPath.addRect(QRectF(0, 0, 60, 90));
+        clip.mask = clipPath;
+        masked.effects.append(clip);
+        maskDoc.objects.append(masked);
+        QImage maskImage(400, 400, QImage::Format_ARGB32_Premultiplied);
+        maskImage.fill(Qt::white);
+        {
+            QPainter painter(&maskImage);
+            maskDoc.render(&painter);
+        }
+        const QColor insideMask = maskImage.pixelColor(120, 140);
+        const QColor outsideMask = maskImage.pixelColor(190, 140);
+        check(insideMask != QColor(Qt::white)
+                  && outsideMask == QColor(Qt::white),
+              QStringLiteral("clip mask hides geometry outside the mask"));
+
+        const QString effectSvg = maskDoc.toSvg();
+        check(effectSvg.contains(QStringLiteral("data:image/png;base64,")),
+              QStringLiteral("effects exported to SVG as a flattened layer"));
+
+        // Both new tools are registered with shortcuts and icons.
+        bool hasExtrude = false;
+        bool hasPerspective = false;
+        for (const ToolInfo &info : toolInfos()) {
+            if (info.tool == Tool::Extrude)
+                hasExtrude = !info.shortcut.isEmpty()
+                             && !Icons::icon(info.id).isNull();
+            if (info.tool == Tool::Perspective)
+                hasPerspective = !info.shortcut.isEmpty()
+                                 && !Icons::icon(info.id).isNull();
+        }
+        check(hasExtrude, QStringLiteral("extrude tool registered"));
+        check(hasPerspective, QStringLiteral("perspective tool registered"));
+        check(!Icons::appIcon().isNull(), QStringLiteral("application icon available"));
+    }
+
+    // --- Symbols, instances and the asset library ---------------------------
+    out << "\nSymbols and library\n";
+    {
+        CanvasView symbolView;
+        symbolView.resize(900, 1200);
+        symbolView.setPageSize(QSizeF(500, 500));
+
+        VectorObject first;
+        first.type = ShapeType::Rectangle;
+        first.path.addRect(QRectF(0, 0, 80, 60));
+        first.pos = QPointF(60, 60);
+        first.fill = QColor("#e0466b");
+        first.hasStroke = false;
+
+        VectorObject second;
+        second.type = ShapeType::Ellipse;
+        second.path.addEllipse(QRectF(0, 0, 60, 60));
+        second.pos = QPointF(160, 60);
+        second.fill = QColor("#4f7cc0");
+        second.hasStroke = false;
+
+        VectorItem *firstItem = symbolView.addVectorObject(first, false, false);
+        VectorItem *secondItem = symbolView.addVectorObject(second, false, false);
+        check(firstItem && secondItem, QStringLiteral("symbol source objects added"));
+
+        symbolView.scene()->clearSelection();
+        firstItem->setSelected(true);
+        secondItem->setSelected(true);
+        const int symbolId = symbolView.createSymbolFromSelection(QStringLiteral("Тест"));
+        check(symbolId > 0, QStringLiteral("symbol created from selection"));
+        check(symbolView.symbols().size() == 1,
+              QStringLiteral("symbol stored in the document"));
+        check(symbolView.instances().size() == 1,
+              QStringLiteral("first instance recorded"));
+        const int firstInstance = symbolView.instances().at(0).id;
+        check(firstItem->object().instanceId == firstInstance
+                  && firstItem->object().symbolId == symbolId,
+              QStringLiteral("source objects became a linked instance"));
+        check(firstItem->object().group != 0,
+              QStringLiteral("instance objects are grouped"));
+
+        const int beforeInsert = symbolView.vectorItems().size();
+        const int inserted = symbolView.insertSymbol(symbolId);
+        check(inserted > 0, QStringLiteral("symbol instance inserted"));
+        check(symbolView.vectorItems().size() == beforeInsert + 2,
+              QStringLiteral("instance copies every symbol object"));
+        check(symbolView.instances().size() == 2,
+              QStringLiteral("second instance recorded"));
+        check(!symbolView.renderSymbolImage(symbolId, QSize(64, 64)).isNull(),
+              QStringLiteral("symbol preview renders"));
+
+        // Edit the first instance, push it back into the symbol definition and
+        // confirm the other instance is rebuilt from it.
+        symbolView.scene()->clearSelection();
+        for (VectorItem *item : symbolView.vectorItems()) {
+            if (item->object().instanceId == firstInstance)
+                item->setSelected(true);
+        }
+        check(symbolView.selectedInstanceId() == firstInstance,
+              QStringLiteral("instance selection detected"));
+        for (VectorItem *item : symbolView.vectorItems()) {
+            if (item->object().instanceId == firstInstance
+                && item->object().type == ShapeType::Rectangle) {
+                item->setFillColor(QColor("#06d6a0"));
+            }
+        }
+        check(symbolView.updateSymbolFromSelection(),
+              QStringLiteral("symbol updated from its instance"));
+        bool otherUpdated = false;
+        for (VectorItem *item : symbolView.vectorItems()) {
+            if (item->object().instanceId == inserted
+                && item->object().type == ShapeType::Rectangle
+                && item->object().fill == QColor("#06d6a0"))
+                otherUpdated = true;
+        }
+        check(otherUpdated,
+              QStringLiteral("linked instances follow the symbol change"));
+
+        // Independent instance scaling keeps the definition untouched.
+        QRectF insertedBounds;
+        for (VectorItem *item : symbolView.vectorItems()) {
+            if (item->object().instanceId == inserted) {
+                const QRectF box = item->mapToScene(item->object().localBounds())
+                                       .boundingRect();
+                insertedBounds = insertedBounds.isNull() ? box : insertedBounds.united(box);
+            }
+        }
+        const QRectF definitionBounds = symbolView.symbols().first().bounds;
+        check(insertedBounds.isValid() && definitionBounds.isValid(),
+              QStringLiteral("instance and definition bounds available"));
+        VectorItem *scaledItem = nullptr;
+        qreal originalLocalWidth = 0.0;
+        for (VectorItem *item : symbolView.vectorItems()) {
+            if (item->object().instanceId == inserted
+                && !item->object().path.isEmpty()) {
+                scaledItem = item;
+                originalLocalWidth = item->object().localBounds().width();
+                break;
+            }
+        }
+        if (scaledItem) {
+            VectorObject object = scaledItem->object();
+            const QRectF local = object.localBounds();
+            QTransform scale;
+            scale.translate(local.center().x(), local.center().y());
+            scale.scale(1.5, 1.5);
+            scale.translate(-local.center().x(), -local.center().y());
+            object.path = scale.map(object.path);
+            scaledItem->setObject(object);
+        }
+        check(scaledItem != nullptr
+                  && scaledItem->object().localBounds().width()
+                         > originalLocalWidth * 1.4,
+              QStringLiteral("instance scales independently"));
+        check(symbolView.symbols().first().bounds == definitionBounds,
+              QStringLiteral("instance scaling leaves the definition unchanged"));
+
+        // Detach the scaled instance; it stops following the symbol.
+        symbolView.scene()->clearSelection();
+        for (VectorItem *item : symbolView.vectorItems()) {
+            if (item->object().instanceId == inserted)
+                item->setSelected(true);
+        }
+        symbolView.detachSelectedSymbolInstances();
+        check(symbolView.instances().size() == 1,
+              QStringLiteral("detached instance record removed"));
+        bool stillLinked = false;
+        for (VectorItem *item : symbolView.vectorItems()) {
+            if (item->object().instanceId == inserted)
+                stillLinked = true;
+        }
+        check(!stillLinked, QStringLiteral("detached objects lose the symbol link"));
+
+        // Serialisation of symbols, instances and links.
+        Document symbolDocument;
+        symbolDocument.pageSize = symbolView.pageSize();
+        symbolDocument.objects = symbolView.objects();
+        symbolDocument.groups = symbolView.groups();
+        symbolDocument.symbols = symbolView.symbols();
+        symbolDocument.instances = symbolView.instances();
+        const QString symbolsPath = dir.filePath(QStringLiteral("symbols.vct"));
+        check(symbolDocument.save(symbolsPath, &error),
+              QStringLiteral("document with symbols saved"));
+        Document symbolLoaded;
+        check(symbolLoaded.load(symbolsPath, &error),
+              QStringLiteral("document with symbols loaded"));
+        check(symbolLoaded.symbols.size() == 1
+                  && symbolLoaded.instances.size() == 1,
+              QStringLiteral("symbols and instances persist"));
+        check(symbolLoaded.symbols.at(0).objects.size() == 2,
+              QStringLiteral("symbol artwork persists"));
+        bool linkPersisted = false;
+        for (const VectorObject &object : symbolLoaded.objects) {
+            if (object.symbolId == symbolId && object.instanceId > 0)
+                linkPersisted = true;
+        }
+        check(linkPersisted, QStringLiteral("instance links persist"));
+
+        symbolView.deleteSymbol(symbolId);
+        check(symbolView.symbols().isEmpty(),
+              QStringLiteral("symbol removed from the document"));
+        bool unlinked = true;
+        for (VectorItem *item : symbolView.vectorItems()) {
+            if (item->object().symbolId != 0 || item->object().instanceId != 0)
+                unlinked = false;
+        }
+        check(unlinked, QStringLiteral("deleting a symbol unlinks its instances"));
+
+        // Asset insertion from SVG markup, the same path used by drag & drop.
+        const int beforeAssets = symbolView.vectorItems().size();
+        const QString svg = QStringLiteral(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" "
+            "viewBox=\"0 0 100 100\"><circle cx=\"50\" cy=\"50\" r=\"40\" "
+            "fill=\"#ffb547\"/></svg>");
+        check(symbolView.insertSvgAsset(svg, QPointF(250, 250)) == 1,
+              QStringLiteral("library asset inserted on canvas"));
+        check(symbolView.vectorItems().size() == beforeAssets + 1,
+              QStringLiteral("inserted asset adds an object"));
+
+        symbolView.scene()->clearSelection();
+        symbolView.vectorItems().last()->setSelected(true);
+        symbolView.vectorItems().last()->setSelected(true);
+        const QString selectionSvg = symbolView.selectionToSvg();
+        check(selectionSvg.contains(QStringLiteral("<svg"))
+                  && !selectionSvg.contains(QStringLiteral("fill=\"#ffffff\"")),
+              QStringLiteral("selection exported to SVG without background"));
+    }
+
+    // Asset store: libraries, categories, favourites, copy and persistence.
+    {
+        AssetStore &store = AssetStore::instance();
+        store.load();
+        check(store.count() >= 1, QStringLiteral("default asset library present"));
+        check(store.library(0).assets.size() >= 8,
+              QStringLiteral("library ships with real assets"));
+        bool hasCategories = true;
+        for (const char *category : {"Иконки", "Логотипы", "Фигуры",
+                                     "Декоративные", "Геометрические",
+                                     "Текстовые", "Символы"}) {
+            if (!store.categories(0).contains(QString::fromUtf8(category)))
+                hasCategories = false;
+        }
+        check(hasCategories, QStringLiteral("required asset categories available"));
+
+        const int extra = store.addLibrary(QStringLiteral("Тестовая"));
+        check(extra >= 0 && store.count() >= 2,
+              QStringLiteral("second library created"));
+
+        Asset asset;
+        asset.name = QStringLiteral("Тестовый круг");
+        asset.category = QStringLiteral("Иконки");
+        asset.svg = QStringLiteral(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"40\">"
+            "<circle cx=\"20\" cy=\"20\" r=\"18\" fill=\"#06d6a0\"/></svg>");
+        const int target = store.currentIndex();
+        check(store.addAsset(target, asset), QStringLiteral("asset added to library"));
+        const int index = store.findAsset(store.library(target).assets.last().id, target);
+        check(index >= 0, QStringLiteral("added asset can be found by id"));
+        check(store.library(target).assets.at(index).name == QStringLiteral("Тестовый круг"),
+              QStringLiteral("asset name stored"));
+
+        store.renameAsset(target, index, QStringLiteral("Переименованный"));
+        check(store.library(target).assets.at(index).name
+                  == QStringLiteral("Переименованный"),
+              QStringLiteral("asset renamed"));
+
+        store.setAssetCategory(target, index, QStringLiteral("Пользовательские"));
+        check(store.library(target).assets.at(index).category
+                  == QStringLiteral("Пользовательские"),
+              QStringLiteral("asset category changed"));
+
+        store.toggleFavorite(target, index);
+        check(store.library(target).assets.at(index).favorite,
+              QStringLiteral("asset marked as favourite"));
+        store.toggleFavorite(target, index);
+
+        check(store.copyAsset(target, index, 0),
+              QStringLiteral("asset copied between libraries"));
+        bool copied = false;
+        for (const Asset &candidate : store.library(0).assets) {
+            if (candidate.name.contains(QStringLiteral("(копия)")))
+                copied = true;
+        }
+        check(copied, QStringLiteral("copied asset present in the first library"));
+
+        const QString libraryPath = dir.filePath(QStringLiteral("test.vlib"));
+        check(store.exportLibrary(0, libraryPath, &error),
+              QStringLiteral("library exported to .vlib"));
+        const int beforeImport = store.count();
+        check(store.importLibrary(libraryPath, &error) >= 0,
+              QStringLiteral("library imported from .vlib"));
+        check(store.count() == beforeImport + 1,
+              QStringLiteral("imported library added"));
+        check(!AssetStore::renderPreview(asset.svg, QSize(32, 32)).isNull(),
+              QStringLiteral("asset preview renders"));
+
+        QFile stored(store.storageFile());
+        check(stored.open(QIODevice::ReadOnly)
+                  && stored.readAll().contains("vectora-asset-libraries"),
+              QStringLiteral("libraries persisted between launches"));
+        stored.close();
+
+        check(store.canUndo(), QStringLiteral("library edits are undoable"));
+        check(store.undo(), QStringLiteral("library change undone"));
+        check(store.canRedo(), QStringLiteral("library change can be redone"));
+        const int afterUndo = store.count();
+        check(store.redo(), QStringLiteral("library change redone"));
+        check(store.count() == afterUndo + 1,
+              QStringLiteral("redo restores the imported library"));
+    }
+
+    // --- Drafting: dimensions, grids, constructions, drawing scale ----------
+    out << "\nDrafting\n";
+    {
+        CanvasView draftView;
+        draftView.resize(900, 1200);
+        draftView.setPageSize(QSizeF(500, 500));
+        draftView.setSnapEnabled(false);
+
+        VectorObject rect;
+        rect.type = ShapeType::Rectangle;
+        rect.path.addRect(QRectF(0, 0, 100, 60));
+        rect.pos = QPointF(80, 80);
+        rect.fill = QColor("#4f7cc0");
+        VectorItem *rectItem = draftView.addVectorObject(rect, false, false);
+        check(rectItem != nullptr, QStringLiteral("drafting source object added"));
+
+        draftView.setActiveTool(Tool::Dimension);
+        draftView.setDimensionMode(CanvasView::DimensionMode::Horizontal);
+        const QPoint first = draftView.mapFromScene(QPointF(80, 80));
+        const QPoint second = draftView.mapFromScene(QPointF(180, 80));
+        sendMouse(draftView.viewport(), QEvent::MouseButtonPress, first,
+                  Qt::LeftButton, Qt::LeftButton);
+        sendMouse(draftView.viewport(), QEvent::MouseButtonRelease, first,
+                  Qt::LeftButton, Qt::NoButton);
+        sendMouse(draftView.viewport(), QEvent::MouseButtonPress, second,
+                  Qt::LeftButton, Qt::LeftButton);
+        sendMouse(draftView.viewport(), QEvent::MouseButtonRelease, second,
+                  Qt::LeftButton, Qt::NoButton);
+
+        VectorItem *dimensionItem = nullptr;
+        for (VectorItem *item : draftView.vectorItems()) {
+            if (item->object().type == ShapeType::Dimension)
+                dimensionItem = item;
+        }
+        check(dimensionItem != nullptr,
+              QStringLiteral("horizontal dimension created with the tool"));
+        if (dimensionItem) {
+            const VectorObject dimension = dimensionItem->object();
+            check(dimension.dimensionType == 0,
+                  QStringLiteral("dimension type stored"));
+            check(dimension.dimRefA == rectItem->object().id
+                      && dimension.dimRefB == rectItem->object().id,
+                  QStringLiteral("dimension attached to the geometry"));
+            const QPointF beforeB = dimension.dimB;
+
+            VectorObject resized = rectItem->object();
+            resized.path = QTransform::fromScale(1.6, 1.2).map(resized.path);
+            rectItem->setObject(resized);
+            draftView.updateAllDimensions();
+            const VectorObject updated = dimensionItem->object();
+            check(QLineF(beforeB, updated.dimB).length() > 10.0,
+                  QStringLiteral("dimension follows geometry changes"));
+
+            draftView.scene()->clearSelection();
+            dimensionItem->setSelected(true);
+            draftView.setDimensionUnits(1);
+            draftView.setDimensionPrecision(2);
+            draftView.setDimensionOffset(36.0);
+            draftView.applyDimensionSettingsToSelection();
+            const VectorObject styled = dimensionItem->object();
+            check(styled.dimUnits == 1 && styled.dimPrecision == 2
+                      && qAbs(styled.dimOffset - 36.0) < 0.01,
+                  QStringLiteral("dimension style applied to selection"));
+
+            draftView.setDrawingScale(2.0);
+            check(qAbs(dimensionItem->object().dimScale - 2.0) < 0.001,
+                  QStringLiteral("drawing scale propagated to dimensions"));
+            const QString measured = draftView.measurementText(37.795275591 * 10.0);
+            check(measured.contains(QStringLiteral("см")),
+                  QStringLiteral("measurement uses selected units"));
+            check(draftView.measurementText(37.795275591 * 10.0).contains(QStringLiteral("20")),
+                  QStringLiteral("drawing scale affects real dimensions"));
+        }
+
+        // Radius and diameter tools attach to the ellipse.
+        VectorObject circle;
+        circle.type = ShapeType::Ellipse;
+        circle.path.addEllipse(QRectF(0, 0, 80, 80));
+        circle.pos = QPointF(300, 80);
+        circle.fill = QColor("#ffb547");
+        VectorItem *circleItem = draftView.addVectorObject(circle, false, false);
+        draftView.setActiveTool(Tool::Dimension);
+        draftView.setDimensionMode(CanvasView::DimensionMode::Radius);
+        const QPoint onCircle = draftView.mapFromScene(QPointF(380, 120));
+        sendMouse(draftView.viewport(), QEvent::MouseButtonPress, onCircle,
+                  Qt::LeftButton, Qt::LeftButton);
+        sendMouse(draftView.viewport(), QEvent::MouseButtonRelease, onCircle,
+                  Qt::LeftButton, Qt::NoButton);
+        int radialCount = 0;
+        for (VectorItem *item : draftView.vectorItems()) {
+            if (item->object().type == ShapeType::Dimension
+                && item->object().dimensionType >= 4)
+                ++radialCount;
+        }
+        check(radialCount == 1, QStringLiteral("radius dimension created"));
+        if (circleItem) {
+            const QRectF bounds = circleItem->object().localBounds();
+            check(qAbs(bounds.width() - 80.0) < 0.01,
+                  QStringLiteral("source circle stays unchanged"));
+        }
+
+        // Angular dimension needs three clicks.
+        draftView.setDimensionMode(CanvasView::DimensionMode::Angular);
+        const QVector<QPointF> angularPoints = {QPointF(320, 320), QPointF(420, 320),
+                                                QPointF(320, 220)};
+        for (const QPointF &point : angularPoints) {
+            const QPoint viewPoint = draftView.mapFromScene(point);
+            sendMouse(draftView.viewport(), QEvent::MouseButtonPress, viewPoint,
+                      Qt::LeftButton, Qt::LeftButton);
+            sendMouse(draftView.viewport(), QEvent::MouseButtonRelease, viewPoint,
+                      Qt::LeftButton, Qt::NoButton);
+        }
+        bool angular = false;
+        for (VectorItem *item : draftView.vectorItems()) {
+            if (item->object().type == ShapeType::Dimension
+                && item->object().dimensionType == 3)
+                angular = true;
+        }
+        check(angular, QStringLiteral("angular dimension created from three points"));
+
+        // Rendered dimension produces visible pixels.
+        Document dimensionDocument;
+        dimensionDocument.pageSize = QSizeF(500, 500);
+        for (VectorItem *item : draftView.vectorItems()) {
+            if (item->object().type == ShapeType::Dimension)
+                dimensionDocument.objects.append(item->object());
+        }
+        QImage dimensionImage(500, 500, QImage::Format_ARGB32_Premultiplied);
+        dimensionImage.fill(Qt::white);
+        {
+            QPainter painter(&dimensionImage);
+            dimensionDocument.render(&painter);
+        }
+        int drawnPixels = 0;
+        for (int y = 0; y < dimensionImage.height(); y += 2) {
+            for (int x = 0; x < dimensionImage.width(); x += 2) {
+                if (dimensionImage.pixelColor(x, y) != QColor(Qt::white))
+                    ++drawnPixels;
+            }
+        }
+        check(drawnPixels > 20, QStringLiteral("dimensions are rendered"));
+    }
+
+    // Cartesian, polar and isometric grids snap to their own lattice.
+    {
+        CanvasView gridView;
+        gridView.resize(700, 800);
+        gridView.setPageSize(QSizeF(400, 400));
+        gridView.setGridStep(40);
+        gridView.setSnapEnabled(true);
+        const QPointF centre(200, 200);
+
+        gridView.setGridType(1);
+        gridView.setGridAngle(45.0);
+        const QPointF polarRaw = centre + QPointF(80.0 * std::cos(0.785398),
+                                                  80.0 * std::sin(0.785398))
+                                + QPointF(2.5, -2.0);
+        const QPointF polar = gridView.snapNodePoint(polarRaw, nullptr);
+        const qreal radius = std::hypot(polar.x() - centre.x(), polar.y() - centre.y());
+        check(qAbs(radius - qRound(radius / 40.0) * 40.0) < 0.2,
+              QStringLiteral("polar grid snaps radius to the step"));
+        qreal degrees = std::atan2(polar.y() - centre.y(), polar.x() - centre.x())
+                        * 180.0 / 3.14159265358979323846;
+        const qreal angleDelta = std::fmod(qAbs(degrees), 45.0);
+        check(qMin(angleDelta, 45.0 - angleDelta) < 0.2,
+              QStringLiteral("polar grid snaps the angle"));
+
+        gridView.setGridType(2);
+        const QPointF iso = gridView.snapNodePoint(centre + QPointF(47, 19), nullptr);
+        check(QLineF(gridView.snapNodePoint(iso, nullptr), iso).length() < 0.3,
+              QStringLiteral("isometric grid snap is stable"));
+
+        gridView.setGridType(0);
+        const QPointF cartesian = gridView.snapNodePoint(QPointF(38, 78), nullptr);
+        check(qAbs(cartesian.x() - 40.0) < 0.1
+                  && qAbs(cartesian.y() - 80.0) < 0.1,
+              QStringLiteral("cartesian grid snaps to intersections"));
+
+        gridView.setSnapOption(QStringLiteral("grid"), false);
+        const QPointF unsnapped = gridView.snapNodePoint(QPointF(23, 77), nullptr);
+        check(qAbs(unsnapped.x() - 23.0) < 0.001,
+              QStringLiteral("grid snapping can be disabled"));
+        gridView.setSnapOption(QStringLiteral("grid"), true);
+    }
+
+    // Exact construction commands.
+    {
+        CanvasView buildView;
+        buildView.resize(700, 800);
+        buildView.setPageSize(QSizeF(400, 400));
+        buildView.setSnapEnabled(false);
+
+        const int before = buildView.vectorItems().size();
+        buildView.constructLine(QPointF(20, 20), QPointF(120, 40));
+        check(buildView.vectorItems().size() == before + 1,
+              QStringLiteral("line by coordinates constructed"));
+
+        buildView.constructLineFrom(QPointF(200, 20), 100.0, 90.0);
+        check(buildView.vectorItems().size() == before + 2,
+              QStringLiteral("line by length and angle constructed"));
+        const VectorItem *vertical = buildView.vectorItems().last();
+        const QRectF verticalBounds = vertical->object().path.boundingRect();
+        check(qAbs(verticalBounds.height() - 100.0) < 1.0,
+              QStringLiteral("line length matches the request"));
+
+        buildView.constructCircle(QPointF(300, 120), 50.0);
+        const VectorItem *circle = buildView.vectorItems().last();
+        check(qAbs(circle->object().path.boundingRect().width() - 100.0) < 1.0,
+              QStringLiteral("circle by radius constructed"));
+
+        buildView.constructArc(QPointF(120, 300), 60.0, 0.0, 90.0);
+        check(!buildView.vectorItems().last()->object().path.isEmpty(),
+              QStringLiteral("arc by radius constructed"));
+
+        buildView.constructPolygon(QPointF(300, 300), 6, 70.0);
+        const QVector<QPolygonF> polygonParts =
+            buildView.vectorItems().last()->object().path.toSubpathPolygons();
+        check(!polygonParts.isEmpty() && polygonParts.first().size() >= 6,
+              QStringLiteral("regular polygon constructed"));
+
+        // Parallel and perpendicular to a selected line.
+        buildView.scene()->clearSelection();
+        buildView.vectorItems().first()->setSelected(true);
+        const int beforeParallel = buildView.vectorItems().size();
+        check(buildView.createParallelFromSelection(30.0),
+              QStringLiteral("parallel line command succeeds"));
+        check(buildView.vectorItems().size() == beforeParallel + 1,
+              QStringLiteral("parallel line added"));
+        buildView.scene()->clearSelection();
+        buildView.vectorItems().first()->setSelected(true);
+        check(buildView.createPerpendicularFromSelection(80.0),
+              QStringLiteral("perpendicular command succeeds"));
+
+        // Tangents from an external point.
+        VectorObject tangentCircle;
+        tangentCircle.type = ShapeType::Ellipse;
+        tangentCircle.path.addEllipse(QRectF(0, 0, 80, 80));
+        tangentCircle.pos = QPointF(260, 80);
+        tangentCircle.fill = QColor("#ffb547");
+        VectorItem *tangentSource = buildView.addVectorObject(tangentCircle, false, false);
+        buildView.scene()->clearSelection();
+        tangentSource->setSelected(true);
+        const int beforeTangents = buildView.vectorItems().size();
+        check(buildView.createTangentFromSelection(QPointF(120, 120)),
+              QStringLiteral("tangent command succeeds"));
+        check(buildView.vectorItems().size() >= beforeTangents + 1,
+              QStringLiteral("tangent lines added"));
+
+        // Uniform scaling around the selection centre.
+        VectorObject block;
+        block.type = ShapeType::Rectangle;
+        block.path.addRect(QRectF(0, 0, 40, 20));
+        block.pos = QPointF(20, 20);
+        VectorItem *blockItem = buildView.addVectorObject(block, false, false);
+        buildView.scene()->clearSelection();
+        blockItem->setSelected(true);
+        const qreal widthBefore = blockItem->object().localBounds().width();
+        buildView.scaleSelectionBy(2.0);
+        check(qAbs(blockItem->object().localBounds().width() - widthBefore * 2.0) < 1.0,
+              QStringLiteral("selection scales by factor"));
+
+        // Drawing scale survives document serialisation.
+        Document scaled;
+        scaled.drawingScale = 2.5;
+        const QString scaledPath = dir.filePath(QStringLiteral("scale.vct"));
+        check(scaled.save(scaledPath, &error),
+              QStringLiteral("document with drawing scale saved"));
+        Document scaledLoaded;
+        check(scaledLoaded.load(scaledPath, &error),
+              QStringLiteral("document with drawing scale loaded"));
+        check(qAbs(scaledLoaded.drawingScale - 2.5) < 0.001,
+              QStringLiteral("drawing scale persists"));
+
+        // Dimension objects round-trip through .vct.
+        Document dimensionDoc;
+        dimensionDoc.pageSize = QSizeF(500, 500);
+        VectorObject savedDimension;
+        savedDimension.type = ShapeType::Dimension;
+        savedDimension.dimensionType = 3;
+        savedDimension.dimA = QPointF(40, 40);
+        savedDimension.dimB = QPointF(120, 40);
+        savedDimension.dimC = QPointF(40, 110);
+        savedDimension.dimUnits = 2;
+        savedDimension.dimPrecision = 3;
+        savedDimension.dimOffset = 28.0;
+        savedDimension.dimRefA = 77;
+        savedDimension.dimAnchorB = QPointF(0.5, 1.0);
+        dimensionDoc.objects.append(savedDimension);
+        const QString dimensionPath = dir.filePath(QStringLiteral("dimensions.vct"));
+        check(dimensionDoc.save(dimensionPath, &error),
+              QStringLiteral("document with dimensions saved"));
+        Document loadedDimensions;
+        check(loadedDimensions.load(dimensionPath, &error),
+              QStringLiteral("document with dimensions loaded"));
+        check(loadedDimensions.objects.size() == 1
+                  && loadedDimensions.objects.at(0).type == ShapeType::Dimension
+                  && loadedDimensions.objects.at(0).dimensionType == 3
+                  && loadedDimensions.objects.at(0).dimUnits == 2
+                  && loadedDimensions.objects.at(0).dimRefA == 77
+                  && qAbs(loadedDimensions.objects.at(0).dimAnchorB.y() - 1.0) < 0.001,
+              QStringLiteral("dimension geometry persists"));
+    }
+
+    // --- Patterns, repeats and the pattern library ---------------------------
+    out << "\nPatterns\n";
+    {
+        CanvasView patternView;
+        patternView.resize(900, 1200);
+        patternView.setPageSize(QSizeF(500, 500));
+        patternView.setSnapEnabled(false);
+
+        VectorObject dot;
+        dot.type = ShapeType::Ellipse;
+        dot.path.addEllipse(QRectF(0, 0, 20, 20));
+        dot.pos = QPointF(20, 20);
+        dot.fill = QColor("#e0466b");
+        dot.hasStroke = false;
+        VectorItem *dotItem = patternView.addVectorObject(dot, false, false);
+
+        VectorObject stripe;
+        stripe.type = ShapeType::Rectangle;
+        stripe.path.addRect(QRectF(0, 0, 24, 8));
+        stripe.pos = QPointF(48, 44);
+        stripe.fill = QColor("#4f7cc0");
+        stripe.hasStroke = false;
+        VectorItem *stripeItem = patternView.addVectorObject(stripe, false, false);
+
+        patternView.scene()->clearSelection();
+        dotItem->setSelected(true);
+        stripeItem->setSelected(true);
+        const int patternId = patternView.createPatternFromSelection(QStringLiteral("Тест"));
+        check(patternId > 0, QStringLiteral("pattern created from selection"));
+        check(patternView.patterns().size() == 1,
+              QStringLiteral("pattern stored in the document"));
+        PatternDefinition definition = patternView.patternDefinition(patternId);
+        check(definition.objects.size() == 2,
+              QStringLiteral("pattern keeps its source objects"));
+        check(definition.settings.tile.width() > 1.0,
+              QStringLiteral("pattern tile measured"));
+
+        const QVector<PatternShape> shapes = bakePatternShapes(definition);
+        check(!shapes.isEmpty(), QStringLiteral("pattern tile artwork baked"));
+        check(!renderPatternPreview(definition.settings, shapes, QSize(64, 64)).isNull(),
+              QStringLiteral("pattern preview renders"));
+
+        VectorObject target;
+        target.type = ShapeType::Rectangle;
+        target.path.addRect(QRectF(0, 0, 220, 160));
+        target.pos = QPointF(120, 120);
+        target.fill = QColor("#ffffff");
+        VectorItem *targetItem = patternView.addVectorObject(target, false, false);
+        patternView.scene()->clearSelection();
+        targetItem->setSelected(true);
+        check(patternView.applyPatternToSelection(patternId),
+              QStringLiteral("pattern applied as an object fill"));
+        check(targetItem->object().patternId == patternId
+                  && !targetItem->object().patternShapes.isEmpty(),
+              QStringLiteral("applied pattern stored on the object"));
+
+        Document patternDocument;
+        patternDocument.pageSize = QSizeF(500, 500);
+        patternDocument.patterns = patternView.patterns();
+        patternDocument.objects.append(targetItem->object());
+        QImage patternImage(500, 500, QImage::Format_ARGB32_Premultiplied);
+        patternImage.fill(Qt::white);
+        {
+            QPainter painter(&patternImage);
+            patternDocument.render(&painter);
+        }
+        bool patternVisible = false;
+        for (int y = 120; y < 280 && !patternVisible; ++y) {
+            for (int x = 120; x < 340; ++x) {
+                const QColor pixel = patternImage.pixelColor(x, y);
+                if (pixel != QColor(Qt::white)) {
+                    patternVisible = true;
+                    break;
+                }
+            }
+        }
+        check(patternVisible, QStringLiteral("pattern fill is rendered"));
+
+        // Editing the definition updates every linked fill.
+        PatternDefinition edited = patternView.patternDefinition(patternId);
+        edited.settings.tile = QSizeF(36, 36);
+        edited.settings.type = 1;
+        patternView.updatePatternDefinition(edited);
+        check(qAbs(targetItem->object().pattern.tile.width() - 36.0) < 0.01
+                  && targetItem->object().pattern.type == 1,
+              QStringLiteral("editing a pattern updates the applied fill"));
+
+        // Replacing the source artwork refreshes linked instances.
+        dotItem->setFillColor(QColor("#ffd166"));
+        patternView.scene()->clearSelection();
+        dotItem->setSelected(true);
+        stripeItem->setSelected(true);
+        check(patternView.updatePatternFromSelection(patternId),
+              QStringLiteral("pattern source refreshed from selection"));
+        check(patternView.patternDefinition(patternId).objects.first().fill
+                  == QColor("#ffd166"),
+              QStringLiteral("pattern definition keeps new source artwork"));
+
+        // Repeat types produce the expected number of placements.
+        PatternSettings settings = definition.settings;
+        settings.tile = QSizeF(40, 40);
+        settings.type = 0;
+        const QRectF area(0, 0, 200, 160);
+        check(patternTileTransforms(settings, area).size() > 4,
+              QStringLiteral("grid repeat produces tiles"));
+        settings.type = 1;
+        check(patternTileTransforms(settings, area).size() > 4,
+              QStringLiteral("brick repeat produces tiles"));
+        settings.type = 2;
+        check(patternTileTransforms(settings, area).size() > 4,
+              QStringLiteral("hex repeat produces tiles"));
+        settings.type = 3;
+        check(patternTileTransforms(settings, area).size() >= 12,
+              QStringLiteral("mirror repeat produces mirrored variants"));
+        settings.type = 4;
+        settings.count = 6;
+        check(patternTileTransforms(settings, area).size() == 6,
+              QStringLiteral("radial repeat uses the requested count"));
+        settings.type = 5;
+        check(patternTileTransforms(settings, area).size() == 6,
+              QStringLiteral("rotational repeat uses the requested count"));
+        settings.type = 6;
+        settings.count = 5;
+        settings.pathStep = 40;
+        check(!patternTileTransforms(settings, area).isEmpty(),
+              QStringLiteral("path repeat follows a guide curve"));
+
+        // Seamless check: artwork with an empty right edge is not seamless.
+        VectorObject edge;
+        edge.type = ShapeType::Rectangle;
+        edge.path.addRect(QRectF(0, 0, 16, 40));
+        edge.pos = QPointF(0, 0);
+        edge.fill = QColor("#06d6a0");
+        edge.hasStroke = false;
+        VectorObject marker;
+        marker.type = ShapeType::Rectangle;
+        marker.path.addRect(QRectF(0, 0, 2, 2));
+        marker.pos = QPointF(46, 0);
+        marker.fill = QColor("#06d6a0");
+        marker.hasStroke = false;
+        PatternDefinition uneven = patternFromObjects({edge, marker},
+                                                      QStringLiteral("Шов"));
+        const QVector<PatternShape> unevenShapes = bakePatternShapes(uneven);
+        qreal seamDifference = 0.0;
+        const bool seamless = patternIsSeamless(uneven.settings, unevenShapes,
+                                                &seamDifference);
+        check(!seamless && seamDifference > 0.0,
+              QStringLiteral("seamless check reports edge differences"));
+
+        VectorObject flush;
+        flush.type = ShapeType::Rectangle;
+        flush.path.addRect(QRectF(0, 0, 40, 40));
+        flush.fill = QColor("#4f7cc0");
+        flush.hasStroke = false;
+        PatternDefinition closedTile = patternFromObjects({flush},
+                                                         QStringLiteral("Ровный"));
+        check(patternIsSeamless(closedTile.settings,
+                                bakePatternShapes(closedTile)),
+              QStringLiteral("full tile considered seamless"));
+
+        // Serialisation of the pattern fill and the definition.
+        Document storedPatterns;
+        storedPatterns.pageSize = QSizeF(500, 500);
+        storedPatterns.patterns = patternView.patterns();
+        storedPatterns.objects.append(targetItem->object());
+        const QString patternPath = dir.filePath(QStringLiteral("patterns.vct"));
+        check(storedPatterns.save(patternPath, &error),
+              QStringLiteral("document with patterns saved"));
+        Document loadedPatterns;
+        check(loadedPatterns.load(patternPath, &error),
+              QStringLiteral("document with patterns loaded"));
+        check(loadedPatterns.patterns.size() == 1,
+              QStringLiteral("pattern definition persists"));
+        check(loadedPatterns.objects.size() == 1
+                  && loadedPatterns.objects.at(0).patternShapes.size()
+                         == targetItem->object().patternShapes.size(),
+              QStringLiteral("pattern fill persists on the object"));
+        check(loadedPatterns.objects.at(0).patternId == patternId
+                  && loadedPatterns.objects.at(0).pattern.type
+                         == targetItem->object().pattern.type,
+              QStringLiteral("pattern settings persist"));
+
+        {
+            PatternDialog editor(&patternView,
+                                 patternView.patternDefinition(patternId));
+            check(editor.windowTitle().contains(QStringLiteral("Узор")),
+                  QStringLiteral("pattern editor opens for a definition"));
+        }
+
+        // Expand to independent vector objects.
+        patternView.scene()->clearSelection();
+        VectorItem *fillItem = nullptr;
+        for (VectorItem *item : patternView.vectorItems()) {
+            if (item->object().patternId == patternId)
+                fillItem = item;
+        }
+        check(fillItem != nullptr, QStringLiteral("pattern filled object found"));
+        if (fillItem) {
+            patternView.scene()->clearSelection();
+            fillItem->setSelected(true);
+            const int expanded = patternView.expandSelectedPatterns();
+            check(expanded > 0, QStringLiteral("pattern expanded to objects"));
+            bool removed = true;
+            for (VectorItem *item : patternView.vectorItems()) {
+                if (item->object().patternId == patternId)
+                    removed = false;
+            }
+            check(removed, QStringLiteral("pattern fill replaced by objects"));
+        }
+    }
+
+    // Pattern library: persistence, export and import.
+    {
+        PatternStore &patterns = PatternStore::instance();
+        patterns.load();
+        const int before = patterns.count();
+
+        PatternDefinition sample;
+        sample.name = QStringLiteral("Библиотечный");
+        VectorObject square;
+        square.type = ShapeType::Rectangle;
+        square.path.addRect(QRectF(0, 0, 32, 32));
+        square.fill = QColor("#ffb547");
+        sample.objects.append(square);
+        sample.bounds = QRectF(0, 0, 32, 32);
+        sample.settings.tile = QSizeF(32, 32);
+        sample.settings.type = 1;
+
+        check(patterns.add(sample) >= 0,
+              QStringLiteral("pattern added to the library"));
+        check(patterns.count() == before + 1,
+              QStringLiteral("pattern library grows"));
+        const QString exportPath = dir.filePath(QStringLiteral("pattern.vpat"));
+        check(patterns.exportPattern(before, exportPath, &error),
+              QStringLiteral("pattern exported to .vpat"));
+        check(patterns.importPattern(exportPath, &error),
+              QStringLiteral("pattern imported from .vpat"));
+        check(patterns.count() == before + 2,
+              QStringLiteral("imported pattern added"));
+        QFile storedPattern(patterns.storageFile());
+        check(storedPattern.open(QIODevice::ReadOnly)
+                  && storedPattern.readAll().contains("vectora-patterns"),
+              QStringLiteral("pattern library persisted"));
+    }
+
+    // --- QR codes and barcodes -----------------------------------------------
+    out << "\nCodes\n";
+    {
+        const CodeSymbol qr = generateCode(CodeKind::Qr,
+                                          QStringLiteral("hello world"), 1);
+        check(qr.valid, QStringLiteral("QR code generated"));
+        check(qr.modulesX == 21 && qr.cells.size() == 21 * 21,
+              QStringLiteral("QR version 1 matrix size"));
+
+        const CodeSymbol url = generateCode(
+            CodeKind::Qr, QStringLiteral("https://example.com/path"), 2);
+        check(url.valid && url.modulesX >= 25,
+              QStringLiteral("QR URL uses a suitable version"));
+
+        bool tooLong = false;
+        const CodeSymbol huge = generateCode(CodeKind::Qr,
+                                             QString(400, QLatin1Char('x')), 3);
+        tooLong = !huge.valid && !huge.error.isEmpty();
+        check(tooLong, QStringLiteral("QR rejects oversized payloads"));
+
+        const CodeSymbol dm = generateCode(CodeKind::DataMatrix,
+                                           QStringLiteral("HELLO"));
+        check(dm.valid && dm.modulesX == 12,
+              QStringLiteral("Data Matrix generated"));
+        bool dmBorders = true;
+        const int dmSize = dm.modulesX;
+        for (int i = 0; i < dmSize; ++i) {
+            if (!dm.cells.at((dmSize - 1) * dmSize + i)) // bottom solid
+                dmBorders = false;
+            if (!dm.cells.at(i * dmSize)) // left solid
+                dmBorders = false;
+            if (dm.cells.at(i) != (i % 2 == 0)) // top alternating
+                dmBorders = false;
+            if (dm.cells.at(i * dmSize + dmSize - 1)
+                != (i % 2 == 1)) // right alternating
+                dmBorders = false;
+        }
+        check(dmBorders, QStringLiteral("Data Matrix finder borders"));
+        check(!generateCode(CodeKind::DataMatrix,
+                            QString(60, QLatin1Char('x'))).valid,
+              QStringLiteral("Data Matrix rejects oversized payloads"));
+
+        const CodeSymbol ean = generateCode(CodeKind::Ean13,
+                                            QStringLiteral("590123412345"));
+        check(ean.valid && ean.data == QStringLiteral("5901234123457"),
+              QStringLiteral("EAN-13 check digit is calculated"));
+        check(ean.modulesX == 95, QStringLiteral("EAN-13 module count"));
+        check(!generateCode(CodeKind::Ean13,
+                            QStringLiteral("5901234123450")).valid,
+              QStringLiteral("EAN-13 rejects a wrong check digit"));
+
+        const CodeSymbol ean8 = generateCode(CodeKind::Ean8,
+                                             QStringLiteral("96385074"));
+        check(ean8.valid && ean8.modulesX == 67,
+              QStringLiteral("EAN-8 generated"));
+
+        const CodeSymbol upc = generateCode(CodeKind::UpcA,
+                                            QStringLiteral("03600029145"));
+        check(upc.valid && upc.data == QStringLiteral("036000291452"),
+              QStringLiteral("UPC-A check digit is calculated"));
+
+        const CodeSymbol code128 = generateCode(CodeKind::Code128,
+                                                QStringLiteral("A1"));
+        check(code128.valid && code128.modulesX == 57,
+              QStringLiteral("Code 128 generated"));
+
+        const CodeSymbol code39 = generateCode(CodeKind::Code39,
+                                               QStringLiteral("ABC"));
+        check(code39.valid && code39.modulesX > 30,
+              QStringLiteral("Code 39 generated"));
+
+        // External decoders validate the standards when they are installed.
+        const auto zbarDecode = [&dir](const CodeSymbol &symbol,
+                                       const QString &name) -> QString {
+            const QString executable = QStandardPaths::findExecutable(
+                QStringLiteral("zbarimg"));
+            if (executable.isEmpty() || !symbol.valid)
+                return QString();
+            const bool linear = symbol.modulesY <= 1;
+            const int margin = linear ? 8 : 4;
+            const int scale = linear ? 4 : 6;
+            const int width = (symbol.modulesX + margin * 2) * scale;
+            const int height = linear
+                                   ? 60 * scale
+                                   : (symbol.modulesY + margin * 2) * scale;
+            QImage image(width, height, QImage::Format_RGB32);
+            image.fill(Qt::white);
+            QPainter painter(&image);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(Qt::black);
+            if (linear) {
+                const qreal unit = qreal(width) / (symbol.modulesX + margin * 2);
+                for (int i = 0; i < symbol.cells.size(); ++i) {
+                    if (symbol.cells.at(i))
+                        painter.drawRect(QRectF((margin + i) * unit, 10,
+                                                unit + 0.2, height - 20));
+                }
+            } else {
+                for (int y = 0; y < symbol.modulesY; ++y) {
+                    for (int x = 0; x < symbol.modulesX; ++x) {
+                        if (symbol.cells.at(y * symbol.modulesX + x))
+                            painter.drawRect(QRectF((margin + x) * scale,
+                                                    (margin + y) * scale,
+                                                    scale, scale));
+                    }
+                }
+            }
+            painter.end();
+            const QString path = dir.filePath(name + QStringLiteral(".png"));
+            image.save(path);
+            QProcess process;
+            process.start(executable, {QStringLiteral("-q"), QStringLiteral("--raw"),
+                                       path});
+            if (!process.waitForFinished(4000))
+                return QString();
+            return QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+        };
+
+        if (!QStandardPaths::findExecutable(QStringLiteral("zbarimg")).isEmpty()) {
+            check(zbarDecode(qr, QStringLiteral("qr")) == QStringLiteral("hello world"),
+                  QStringLiteral("QR decodes with an external reader"));
+            check(zbarDecode(ean, QStringLiteral("ean"))
+                      == QStringLiteral("5901234123457"),
+                  QStringLiteral("EAN-13 decodes with an external reader"));
+            check(zbarDecode(code128, QStringLiteral("c128"))
+                      == QStringLiteral("A1"),
+                  QStringLiteral("Code 128 decodes with an external reader"));
+            check(zbarDecode(code39, QStringLiteral("c39"))
+                      == QStringLiteral("ABC"),
+                  QStringLiteral("Code 39 decodes with an external reader"));
+            check(zbarDecode(ean8, QStringLiteral("ean8"))
+                      == QStringLiteral("96385074"),
+                  QStringLiteral("EAN-8 decodes with an external reader"));
+        }
+
+        // Document integration: rendering, vector SVG and serialisation.
+        CanvasView codeView;
+        codeView.resize(900, 900);
+        codeView.setPageSize(QSizeF(400, 400));
+        VectorObject codeObject;
+        codeObject.type = ShapeType::Code;
+        codeObject.codeKind = static_cast<int>(CodeKind::Qr);
+        codeObject.codeData = QStringLiteral("hello world");
+        codeObject.codeEcc = 1;
+        codeObject.codeMargin = 4;
+        codeObject.codeColor = QColor("#102030");
+        codeObject.codeBackground = QColor("#ffffff");
+        codeObject.codeModulesX = qr.modulesX;
+        codeObject.codeModulesY = qr.modulesY;
+        codeObject.codeCells = qr.cells;
+        codeObject.textBox = QRectF(0, 0, 180, 180);
+        codeObject.pos = QPointF(100, 100);
+        VectorItem *codeItem = codeView.addCodeObject(codeObject);
+        check(codeItem != nullptr, QStringLiteral("code object added to canvas"));
+        check(codeView.vectorItems().size() == 1,
+              QStringLiteral("code object is an editable document item"));
+
+        Document codeDocument;
+        codeDocument.pageSize = QSizeF(400, 400);
+        codeDocument.objects.append(codeItem->object());
+        QImage codeImage(400, 400, QImage::Format_ARGB32_Premultiplied);
+        codeImage.fill(Qt::white);
+        {
+            QPainter painter(&codeImage);
+            codeDocument.render(&painter);
+        }
+        int darkPixels = 0;
+        for (int y = 100; y < 280; ++y) {
+            for (int x = 100; x < 280; ++x) {
+                const QColor pixel = codeImage.pixelColor(x, y);
+                if (pixel.lightness() < 128)
+                    ++darkPixels;
+            }
+        }
+        check(darkPixels > 100, QStringLiteral("QR modules are rendered"));
+
+        const QString svg = codeDocument.toSvg(false);
+        check(svg.contains(QStringLiteral("fill=\"#102030\""))
+                  && !svg.contains(QStringLiteral("data:image/png")),
+              QStringLiteral("QR exported to SVG as vector rectangles"));
+
+        const QString codePath = dir.filePath(QStringLiteral("codes.vct"));
+        check(codeDocument.save(codePath, &error),
+              QStringLiteral("document with code saved"));
+        Document loadedCode;
+        check(loadedCode.load(codePath, &error),
+              QStringLiteral("document with code loaded"));
+        check(loadedCode.objects.size() == 1
+                  && loadedCode.objects.at(0).type == ShapeType::Code
+                  && loadedCode.objects.at(0).codeModulesX == qr.modulesX
+                  && loadedCode.objects.at(0).codeCells.size() == qr.cells.size(),
+              QStringLiteral("code geometry persists"));
+
+        VectorObject updated = codeItem->object();
+        const CodeSymbol eanSymbol = generateCode(CodeKind::Ean13,
+                                                  QStringLiteral("590123412345"));
+        updated.codeKind = static_cast<int>(CodeKind::Ean13);
+        updated.codeData = eanSymbol.data;
+        updated.codeModulesX = eanSymbol.modulesX;
+        updated.codeModulesY = eanSymbol.modulesY;
+        updated.codeCells = eanSymbol.cells;
+        updated.codeHumanText = eanSymbol.humanText;
+        codeView.updateCodeItem(codeItem, updated);
+        check(codeItem->object().codeKind == static_cast<int>(CodeKind::Ean13)
+                  && codeItem->object().codeModulesX == 95,
+              QStringLiteral("code regenerated after editing"));
+
+        CodeDialog dialog(&codeView, codeItem);
+        check(dialog.windowTitle().contains(QStringLiteral("код")),
+              QStringLiteral("code editor opens for an existing symbol"));
+    }
+
+    // --- Document management: autosave, versions, templates, packaging ------
+    out << "\nDocument management\n";
+    {
+        check(UpdateChecker::compareVersions(QStringLiteral("0.2.0"),
+                                             QStringLiteral("v0.10.0")) < 0,
+              QStringLiteral("version comparison handles numeric parts"));
+        check(UpdateChecker::compareVersions(QStringLiteral("1.0"),
+                                             QStringLiteral("1.0.0")) == 0,
+              QStringLiteral("version comparison treats missing parts as zero"));
+        QVector<UpdateAsset> assets;
+        assets.append({QStringLiteral("Vectora-1.0-x86_64.AppImage"),
+                       QUrl(QStringLiteral("https://example.com/appimage")), 1});
+        assets.append({QStringLiteral("vectora.deb"),
+                       QUrl(QStringLiteral("https://example.com/deb")), 1});
+        check(!UpdateChecker::chooseAsset(assets).isEmpty(),
+              QStringLiteral("update asset selected for the platform"));
+
+        // Autosave snapshots and recovery.
+        const QString autosaveDir = dir.filePath(QStringLiteral("autosave"));
+        AutoSaveManager::setDirectoryForTests(autosaveDir);
+        AutoSaveManager::discardAll();
+        Document savedDocument = Document::sample();
+        const QJsonObject snapshot = savedDocument.toJson();
+        QString autoPath;
+        check(AutoSaveManager::saveSnapshot(QStringLiteral("session"),
+                                            QStringLiteral("/tmp/example.vct"),
+                                            QStringLiteral("example.vct"), snapshot,
+                                            2, &autoPath),
+              QStringLiteral("autosave snapshot written"));
+        AutoSaveManager::saveSnapshot(QStringLiteral("session"), QString(), QString(),
+                                      snapshot, 2);
+        AutoSaveManager::saveSnapshot(QStringLiteral("session"), QString(), QString(),
+                                      snapshot, 2);
+        const QVector<AutoSaveEntry> pending = AutoSaveManager::pending();
+        check(pending.size() == 2, QStringLiteral("autosave rotation keeps the limit"));
+        QString original;
+        const QJsonObject recovered =
+            AutoSaveManager::loadSnapshot(pending.first().snapshotPath, &original);
+        check(recovered.value(QStringLiteral("format")).toString()
+                  == QStringLiteral("vectora-document"),
+              QStringLiteral("autosave snapshot is a document"));
+        AutoSaveManager::discardAll();
+        check(AutoSaveManager::pending().isEmpty(),
+              QStringLiteral("autosave snapshots discarded"));
+
+        // Named versions and comparison.
+        DocumentVersion version;
+        version.name = QStringLiteral("Черновик");
+        version.description = QStringLiteral("Первая версия");
+        version.created = QDateTime::currentDateTime();
+        version.snapshot = snapshot;
+        const QString versionDocument = dir.filePath(QStringLiteral("versions.vct"));
+        check(saveVersions(versionDocument, {version}),
+              QStringLiteral("document versions saved"));
+        const QVector<DocumentVersion> versions = loadVersions(versionDocument);
+        check(versions.size() == 1
+                  && versions.first().name == QStringLiteral("Черновик"),
+              QStringLiteral("document versions loaded"));
+        const QString comparison = compareDocuments(snapshot, snapshot,
+                                                    QStringLiteral("A"),
+                                                    QStringLiteral("B"));
+        check(comparison.contains(QStringLiteral("совпадают")),
+              QStringLiteral("identical versions are detected"));
+        check(!versionsSidecar(versionDocument).isEmpty(),
+              QStringLiteral("version sidecar path available"));
+
+        // Templates: built-ins, user templates, export/import.
+        TemplateStore &templates = TemplateStore::instance();
+        templates.load();
+        check(templates.count() >= 9, QStringLiteral("built-in templates present"));
+        const QStringList requiredCategories = TemplateStore::builtinCategories();
+        bool categoriesOk = true;
+        for (const QString &category : requiredCategories) {
+            if (!templates.categories().contains(category))
+                categoriesOk = false;
+        }
+        check(categoriesOk, QStringLiteral("template categories available"));
+        DocumentTemplate userTemplate;
+        userTemplate.name = QStringLiteral("Тестовый шаблон");
+        userTemplate.category = QStringLiteral("Пользовательские");
+        userTemplate.description = QStringLiteral("Проверка");
+        userTemplate.document = snapshot;
+        const int beforeTemplates = templates.count();
+        const int templateIndex = templates.add(userTemplate);
+        check(templateIndex >= 0 && templates.count() == beforeTemplates + 1,
+              QStringLiteral("user template saved"));
+        const QString templatePath = dir.filePath(QStringLiteral("template.vtpl"));
+        check(templates.exportTemplate(templateIndex, templatePath, &error),
+              QStringLiteral("template exported"));
+        const int beforeImport = templates.count();
+        check(templates.importTemplate(templatePath, &error),
+              QStringLiteral("template imported"));
+        check(templates.count() == beforeImport + 1,
+              QStringLiteral("imported template added"));
+        templates.toggleFavorite(templateIndex);
+        check(templates.templates().at(templateIndex).favorite,
+              QStringLiteral("template marked as favourite"));
+        check(templates.remove(templateIndex),
+              QStringLiteral("user template removed"));
+
+        DocumentTemplate constructed = TemplateStore::instance().templates().first();
+        Document builtinDocument = Document::fromJson(constructed.document, &error);
+        check(error.isEmpty() && !builtinDocument.objects.isEmpty(),
+              QStringLiteral("built-in template is a real document"));
+
+        // Missing fonts and document packaging.
+        Document fontDocument;
+        VectorObject text;
+        text.type = ShapeType::Text;
+        text.text = QStringLiteral("Missing font");
+        text.font = QFont(QStringLiteral("Definitely Missing Font Family"));
+        text.font.setPixelSize(20);
+        text.textBox = QRectF(0, 0, 200, 40);
+        fontDocument.objects.append(text);
+        check(missingFonts(fontDocument).contains(
+                  QStringLiteral("Definitely Missing Font Family")),
+              QStringLiteral("missing fonts reported"));
+
+        Document packageSource = Document::sample();
+        VectorObject marked = packageSource.objects.first();
+        marked.name = QStringLiteral("Названный объект");
+        packageSource.objects[0] = marked;
+        const PackageReport package = packageDocument(
+            packageSource, dir.path(), QStringLiteral("vectora-test"));
+        check(package.ok, QStringLiteral("document packaged"));
+        check(QFileInfo::exists(package.folder + QStringLiteral("/report.txt")),
+              QStringLiteral("package report written"));
+        check(QFileInfo::exists(package.folder
+                                + QStringLiteral("/vectora-test.vct")),
+              QStringLiteral("package contains the document"));
+        check(package.text.contains(QStringLiteral("Проверка целостности: успешно")),
+              QStringLiteral("package integrity verified"));
+
+        // Document dialogs construct over real data.
+        HistoryDialog historyDialog({QStringLiteral("Действие")},
+                                    {QDateTime::currentDateTime()}, 1);
+        check(historyDialog.windowTitle().contains(QStringLiteral("История")),
+              QStringLiteral("history dialog opens"));
+        QVector<DocumentVersion> dialogVersions;
+        VersionDialog versionDialog(&dialogVersions, snapshot,
+                                    QStringLiteral("Документ"));
+        check(versionDialog.windowTitle().contains(QStringLiteral("Версии")),
+              QStringLiteral("versions dialog opens"));
+        TemplateDialog templateDialog(snapshot);
+        check(templateDialog.windowTitle().contains(QStringLiteral("Шаблоны")),
+              QStringLiteral("template manager opens"));
+        UpdateInfo fakeUpdate;
+        fakeUpdate.version = QStringLiteral("9.9.9");
+        fakeUpdate.notes = QStringLiteral("Тестовая заметка");
+        fakeUpdate.pageUrl = QUrl(QStringLiteral("https://example.com"));
+        fakeUpdate.assets.append({QStringLiteral("Vectora-9.9.9-x86_64.AppImage"),
+                                  QUrl(QStringLiteral("https://example.com/app")), 1});
+        UpdateDialog updateDialog(fakeUpdate);
+        check(updateDialog.windowTitle().contains(QStringLiteral("обновление")),
+              QStringLiteral("update dialog opens"));
+        CanvasView searchView;
+        searchView.resize(600, 600);
+        VectorObject searchable;
+        searchable.type = ShapeType::Rectangle;
+        searchable.path.addRect(QRectF(0, 0, 40, 40));
+        searchable.name = QStringLiteral("Кнопка");
+        searchView.addVectorObject(searchable, false, false);
+        ResourceSearchDialog searchDialog(&searchView);
+        check(searchDialog.windowTitle().contains(QStringLiteral("Поиск")),
+              QStringLiteral("resource search dialog opens"));
+    }
+
     // --- MainWindow history (undo / redo) -----------------------------------
     out << "\nHistory\n";
     {
@@ -465,6 +1949,28 @@ int SelfTest::run(const QString &directory)
                 redoAction->trigger();
             check(canvas->vectorItems().size() == baseCount + 1,
                   QStringLiteral("redo restored the rectangle"));
+
+            const auto effectCount = [canvas]() {
+                int maximum = 0;
+                for (VectorItem *item : canvas->vectorItems())
+                    maximum = qMax(maximum, item->effects().size());
+                return maximum;
+            };
+            canvas->scene()->clearSelection();
+            canvas->vectorItems().last()->setSelected(true);
+            QApplication::processEvents();
+            const int effectsBefore = effectCount();
+            canvas->addEffectToSelection(makeEffect(QStringLiteral("shadow")));
+            check(effectCount() == effectsBefore + 1,
+                  QStringLiteral("effect added through the canvas"));
+            if (undoAction)
+                undoAction->trigger();
+            check(effectCount() == effectsBefore,
+                  QStringLiteral("undo removes the effect"));
+            if (redoAction)
+                redoAction->trigger();
+            check(effectCount() == effectsBefore + 1,
+                  QStringLiteral("redo restores the effect"));
 
             // Properties docker applies geometry to the selected object.
             if (!canvas->vectorItems().isEmpty()) {
