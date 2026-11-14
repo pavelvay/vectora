@@ -1,0 +1,23 @@
+# Maintainer: pavelvay
+pkgname=vectora
+pkgver=0.1.11
+pkgrel=1
+pkgdesc="Cross-platform vector graphics editor"
+arch=('x86_64')
+url="https://github.com/pavelvay/vectora"
+license=('custom')
+depends=('qt6-base' 'qt6-svg')
+makedepends=('cmake' 'ninja')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/pavelvay/vectora/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cmake -S "$pkgname-$pkgver" -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr
+    cmake --build build
+}
+
+package() {
+    DESTDIR="$pkgdir" cmake --install build
+}

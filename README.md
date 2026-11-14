@@ -23,6 +23,25 @@
 | **0.1.8** | Группы и вложенность, клоны, шаг и повтор, наклон, центр вращения, градиенты, направляющие |
 | **0.1.9** | Редактор узлов, группы в дереве, умные привязки, текст на холсте и в кривые, импорт SVG |
 | **0.1.10** | Форматы A4/A3/A2/1920×1080 и свой, единицы px/мм/см/in, контекстные меню, чистый холст |
+| **0.1.11** | Сборки: Windows Setup.exe, Linux AppImage/DEB, macOS DMG |
+
+## Установка
+
+Готовые сборки публикуются в GitHub Releases: Windows-установщик, Linux
+AppImage и `.deb`, macOS DMG.
+
+- **Windows**: скачайте `Vectora-0.1.11-Setup.exe` и запустите. Сборка не
+  подписана, поэтому SmartScreen может показать предупреждение:
+  «Подробнее» → «Выполнить в любом случае».
+- **Linux AppImage**: `chmod +x Vectora-0.1.11-x86_64.AppImage` и запустите.
+  Если нет FUSE: `./Vectora-0.1.11-x86_64.AppImage --appimage-extract-and-run`.
+- **Debian/Ubuntu**: `sudo apt install ./Vectora-0.1.11-amd64.deb`.
+- **Arch/CachyOS**: `packaging/PKGBUILD` — `makepkg -si`.
+- **macOS**: откройте DMG и перетащите Vectora в Applications. Сборка не
+  подписана: правый клик → «Открыть» или
+  `xattr -dr com.apple.quarantine /Applications/Vectora.app`.
+
+Сборки создаются автоматически в GitHub Actions.
 
 ## Сборка (Linux)
 

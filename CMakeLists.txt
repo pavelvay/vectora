@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(Vectora VERSION 0.1.10 LANGUAGES CXX)
+project(Vectora VERSION 0.1.11 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -56,6 +56,14 @@ target_link_libraries(vectora PRIVATE
     Qt6::PrintSupport
 )
 
+if(WIN32)
+    file(TO_NATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/resources/vectora.ico"
+        VECTORA_ICON)
+    configure_file(resources/vectora.rc.in
+        ${CMAKE_CURRENT_BINARY_DIR}/vectora.rc @ONLY)
+    target_sources(vectora PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vectora.rc)
+endif()
+
 set_target_properties(vectora PROPERTIES
     WIN32_EXECUTABLE ON
     MACOSX_BUNDLE ON
@@ -80,3 +88,24 @@ if(UNIX AND NOT APPLE)
         RENAME vectora.svg
     )
 endif()
+
+set(CPACK_PACKAGE_NAME "vectora")
+set(CPACK_PACKAGE_VENDOR "Vectora")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Vectora vector graphics editor")
+set(CPACK_PACKAGE_CONTACT "pavelvay")
+set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+if(UNIX AND NOT APPLE)
+    set(CPACK_GENERATOR "DEB")
+    set(CPACK_DEBIAN_PACKAGE_NAME "vectora")
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "pavelvay")
+    set(CPACK_DEBIAN_PACKAGE_SECTION "graphics")
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libqt6widgets6, libqt6svg6, libc6 (>= 2.35)")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+        set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "arm64")
+    else()
+        set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
+    endif()
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
+    set(CPACK_PACKAGE_FILE_NAME "vectora-${PROJECT_VERSION}-amd64")
+endif()
+include(CPack)
