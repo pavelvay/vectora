@@ -107,6 +107,7 @@ jobs:
           choco install nsis --no-progress -y
           $env:Path += ";C:\Program Files (x86)\NSIS"
           makensis /DVERSION=$env:APP_VERSION /DDIST="$($pwd.Path)\dist" /DICON="$($pwd.Path)\resources\vectora.ico" packaging\vectora.nsi
+          Move-Item "packaging\Vectora-$env:APP_VERSION-Setup.exe" .
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer
