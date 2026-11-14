@@ -689,7 +689,7 @@ void MainWindow::createActions()
         layout->addWidget(axesLabel);
 
         QMap<QString, QDoubleSpinBox *> axisSpins;
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
         const QList<QFontVariableAxis> axes =
             QFontInfo(first.font).variableAxes();
         if (axes.isEmpty()) {
@@ -835,7 +835,7 @@ void MainWindow::createActions()
             for (const QString &style : QFontDatabase::styles(family))
                 styles->addItem(style);
             QStringList axes;
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
             const auto variableAxes = QFontInfo(QFont(family)).variableAxes();
             for (const auto &axis : variableAxes)
                 axes << axis.name();
