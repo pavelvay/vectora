@@ -47,11 +47,18 @@ signals:
 
 private:
     void handleReply();
+    void handleFallbackReply();
+    void handleManifestReply();
+    void requestManifest();
+    void requestLatestRelease();
+    void deliver(const UpdateInfo &info);
     void setBusy(bool busy);
 
     QNetworkAccessManager m_network;
     bool m_interactive = false;
     bool m_busy = false;
+    int m_fallbackStage = 0;
+    QString m_lastError;
 };
 
 // Shows release notes, lets the user download the matching package and starts

@@ -106,6 +106,8 @@ void UpdateChecker::check(bool interactive)
     if (m_busy)
         return;
     m_interactive = interactive;
+    m_fallbackStage = 0;
+    m_lastError.clear();
     setBusy(true);
 
     QNetworkRequest request{QUrl(releaseApiUrl())};
@@ -120,25 +122,31 @@ void UpdateChecker::check(bool interactive)
 void UpdateChecker::handleReply()
 {
     auto *reply = qobject_cast<QNetworkReply *>(sender());
-    setBusy(false);
     if (!reply)
         return;
     reply->deleteLater();
 
-    if (reply->error() != QNetworkReply::NoError) {
-        emit failed(reply->errorString());
-        return;
-    }
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    if (status != 200 && status != 0) {
-        emit failed(QStringLiteral("GitHub вернул код %1.").arg(status));
+    if (reply->error() != QNetworkReply::NoError || (status != 200 && status != 0)) {
+        // GitHub's anonymous API is rate-limited and can be unavailable behind
+        // some networks. Fall back to the public releases page, which is served
+        // without the API quota.
+        m_lastError = reply->errorString();
+        if (status > 0)
+            m_lastError = QStringLiteral("GitHub ответил кодом %1: %2")
+                              .arg(status)
+                              .arg(m_lastError);
+        m_fallbackStage = 1;
+        requestManifest();
         return;
     }
 
     QJsonParseError parseError;
     const QJsonDocument document = QJsonDocument::fromJson(reply->readAll(), &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
-        emit failed(QStringLiteral("Не удалось прочитать ответ GitHub."));
+        m_lastError = QStringLiteral("Не удалось прочитать ответ GitHub.");
+        m_fallbackStage = 1;
+        requestManifest();
         return;
     }
     const QJsonObject release = document.object();
@@ -157,11 +165,144 @@ void UpdateChecker::handleReply()
         if (!entry.url.isEmpty())
             info.assets.append(entry);
     }
-
     if (info.version.isEmpty()) {
-        emit failed(QStringLiteral("В релизе нет номера версии."));
+        m_lastError = QStringLiteral("В релизе нет номера версии.");
+        m_fallbackStage = 1;
+        requestManifest();
         return;
     }
+    deliver(info);
+}
+
+void UpdateChecker::requestManifest()
+{
+    QString url = qEnvironmentVariable("VECTORA_UPDATE_MANIFEST");
+    if (url.isEmpty()) {
+        url = QStringLiteral(
+            "https://raw.githubusercontent.com/pavelvay/vectora/master/version.json");
+    }
+    QNetworkRequest request{QUrl(url)};
+    request.setHeader(QNetworkRequest::UserAgentHeader,
+                      QStringLiteral("Vectora/%1 (Qt)")
+                          .arg(QCoreApplication::applicationVersion()));
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply *reply = m_network.get(request);
+    connect(reply, &QNetworkReply::finished, this, &UpdateChecker::handleManifestReply);
+}
+
+void UpdateChecker::handleManifestReply()
+{
+    auto *reply = qobject_cast<QNetworkReply *>(sender());
+    if (!reply)
+        return;
+    reply->deleteLater();
+
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (reply->error() != QNetworkReply::NoError || (status != 200 && status != 0)) {
+        requestLatestRelease();
+        return;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(reply->readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        requestLatestRelease();
+        return;
+    }
+    const QJsonObject manifest = document.object();
+    UpdateInfo info;
+    info.version = normalizedVersion(
+        manifest.value(QStringLiteral("version")).toString());
+    info.notes = manifest.value(QStringLiteral("notes")).toString();
+    info.pageUrl = QUrl(manifest.value(QStringLiteral("page")).toString());
+    for (const QJsonValue &value :
+         manifest.value(QStringLiteral("assets")).toArray()) {
+        const QJsonObject entry = value.toObject();
+        UpdateAsset asset;
+        asset.name = entry.value(QStringLiteral("name")).toString();
+        asset.url = QUrl(entry.value(QStringLiteral("url")).toString());
+        asset.size = qint64(entry.value(QStringLiteral("size")).toDouble());
+        if (!asset.url.isEmpty())
+            info.assets.append(asset);
+    }
+    if (info.version.isEmpty()) {
+        requestLatestRelease();
+        return;
+    }
+    deliver(info);
+}
+
+void UpdateChecker::requestLatestRelease()
+{
+    // This endpoint redirects to /releases/tag/<tag> and is not rate-limited
+    // like api.github.com, so the check still works after API 403/429.
+    QNetworkRequest request(QUrl(QStringLiteral(
+        "https://github.com/pavelvay/vectora/releases/latest")));
+    request.setHeader(QNetworkRequest::UserAgentHeader,
+                      QStringLiteral("Vectora/%1 (Qt)")
+                          .arg(QCoreApplication::applicationVersion()));
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply *reply = m_network.get(request);
+    connect(reply, &QNetworkReply::finished, this, &UpdateChecker::handleFallbackReply);
+}
+
+void UpdateChecker::handleFallbackReply()
+{
+    auto *reply = qobject_cast<QNetworkReply *>(sender());
+    if (!reply)
+        return;
+    reply->deleteLater();
+
+    if (reply->error() != QNetworkReply::NoError) {
+        setBusy(false);
+        emit failed(m_lastError.isEmpty() ? reply->errorString()
+                                          : m_lastError + QStringLiteral(" / ")
+                                                + reply->errorString());
+        return;
+    }
+    const QString path = reply->url().path();
+    QString tag;
+    const int marker = path.indexOf(QStringLiteral("/releases/tag/"));
+    if (marker >= 0)
+        tag = path.mid(marker + int(qstrlen("/releases/tag/")));
+    if (tag.isEmpty()) {
+        setBusy(false);
+        emit failed(QStringLiteral("Не удалось определить последнюю версию на GitHub."));
+        return;
+    }
+
+    UpdateInfo info;
+    info.version = normalizedVersion(tag);
+    info.pageUrl = QUrl(QStringLiteral("https://github.com/pavelvay/vectora/releases/tag/%1")
+                            .arg(tag));
+    info.notes = QStringLiteral(
+        "Описание изменений доступно на странице релиза GitHub.");
+
+    const QString version = info.version;
+    const auto addAsset = [&info, &tag](const QString &name) {
+        UpdateAsset asset;
+        asset.name = name;
+        asset.url = QUrl(QStringLiteral(
+                             "https://github.com/pavelvay/vectora/releases/download/%1/%2")
+                             .arg(tag, name));
+        info.assets.append(asset);
+    };
+#if defined(Q_OS_WIN)
+    addAsset(QStringLiteral("Vectora-%1-Setup.exe").arg(version));
+#elif defined(Q_OS_MAC)
+    addAsset(QStringLiteral("Vectora-%1-macOS.dmg").arg(version));
+#else
+    addAsset(QStringLiteral("Vectora-%1-x86_64.AppImage").arg(version));
+    addAsset(QStringLiteral("Vectora-%1-amd64.deb").arg(version));
+#endif
+    deliver(info);
+}
+
+void UpdateChecker::deliver(const UpdateInfo &info)
+{
+    setBusy(false);
+    m_fallbackStage = 0;
     const QString current = QCoreApplication::applicationVersion();
     if (compareVersions(info.version, current) > 0)
         emit updateAvailable(info);

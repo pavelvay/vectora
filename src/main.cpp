@@ -27,7 +27,7 @@ int main(int argc, char *argv[])
     app.setApplicationName(QStringLiteral("Vectora"));
     app.setApplicationDisplayName(QStringLiteral("Vectora"));
     app.setOrganizationName(QStringLiteral("Vectora"));
-    app.setApplicationVersion(QStringLiteral("0.2.2"));
+    app.setApplicationVersion(QStringLiteral("0.2.3"));
     app.setDesktopFileName(QStringLiteral("vectora"));
     app.setWindowIcon(Icons::appIcon());
 
@@ -58,7 +58,7 @@ int main(int argc, char *argv[])
                              std::fflush(stdout);
                              std::_Exit(0);
                          });
-        QTimer::singleShot(9000, &app, []() {
+        QTimer::singleShot(25000, &app, []() {
             std::fprintf(stdout, "TIMEOUT\n");
             std::fflush(stdout);
             std::_Exit(0);
