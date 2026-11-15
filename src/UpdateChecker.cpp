@@ -20,6 +20,7 @@
 #include <QPushButton>
 #include <QStandardPaths>
 #include <QTextBrowser>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -33,6 +34,13 @@ QString releaseApiUrl()
     return QStringLiteral("https://api.github.com/repos/pavelvay/vectora/releases/latest");
 }
 
+QString updateUserAgent()
+{
+    return QStringLiteral("Mozilla/5.0 (compatible; Vectora/%1; "
+                          "+https://github.com/pavelvay/vectora)")
+        .arg(QCoreApplication::applicationVersion());
+}
+
 QString normalizedVersion(QString version)
 {
     version = version.trimmed();
@@ -44,6 +52,14 @@ QString normalizedVersion(QString version)
 bool isAppImage()
 {
     return !qEnvironmentVariable("APPIMAGE").isEmpty();
+}
+
+void armTimeout(QNetworkReply *reply, int milliseconds)
+{
+    QTimer::singleShot(milliseconds, reply, [reply]() {
+        if (reply->isRunning())
+            reply->abort();
+    });
 }
 
 } // namespace
@@ -107,15 +123,16 @@ void UpdateChecker::check(bool interactive)
         return;
     m_interactive = interactive;
     m_fallbackStage = 0;
+    m_manifestIndex = 0;
     m_lastError.clear();
     setBusy(true);
 
     QNetworkRequest request{QUrl(releaseApiUrl())};
-    request.setHeader(QNetworkRequest::UserAgentHeader,
-                      QStringLiteral("Vectora/%1 (Qt)")
-                          .arg(QCoreApplication::applicationVersion()));
+    request.setHeader(QNetworkRequest::UserAgentHeader, updateUserAgent());
     request.setRawHeader("Accept", "application/vnd.github+json");
+    request.setRawHeader("X-GitHub-Api-Version", "2022-11-28");
     QNetworkReply *reply = m_network.get(request);
+    armTimeout(reply, 7000);
     connect(reply, &QNetworkReply::finished, this, &UpdateChecker::handleReply);
 }
 
@@ -132,11 +149,16 @@ void UpdateChecker::handleReply()
         // some networks. Fall back to the public releases page, which is served
         // without the API quota.
         m_lastError = reply->errorString();
-        if (status > 0)
+        if (status > 0) {
+            const QString body = QString::fromUtf8(reply->readAll()).simplified().left(160);
             m_lastError = QStringLiteral("GitHub ответил кодом %1: %2")
                               .arg(status)
                               .arg(m_lastError);
+            if (!body.isEmpty())
+                m_lastError += QStringLiteral(" (%1)").arg(body);
+        }
         m_fallbackStage = 1;
+        m_manifestIndex = 0;
         requestManifest();
         return;
     }
@@ -146,6 +168,7 @@ void UpdateChecker::handleReply()
     if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
         m_lastError = QStringLiteral("Не удалось прочитать ответ GitHub.");
         m_fallbackStage = 1;
+        m_manifestIndex = 0;
         requestManifest();
         return;
     }
@@ -168,6 +191,7 @@ void UpdateChecker::handleReply()
     if (info.version.isEmpty()) {
         m_lastError = QStringLiteral("В релизе нет номера версии.");
         m_fallbackStage = 1;
+        m_manifestIndex = 0;
         requestManifest();
         return;
     }
@@ -176,18 +200,26 @@ void UpdateChecker::handleReply()
 
 void UpdateChecker::requestManifest()
 {
-    QString url = qEnvironmentVariable("VECTORA_UPDATE_MANIFEST");
-    if (url.isEmpty()) {
-        url = QStringLiteral(
-            "https://raw.githubusercontent.com/pavelvay/vectora/master/version.json");
+    QStringList sources;
+    const QString override = qEnvironmentVariable("VECTORA_UPDATE_MANIFEST");
+    if (!override.isEmpty()) {
+        sources.append(override);
+    } else {
+        sources.append(QStringLiteral(
+            "https://raw.githubusercontent.com/pavelvay/vectora/master/version.json"));
+        sources.append(QStringLiteral(
+            "https://cdn.jsdelivr.net/gh/pavelvay/vectora@master/version.json"));
     }
-    QNetworkRequest request{QUrl(url)};
-    request.setHeader(QNetworkRequest::UserAgentHeader,
-                      QStringLiteral("Vectora/%1 (Qt)")
-                          .arg(QCoreApplication::applicationVersion()));
+    if (m_manifestIndex >= sources.size()) {
+        requestLatestRelease();
+        return;
+    }
+    QNetworkRequest request{QUrl(sources.at(m_manifestIndex))};
+    request.setHeader(QNetworkRequest::UserAgentHeader, updateUserAgent());
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply *reply = m_network.get(request);
+    armTimeout(reply, 6000);
     connect(reply, &QNetworkReply::finished, this, &UpdateChecker::handleManifestReply);
 }
 
@@ -200,13 +232,15 @@ void UpdateChecker::handleManifestReply()
 
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     if (reply->error() != QNetworkReply::NoError || (status != 200 && status != 0)) {
-        requestLatestRelease();
+        ++m_manifestIndex;
+        requestManifest();
         return;
     }
     QJsonParseError parseError;
     const QJsonDocument document = QJsonDocument::fromJson(reply->readAll(), &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
-        requestLatestRelease();
+        ++m_manifestIndex;
+        requestManifest();
         return;
     }
     const QJsonObject manifest = document.object();
@@ -226,7 +260,8 @@ void UpdateChecker::handleManifestReply()
             info.assets.append(asset);
     }
     if (info.version.isEmpty()) {
-        requestLatestRelease();
+        ++m_manifestIndex;
+        requestManifest();
         return;
     }
     deliver(info);
@@ -238,12 +273,11 @@ void UpdateChecker::requestLatestRelease()
     // like api.github.com, so the check still works after API 403/429.
     QNetworkRequest request(QUrl(QStringLiteral(
         "https://github.com/pavelvay/vectora/releases/latest")));
-    request.setHeader(QNetworkRequest::UserAgentHeader,
-                      QStringLiteral("Vectora/%1 (Qt)")
-                          .arg(QCoreApplication::applicationVersion()));
+    request.setHeader(QNetworkRequest::UserAgentHeader, updateUserAgent());
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply *reply = m_network.get(request);
+    armTimeout(reply, 7000);
     connect(reply, &QNetworkReply::finished, this, &UpdateChecker::handleFallbackReply);
 }
 
@@ -414,9 +448,7 @@ void UpdateDialog::startDownload()
     m_status->setText(QStringLiteral("Загрузка %1…").arg(asset.name));
 
     QNetworkRequest request(asset.url);
-    request.setHeader(QNetworkRequest::UserAgentHeader,
-                      QStringLiteral("Vectora/%1 (Qt)")
-                          .arg(QCoreApplication::applicationVersion()));
+    request.setHeader(QNetworkRequest::UserAgentHeader, updateUserAgent());
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply *reply = m_network.get(request);

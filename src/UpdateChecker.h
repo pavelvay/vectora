@@ -58,6 +58,7 @@ private:
     bool m_interactive = false;
     bool m_busy = false;
     int m_fallbackStage = 0;
+    int m_manifestIndex = 0;
     QString m_lastError;
 };
 

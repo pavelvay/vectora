@@ -1,23 +1,23 @@
 {
-  "version": "0.2.3",
-  "notes": "Исправлена проверка обновлений: при недоступности GitHub API используется резервный манифест и страница релизов. Докер «Библиотека» показывается только в редакторе.",
-  "page": "https://github.com/pavelvay/vectora/releases/tag/v0.2.3",
+  "version": "0.2.4",
+  "notes": "Проверка обновлений стала устойчивее: GitHub API, затем резервные манифесты raw/jsDelivr и страница релизов, с таймаутами и понятными ошибками. Докер «Библиотека» показывается только в редакторе.",
+  "page": "https://github.com/pavelvay/vectora/releases/tag/v0.2.4",
   "assets": [
     {
-      "name": "Vectora-0.2.3-x86_64.AppImage",
-      "url": "https://github.com/pavelvay/vectora/releases/download/v0.2.3/Vectora-0.2.3-x86_64.AppImage"
+      "name": "Vectora-0.2.4-x86_64.AppImage",
+      "url": "https://github.com/pavelvay/vectora/releases/download/v0.2.4/Vectora-0.2.4-x86_64.AppImage"
     },
     {
-      "name": "Vectora-0.2.3-amd64.deb",
-      "url": "https://github.com/pavelvay/vectora/releases/download/v0.2.3/Vectora-0.2.3-amd64.deb"
+      "name": "Vectora-0.2.4-amd64.deb",
+      "url": "https://github.com/pavelvay/vectora/releases/download/v0.2.4/Vectora-0.2.4-amd64.deb"
     },
     {
-      "name": "Vectora-0.2.3-Setup.exe",
-      "url": "https://github.com/pavelvay/vectora/releases/download/v0.2.3/Vectora-0.2.3-Setup.exe"
+      "name": "Vectora-0.2.4-Setup.exe",
+      "url": "https://github.com/pavelvay/vectora/releases/download/v0.2.4/Vectora-0.2.4-Setup.exe"
     },
     {
-      "name": "Vectora-0.2.3-macOS.dmg",
-      "url": "https://github.com/pavelvay/vectora/releases/download/v0.2.3/Vectora-0.2.3-macOS.dmg"
+      "name": "Vectora-0.2.4-macOS.dmg",
+      "url": "https://github.com/pavelvay/vectora/releases/download/v0.2.4/Vectora-0.2.4-macOS.dmg"
     }
   ]
 }

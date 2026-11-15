@@ -1,7 +1,7 @@
 !include "MUI2.nsh"
 
 !ifndef VERSION
-!define VERSION "0.2.3"
+!define VERSION "0.2.4"
 !endif
 !ifndef DIST
 !define DIST "dist"
