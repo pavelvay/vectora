@@ -2,5 +2,7 @@
   <qresource prefix="/icons">
     <file alias="vectora.svg">vectora.svg</file>
     <file alias="vectora.png">vectora.png</file>
+    <file alias="arrow-up.svg">arrow-up.svg</file>
+    <file alias="arrow-down.svg">arrow-down.svg</file>
   </qresource>
 </RCC>

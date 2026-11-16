@@ -6,6 +6,8 @@
 #include "Tools.h"
 
 class QButtonGroup;
+class QMenu;
+class QToolButton;
 class FillStrokeIndicator;
 
 class ToolPalette : public QWidget
@@ -29,7 +31,12 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    void setShapeTool(Tool tool);
+
     QButtonGroup *m_group = nullptr;
+    QToolButton *m_shapeButton = nullptr;
+    QMenu *m_shapeMenu = nullptr;
+    Tool m_shapeTool = Tool::Rectangle;
     FillStrokeIndicator *m_indicator = nullptr;
     QColor m_fillColor = QColor("#4f7cc0");
     QColor m_strokeColor = QColor("#d7dbe2");

@@ -10,6 +10,9 @@
 class VectorItem;
 class QTextEdit;
 class QShortcut;
+class QGraphicsPathItem;
+class QMimeData;
+class QDropEvent;
 
 class CanvasView : public QGraphicsView
 {
@@ -351,6 +354,11 @@ private:
 
     void updateBlendsFor(VectorItem *item);
     void updateDimensionsFor(VectorItem *item);
+    int insertImportedObjects(const QVector<VectorObject> &objects,
+                              const QPointF &centre);
+    void prepareAssetDrag(const QMimeData *mime, const QPointF &scenePos);
+    void clearAssetDrag();
+    void handleDrop(QDropEvent *event);
     bool resolveDimension(VectorObject &object) const;
     void dimensionPress(const QPointF &scenePos);
     void drawDimensionPreview(QPainter *painter);
@@ -367,6 +375,7 @@ protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dragMoveEvent(QDragMoveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
+    bool viewportEvent(QEvent *event) override;
 
 private:
 
@@ -489,6 +498,10 @@ private:
     qreal m_dimensionOffset = 24.0;
     bool m_dimensionAssociative = true;
     bool m_updatingDimensions = false;
+
+    QGraphicsPathItem *m_assetGhost = nullptr;
+    QVector<VectorObject> m_dragObjects;
+    QRectF m_dragBounds;
     QVector<QPainterPath> regionize(const QVector<QPainterPath> &sources) const;
     bool shapeBuilderPress(const QPointF &scenePos);
     void shapeBuilderMove(const QPointF &scenePos);

@@ -8,6 +8,10 @@
 #include <QDockWidget>
 #include <QContextMenuEvent>
 #include <QDoubleSpinBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QMenu>
 #include <QKeyEvent>
 #include <QSlider>
 #include <QToolButton>
@@ -28,6 +32,7 @@
 #include "DocumentDialogs.h"
 #include "DocumentTools.h"
 #include "TemplateStore.h"
+#include "ToolPalette.h"
 #include "UpdateChecker.h"
 #include "CanvasView.h"
 #include "ColorPalette.h"
@@ -885,6 +890,20 @@ int SelfTest::run(const QString &directory)
               QStringLiteral("library asset inserted on canvas"));
         check(symbolView.vectorItems().size() == beforeAssets + 1,
               QStringLiteral("inserted asset adds an object"));
+
+        QMimeData dragMime;
+        dragMime.setData(QStringLiteral("application/x-vectora-asset"), svg.toUtf8());
+        const QPoint dropPos = symbolView.mapFromScene(QPointF(350, 350));
+        QDragEnterEvent dragEnter(dropPos, Qt::CopyAction, &dragMime,
+                                  Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(symbolView.viewport(), &dragEnter);
+        QDropEvent dropEvent(QPointF(dropPos), Qt::CopyAction, &dragMime,
+                             Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(symbolView.viewport(), &dropEvent);
+        check(symbolView.vectorItems().size() == beforeAssets + 2,
+              QStringLiteral("library asset dropped with the mouse"));
+        check(dropEvent.isAccepted(),
+              QStringLiteral("canvas accepts the library drop"));
 
         symbolView.scene()->clearSelection();
         symbolView.vectorItems().last()->setSelected(true);
@@ -1903,6 +1922,51 @@ int SelfTest::run(const QString &directory)
         ResourceSearchDialog searchDialog(&searchView);
         check(searchDialog.windowTitle().contains(QStringLiteral("Поиск")),
               QStringLiteral("resource search dialog opens"));
+    }
+
+    // --- Zoom, compact tools and page fields --------------------------------
+    out << "\nUI interactions\n";
+    {
+        CanvasView zoomView;
+        zoomView.resize(900, 700);
+        zoomView.setPageSize(QSizeF(500, 500));
+        zoomView.show();
+        QApplication::processEvents();
+        const QPoint anchor(450, 350);
+        const QPointF before = zoomView.mapToScene(anchor);
+        zoomView.zoomAt(2.0, anchor);
+        const QPointF after = zoomView.mapToScene(anchor);
+        check(QLineF(before, after).length() < 1.5,
+              QStringLiteral("Ctrl+wheel zoom keeps the point under the cursor"));
+        zoomView.zoomAt(1.0, anchor);
+        const QPointF restored = zoomView.mapToScene(anchor);
+        check(QLineF(before, restored).length() < 2.0,
+              QStringLiteral("zoom out also stays under the cursor"));
+
+        ToolPalette palette;
+        QToolButton *shapeButton = nullptr;
+        for (QToolButton *button : palette.findChildren<QToolButton *>()) {
+            if (button->menu() && button->menu()->actions().size() >= 5)
+                shapeButton = button;
+        }
+        check(shapeButton != nullptr,
+              QStringLiteral("shape tools share one button with a menu"));
+        if (shapeButton) {
+            check(shapeButton->popupMode() == QToolButton::MenuButtonPopup,
+                  QStringLiteral("shape menu opens from the button arrow"));
+            palette.setCurrentTool(Tool::Star);
+            check(shapeButton->property("toolId").toInt() == int(Tool::Star),
+                  QStringLiteral("shape button reflects the current shape"));
+        }
+
+        PageDialog pageDialog;
+        bool enabledSpins = true;
+        for (QDoubleSpinBox *spin : pageDialog.findChildren<QDoubleSpinBox *>()) {
+            if (!spin->isEnabled())
+                enabledSpins = false;
+        }
+        check(enabledSpins,
+              QStringLiteral("page size spin boxes are adjustable with arrows"));
     }
 
     // --- MainWindow history (undo / redo) -----------------------------------

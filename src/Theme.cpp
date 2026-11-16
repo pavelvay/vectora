@@ -135,6 +135,36 @@ QComboBox:hover, QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover {
 QComboBox:focus, QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
     border-color: #4f7cc0;
 }
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 17px;
+    border-left: 1px solid #34383f;
+    border-top-right-radius: 5px;
+    background: #202329;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 17px;
+    border-left: 1px solid #34383f;
+    border-bottom-right-radius: 5px;
+    background: #202329;
+}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+    background: #2b2f36;
+}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url(:/icons/arrow-up.svg);
+    width: 8px;
+    height: 5px;
+}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url(:/icons/arrow-down.svg);
+    width: 8px;
+    height: 5px;
+}
 QComboBox::drop-down { border: none; width: 18px; }
 QComboBox::down-arrow {
     image: none;

@@ -9,6 +9,7 @@
 
 #include "CodeGenerator.h"
 #include "DocumentDialogs.h"
+#include "PageDialog.h"
 #include "UpdateChecker.h"
 #include "Effects.h"
 #include "PatternStore.h"
@@ -27,7 +28,7 @@ int main(int argc, char *argv[])
     app.setApplicationName(QStringLiteral("Vectora"));
     app.setApplicationDisplayName(QStringLiteral("Vectora"));
     app.setOrganizationName(QStringLiteral("Vectora"));
-    app.setApplicationVersion(QStringLiteral("0.2.4"));
+    app.setApplicationVersion(QStringLiteral("0.2.5"));
     app.setDesktopFileName(QStringLiteral("vectora"));
     app.setWindowIcon(Icons::appIcon());
 
@@ -84,6 +85,16 @@ int main(int argc, char *argv[])
         dialog->show();
         QTimer::singleShot(800, dialog, [dialog]() {
             dialog->grab().save(QStringLiteral("/tmp/opencode/update-demo.png"));
+            std::_Exit(0);
+        });
+        return app.exec();
+    }
+
+    if (args.contains(QStringLiteral("--page-dialog-demo"))) {
+        auto *dialog = new PageDialog();
+        dialog->show();
+        QTimer::singleShot(700, dialog, [dialog]() {
+            dialog->grab().save(QStringLiteral("/tmp/opencode/page-dialog-demo.png"));
             std::_Exit(0);
         });
         return app.exec();

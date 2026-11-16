@@ -5187,7 +5187,7 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("О программе"),
         QStringLiteral(
-            "<h3>Vectora 0.2.4</h3>"
+            "<h3>Vectora 0.2.5</h3>"
             "<p>Кроссплатформенный векторный редактор на C++ и Qt 6.</p>"
             "<p>Логические операции, нож, ластик, Shape Builder, контур и "
             "конверт; градиенты всех типов, цветовые пространства и палитры; "

@@ -40,6 +40,8 @@ public:
         : QListWidget(parent)
     {
         setDragEnabled(true);
+        setDragDropMode(QAbstractItemView::DragOnly);
+        setDefaultDropAction(Qt::CopyAction);
     }
 
 protected:

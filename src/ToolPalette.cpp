@@ -2,6 +2,7 @@
 
 #include <QButtonGroup>
 #include <QFrame>
+#include <QMenu>
 #include <QEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -85,6 +86,7 @@ ToolPalette::ToolPalette(QWidget *parent)
 
     ToolGroup previous = ToolGroup::Pick;
     bool first = true;
+    bool shapeCreated = false;
 
     for (const ToolInfo &info : toolInfos()) {
         if (!first && info.group != previous) {
@@ -98,6 +100,52 @@ ToolPalette::ToolPalette(QWidget *parent)
         }
         previous = info.group;
         first = false;
+
+        if (info.group == ToolGroup::Shape) {
+            if (shapeCreated)
+                continue;
+            // Shape tools share one compact button. Left click uses the current
+            // shape, the arrow or right click opens a small compact menu.
+            m_shapeTool = Tool::Rectangle;
+            m_shapeButton = new QToolButton(this);
+            m_shapeButton->setIcon(Icons::icon(QStringLiteral("rect")));
+            m_shapeButton->setIconSize(QSize(20, 20));
+            m_shapeButton->setFixedSize(38, 32);
+            m_shapeButton->setCheckable(true);
+            m_shapeButton->setAutoRaise(true);
+            m_shapeButton->setToolTip(QStringLiteral(
+                "Фигуры (R, E, P, Shift+P, Shift+S, L)\n"
+                "ЛКМ — текущая фигура, ПКМ или стрелка — выбор фигуры"));
+            m_shapeButton->setProperty("toolId", int(Tool::Rectangle));
+
+            m_shapeMenu = new QMenu(m_shapeButton);
+            for (const ToolInfo &shape : toolInfos()) {
+                if (shape.group != ToolGroup::Shape)
+                    continue;
+                QAction *action = m_shapeMenu->addAction(
+                    Icons::icon(shape.id),
+                    QStringLiteral("%1  ·  %2").arg(shape.name, shape.shortcut));
+                action->setData(int(shape.tool));
+                action->setToolTip(shape.hint);
+                connect(action, &QAction::triggered, this, [this, tool = shape.tool]() {
+                    setShapeTool(tool);
+                });
+            }
+            m_shapeButton->setMenu(m_shapeMenu);
+            m_shapeButton->setPopupMode(QToolButton::MenuButtonPopup);
+            m_shapeButton->setContextMenuPolicy(Qt::CustomContextMenu);
+            connect(m_shapeButton, &QWidget::customContextMenuRequested, this,
+                    [this](const QPoint &pos) {
+                        if (m_shapeMenu)
+                            m_shapeMenu->exec(m_shapeButton->mapToGlobal(pos));
+                    });
+            m_shapeButton->installEventFilter(this);
+
+            m_group->addButton(m_shapeButton, int(Tool::Rectangle));
+            layout->addWidget(m_shapeButton, 0, Qt::AlignHCenter);
+            shapeCreated = true;
+            continue;
+        }
 
         auto *button = new QToolButton(this);
         button->setIcon(Icons::icon(info.id));
@@ -131,8 +179,38 @@ ToolPalette::ToolPalette(QWidget *parent)
 
 void ToolPalette::setCurrentTool(Tool tool)
 {
+    const ToolInfo *info = toolInfo(tool);
+    if (info && info->group == ToolGroup::Shape && m_shapeButton) {
+        m_shapeTool = tool;
+        m_shapeButton->setProperty("toolId", int(tool));
+        m_shapeButton->setIcon(Icons::icon(info->id));
+        m_shapeButton->setToolTip(QStringLiteral(
+            "Фигуры — текущая: %1 (%2)\nЛКМ — рисовать, ПКМ — выбрать фигуру")
+                                      .arg(info->name, info->shortcut));
+        m_group->setId(m_shapeButton, int(tool));
+        m_shapeButton->setChecked(true);
+        return;
+    }
     if (auto *button = m_group->button(int(tool)))
         button->setChecked(true);
+}
+
+void ToolPalette::setShapeTool(Tool tool)
+{
+    if (!m_shapeButton)
+        return;
+    const ToolInfo *info = toolInfo(tool);
+    if (!info)
+        return;
+    m_shapeTool = tool;
+    m_shapeButton->setProperty("toolId", int(tool));
+    m_shapeButton->setIcon(Icons::icon(info->id));
+    m_shapeButton->setToolTip(QStringLiteral(
+        "Фигуры — текущая: %1 (%2)\nЛКМ — рисовать, ПКМ — выбрать фигуру")
+                                  .arg(info->name, info->shortcut));
+    m_group->setId(m_shapeButton, int(tool));
+    m_shapeButton->setChecked(true);
+    emit toolSelected(tool);
 }
 
 bool ToolPalette::eventFilter(QObject *watched, QEvent *event)

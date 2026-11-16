@@ -132,10 +132,10 @@ PageDialog::PageDialog(QWidget *parent)
             [this](const QString &) { changeUnit(); });
     connect(m_orientation, &QComboBox::currentIndexChanged, this,
             [this](int) { changeOrientation(); });
-    connect(m_width, &QDoubleSpinBox::editingFinished, this,
-            [this]() { clampCustom(); });
-    connect(m_height, &QDoubleSpinBox::editingFinished, this,
-            [this]() { clampCustom(); });
+    connect(m_width, &QDoubleSpinBox::valueChanged, this,
+            [this](double) { clampCustom(); });
+    connect(m_height, &QDoubleSpinBox::valueChanged, this,
+            [this](double) { clampCustom(); });
     connect(m_backgroundButton, &QPushButton::clicked, this, [this]() {
         const QColor picked = QColorDialog::getColor(
             m_background, this, QStringLiteral("Цвет фона страницы"));
@@ -184,8 +184,8 @@ void PageDialog::setPageInfo(const PageInfo &info)
         const QSignalBlocker blocker(m_preset);
         m_preset->setCurrentIndex(preset);
     }
-    m_width->setEnabled(preset == kCustomPreset);
-    m_height->setEnabled(preset == kCustomPreset);
+    m_width->setEnabled(true);
+    m_height->setEnabled(true);
     m_updating = false;
 }
 
@@ -237,8 +237,8 @@ void PageDialog::applyPreset()
     m_height->setSuffix(QStringLiteral(" ") + unit);
     m_margin->setSuffix(QStringLiteral(" ") + unit);
     m_bleed->setSuffix(QStringLiteral(" ") + unit);
-    m_width->setEnabled(preset == kCustomPreset);
-    m_height->setEnabled(preset == kCustomPreset);
+    m_width->setEnabled(true);
+    m_height->setEnabled(true);
     m_lastUnit = unit;
     m_updating = false;
 }

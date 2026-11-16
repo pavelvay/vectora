@@ -8,6 +8,7 @@
 #include <QMimeData>
 #include <QUrl>
 #include <QContextMenuEvent>
+#include <QGraphicsPathItem>
 #include <QGraphicsScene>
 #include <QGuiApplication>
 #include <QInputDialog>
@@ -19,6 +20,7 @@
 #include <QShortcut>
 #include <QTextCursor>
 #include <QTextEdit>
+#include <QGraphicsPathItem>
 #include <QGraphicsScene>
 #include <QWheelEvent>
 #include <QtMath>
@@ -222,10 +224,13 @@ void CanvasView::zoomAt(qreal zoom, const QPoint &viewportPos)
     const QPointF after = mapToScene(viewportPos);
     const QPointF delta = after - before;
 
+    // Move the scrollbars so the scene point under the cursor stays in place.
+    // The sign is opposite to the raw scene delta; this is what makes Ctrl+wheel
+    // zoom towards the mouse instead of away from it.
     horizontalScrollBar()->setValue(horizontalScrollBar()->value()
-                                    + qRound(delta.x() * m_zoom));
+                                    - qRound(delta.x() * m_zoom));
     verticalScrollBar()->setValue(verticalScrollBar()->value()
-                                  + qRound(delta.y() * m_zoom));
+                                  - qRound(delta.y() * m_zoom));
 
     emit zoomChanged(m_zoom);
     viewport()->update();
@@ -6257,9 +6262,16 @@ int CanvasView::insertSvgAsset(const QString &svg, const QPointF &centre)
                             : QStringLiteral("Не удалось вставить ресурс: %1").arg(error));
         return 0;
     }
+    return insertImportedObjects(imported.objects, centre);
+}
 
+int CanvasView::insertImportedObjects(const QVector<VectorObject> &objects,
+                                      const QPointF &centre)
+{
+    if (objects.isEmpty())
+        return 0;
     QRectF box;
-    for (const VectorObject &object : imported.objects) {
+    for (const VectorObject &object : objects) {
         const QRectF current = object.localBounds().translated(object.pos);
         box = box.isNull() ? current : box.united(current);
     }
@@ -6270,7 +6282,7 @@ int CanvasView::insertSvgAsset(const QString &svg, const QPointF &centre)
     emit beginEdit();
     scene()->clearSelection();
     int added = 0;
-    for (VectorObject object : imported.objects) {
+    for (VectorObject object : objects) {
         object.pos += offset;
         object.page = m_currentPage;
         object.layer = m_activeLayer;
@@ -6314,13 +6326,132 @@ void CanvasView::dragMoveEvent(QDragMoveEvent *event)
 
 void CanvasView::dropEvent(QDropEvent *event)
 {
+    handleDrop(event);
+}
+
+bool CanvasView::viewportEvent(QEvent *event)
+{
+    switch (event->type()) {
+    case QEvent::DragEnter: {
+        auto *drag = static_cast<QDragEnterEvent *>(event);
+        if (drag->mimeData()->hasFormat(
+                QStringLiteral("application/x-vectora-asset"))) {
+            prepareAssetDrag(drag->mimeData(),
+                             mapToScene(drag->position().toPoint()));
+            drag->acceptProposedAction();
+            return true;
+        }
+        if (drag->mimeData()->hasUrls()) {
+            drag->acceptProposedAction();
+            return true;
+        }
+        break;
+    }
+    case QEvent::DragMove: {
+        auto *drag = static_cast<QDragMoveEvent *>(event);
+        if (drag->mimeData()->hasFormat(
+                QStringLiteral("application/x-vectora-asset"))) {
+            if (m_assetGhost)
+                m_assetGhost->setPos(mapToScene(drag->position().toPoint())
+                                     - m_dragBounds.center());
+            drag->acceptProposedAction();
+            return true;
+        }
+        if (drag->mimeData()->hasUrls()) {
+            drag->acceptProposedAction();
+            return true;
+        }
+        break;
+    }
+    case QEvent::DragLeave:
+        clearAssetDrag();
+        return true;
+    case QEvent::Drop:
+        handleDrop(static_cast<QDropEvent *>(event));
+        return true;
+    default:
+        break;
+    }
+    return QGraphicsView::viewportEvent(event);
+}
+
+void CanvasView::prepareAssetDrag(const QMimeData *mime, const QPointF &scenePos)
+{
+    clearAssetDrag();
+    if (!mime->hasFormat(QStringLiteral("application/x-vectora-asset")))
+        return;
+    Document imported;
+    QString error;
+    if (!importSvgData(mime->data(QStringLiteral("application/x-vectora-asset")),
+                       &imported, &error)
+        || imported.objects.isEmpty())
+        return;
+
+    QRectF box;
+    for (const VectorObject &object : imported.objects) {
+        const QRectF current = object.localBounds().translated(object.pos);
+        box = box.isNull() ? current : box.united(current);
+    }
+    if (box.width() < 0.5 || box.height() < 0.5)
+        return;
+
+    QPainterPath preview;
+    for (const VectorObject &object : imported.objects) {
+        QPainterPath path = object.path;
+        if (path.isEmpty() && object.type == ShapeType::Text)
+            path = buildTextPath(object);
+        if (path.isEmpty() && object.type == ShapeType::Image)
+            path.addRect(object.textBox);
+        if (path.isEmpty())
+            continue;
+        QTransform transform;
+        transform.translate(object.pos.x() - box.left(),
+                            object.pos.y() - box.top());
+        preview.addPath(transform.map(path));
+    }
+    if (preview.isEmpty())
+        preview.addRect(QRectF(0, 0, box.width(), box.height()));
+
+    m_dragObjects = imported.objects;
+    m_dragBounds = box;
+    m_assetGhost = new QGraphicsPathItem(preview);
+    QPen pen(QColor(0x4f, 0x7c, 0xc0, 235), 1.2);
+    pen.setStyle(Qt::DashLine);
+    m_assetGhost->setPen(pen);
+    m_assetGhost->setBrush(QColor(0x4f, 0x7c, 0xc0, 55));
+    m_assetGhost->setZValue(1.0e6);
+    scene()->addItem(m_assetGhost);
+    m_assetGhost->setPos(scenePos - box.center());
+}
+
+void CanvasView::clearAssetDrag()
+{
+    if (m_assetGhost) {
+        scene()->removeItem(m_assetGhost);
+        delete m_assetGhost;
+        m_assetGhost = nullptr;
+    }
+    m_dragObjects.clear();
+    m_dragBounds = QRectF();
+}
+
+void CanvasView::handleDrop(QDropEvent *event)
+{
     const QPointF scenePos = mapToScene(event->position().toPoint());
 
     if (event->mimeData()->hasFormat(QStringLiteral("application/x-vectora-asset"))) {
-        const QString svg = QString::fromUtf8(
-            event->mimeData()->data(QStringLiteral("application/x-vectora-asset")));
-        if (insertSvgAsset(svg, scenePos) > 0)
-            event->acceptProposedAction();
+        if (!m_dragObjects.isEmpty()) {
+            const QVector<VectorObject> objects = m_dragObjects;
+            clearAssetDrag();
+            if (insertImportedObjects(objects, scenePos) > 0)
+                event->acceptProposedAction();
+        } else {
+            const QString svg = QString::fromUtf8(
+                event->mimeData()->data(QStringLiteral("application/x-vectora-asset")));
+            clearAssetDrag();
+            if (insertSvgAsset(svg, scenePos) > 0)
+                event->acceptProposedAction();
+        }
         return;
     }
 
@@ -6354,11 +6485,13 @@ void CanvasView::dropEvent(QDropEvent *event)
                 emit endEdit();
             }
         }
+        clearAssetDrag();
         if (inserted) {
             event->acceptProposedAction();
             return;
         }
     }
+    clearAssetDrag();
     QGraphicsView::dropEvent(event);
 }
 
