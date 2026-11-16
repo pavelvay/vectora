@@ -13,6 +13,8 @@
 #include <QMimeData>
 #include <QMenu>
 #include <QKeyEvent>
+#include <QListWidget>
+#include <QAbstractItemView>
 #include <QSlider>
 #include <QToolButton>
 #include <QTabWidget>
@@ -27,6 +29,7 @@
 #include <QWidget>
 
 #include "AssetLibrary.h"
+#include "AssetPanel.h"
 #include "CodeDialog.h"
 #include "CodeGenerator.h"
 #include "DocumentDialogs.h"
@@ -981,6 +984,21 @@ int SelfTest::run(const QString &directory)
               QStringLiteral("imported library added"));
         check(!AssetStore::renderPreview(asset.svg, QSize(32, 32)).isNull(),
               QStringLiteral("asset preview renders"));
+
+        AssetPanel assetPanel(nullptr);
+        QListWidget *draggableAssets = nullptr;
+        for (QListWidget *list : assetPanel.findChildren<QListWidget *>()) {
+            if (list->dragDropMode() == QAbstractItemView::DragOnly) {
+                draggableAssets = list;
+                break;
+            }
+        }
+        check(draggableAssets != nullptr && draggableAssets->dragEnabled(),
+              QStringLiteral("asset list is configured for dragging"));
+        if (draggableAssets && draggableAssets->count() > 0) {
+            check(draggableAssets->item(0)->flags() & Qt::ItemIsDragEnabled,
+                  QStringLiteral("asset items can start a drag"));
+        }
 
         QFile stored(store.storageFile());
         check(stored.open(QIODevice::ReadOnly)
@@ -1985,8 +2003,8 @@ int SelfTest::run(const QString &directory)
               QStringLiteral("library dock hidden on the welcome page"));
         window.openPath(dir.filePath(QStringLiteral("sample.vct")));
         QApplication::processEvents();
-        check(libraryDock != nullptr && libraryDock->isVisible(),
-              QStringLiteral("library dock appears in the editor"));
+        check(libraryDock != nullptr && !libraryDock->isVisible(),
+              QStringLiteral("library dock stays hidden until requested"));
 
         auto *canvas = window.findChild<CanvasView *>();
         check(canvas != nullptr, QStringLiteral("canvas found in main window"));

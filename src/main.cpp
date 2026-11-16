@@ -28,7 +28,7 @@ int main(int argc, char *argv[])
     app.setApplicationName(QStringLiteral("Vectora"));
     app.setApplicationDisplayName(QStringLiteral("Vectora"));
     app.setOrganizationName(QStringLiteral("Vectora"));
-    app.setApplicationVersion(QStringLiteral("0.2.5"));
+    app.setApplicationVersion(QStringLiteral("0.2.6"));
     app.setDesktopFileName(QStringLiteral("vectora"));
     app.setWindowIcon(Icons::appIcon());
 

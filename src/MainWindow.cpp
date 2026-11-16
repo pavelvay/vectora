@@ -3409,10 +3409,10 @@ void MainWindow::showEditor()
         for (QDockWidget *dock : m_dockPanels->docks())
             dock->show();
     }
-    if (m_assetDock) {
-        m_assetDock->show();
-        m_assetDock->raise();
-    }
+    // The library stays hidden until the user opens it from the menu or the
+    // Window menu; it is not needed just to start editing a file.
+    if (m_assetDock)
+        m_assetDock->hide();
     statusBar()->show();
 }
 
@@ -5187,7 +5187,7 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("О программе"),
         QStringLiteral(
-            "<h3>Vectora 0.2.5</h3>"
+            "<h3>Vectora 0.2.6</h3>"
             "<p>Кроссплатформенный векторный редактор на C++ и Qt 6.</p>"
             "<p>Логические операции, нож, ластик, Shape Builder, контур и "
             "конверт; градиенты всех типов, цветовые пространства и палитры; "

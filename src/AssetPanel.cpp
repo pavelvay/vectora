@@ -42,6 +42,7 @@ public:
         setDragEnabled(true);
         setDragDropMode(QAbstractItemView::DragOnly);
         setDefaultDropAction(Qt::CopyAction);
+
     }
 
 protected:
@@ -179,6 +180,11 @@ void AssetPanel::buildUi()
     m_assets->setUniformItemSizes(true);
     m_assets->setTextElideMode(Qt::ElideRight);
     m_assets->setContextMenuPolicy(Qt::CustomContextMenu);
+    // QListView's Static movement resets the drag mode, so enable dragging
+    // again after all view properties are applied.
+    m_assets->setDragEnabled(true);
+    m_assets->setDragDropMode(QAbstractItemView::DragOnly);
+    m_assets->setDefaultDropAction(Qt::CopyAction);
     assetsLayout->addWidget(m_assets, 1);
 
     auto *assetButtons = new QHBoxLayout;
@@ -339,6 +345,7 @@ void AssetPanel::buildUi()
     });
     connect(m_symbols, &QListWidget::customContextMenuRequested,
             this, &AssetPanel::showSymbolMenu);
+
     connect(tabs, &QTabWidget::currentChanged, this, [this](int index) {
         if (index == 1)
             refreshSymbols();
@@ -499,6 +506,8 @@ void AssetPanel::applyFilters()
         item->setIcon(m_iconCache.value(asset.id));
         item->setToolTip(QStringLiteral("%1\nКатегория: %2")
                              .arg(asset.name, asset.category));
+        item->setFlags(item->flags() | Qt::ItemIsDragEnabled
+                       | Qt::ItemIsSelectable | Qt::ItemIsEnabled);
         item->setData(AssetListWidget::kSvgRole, asset.svg);
         item->setData(AssetListWidget::kLibraryRole, library);
         item->setData(AssetListWidget::kIndexRole, i);
