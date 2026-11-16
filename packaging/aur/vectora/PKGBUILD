@@ -1,0 +1,24 @@
+# Maintainer: pavelvay
+pkgname=vectora
+pkgver=0.2.6
+pkgrel=1
+pkgdesc="Cross-platform vector graphics editor"
+arch=('x86_64')
+url="https://github.com/pavelvay/vectora"
+license=('custom')
+depends=('qt6-base' 'qt6-svg' 'hicolor-icon-theme')
+makedepends=('cmake')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/pavelvay/vectora/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('6f0c3f750c9736f8a5ebe9f54006eb349cea63243655f07eabcb50375bd21ab3')
+
+build() {
+    cd "$srcdir/$pkgname-$pkgver"
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr
+    cmake --build build
+}
+
+package() {
+    cd "$srcdir/$pkgname-$pkgver"
+    DESTDIR="$pkgdir" cmake --install build
+}

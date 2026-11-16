@@ -37,15 +37,31 @@
 Готовые сборки публикуются в GitHub Releases: Windows-установщик, Linux
 AppImage и `.deb`, macOS DMG.
 
-- **Windows**: скачайте `Vectora-0.1.11-Setup.exe` и запустите. Сборка не
+- **Windows**: скачайте `Vectora-0.2.6-Setup.exe` и запустите. Сборка не
   подписана, поэтому SmartScreen может показать предупреждение:
   «Подробнее» → «Выполнить в любом случае».
-- **Linux AppImage**: `chmod +x Vectora-0.1.11-x86_64.AppImage` и запустите.
-  Если нет FUSE: `./Vectora-0.1.11-x86_64.AppImage --appimage-extract-and-run`.
+- **Linux AppImage**: `chmod +x Vectora-0.2.6-x86_64.AppImage` и запустите.
+  Если нет FUSE: `./Vectora-0.2.6-x86_64.AppImage --appimage-extract-and-run`.
   AppImage использует X11/XWayland; при необходимости задайте
   `QT_QPA_PLATFORM=xcb`.
-- **Debian/Ubuntu**: `sudo apt install ./Vectora-0.1.11-amd64.deb`.
-- **Arch/CachyOS**: `packaging/PKGBUILD` — `makepkg -si`.
+- **Debian/Ubuntu**: `sudo apt install ./Vectora-0.2.6-amd64.deb`.
+- **Arch/CachyOS**: подключите репозиторий и установите пакет:
+
+  ```bash
+  printf '\n[vectora]\nSigLevel = Optional TrustAll\nServer = https://raw.githubusercontent.com/pavelvay/vectora/pacman-repo/x86_64\n' | sudo tee -a /etc/pacman.conf
+  sudo pacman -Sy
+  sudo pacman -S vectora
+  ```
+
+  Или одной командой без изменения `pacman.conf`:
+
+  ```bash
+  yay -U https://raw.githubusercontent.com/pavelvay/vectora/pacman-repo/x86_64/vectora-0.2.6-1-x86_64.pkg.tar.zst
+  ```
+
+  Файлы AUR (`packaging/aur/vectora/PKGBUILD` и `.SRCINFO`) готовы для
+  публикации в AUR; сам пакет пока распространяется через репозиторий
+  `pacman-repo`.
 - **macOS (Apple Silicon)**: откройте DMG и перетащите Vectora в Applications.
   Сборка не подписана: правый клик → «Открыть» или
   `xattr -dr com.apple.quarantine /Applications/Vectora.app`.
