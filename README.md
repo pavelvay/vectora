@@ -17,5 +17,5 @@ sudo pacman -Sy vectora
 Or install the package directly:
 
 ```
-sudo pacman -U https://raw.githubusercontent.com/pavelvay/vectora/pacman-repo/x86_64/vectora-0.2.6-1-x86_64.pkg.tar.zst
+sudo pacman -U https://raw.githubusercontent.com/pavelvay/vectora/pacman-repo/x86_64/vectora-0.3.0-1-x86_64.pkg.tar.zst
 ```
