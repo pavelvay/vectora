@@ -229,6 +229,8 @@ public:
     void applyTextOnPath();
     void applyTextInShape();
     void detachTextSpecial();
+    void setTextPathOffset(qreal offset);
+    void setTextPathReverse(bool reverse);
     void applyContour(int steps, qreal distance, int direction,
                       const QColor &color, bool filled);
     void resetEnvelope();
@@ -498,6 +500,7 @@ private:
     qreal m_dimensionOffset = 24.0;
     bool m_dimensionAssociative = true;
     bool m_updatingDimensions = false;
+    bool m_bulkLoading = false;
 
     QGraphicsPathItem *m_assetGhost = nullptr;
     QVector<VectorObject> m_dragObjects;

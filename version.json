@@ -1,23 +1,23 @@
 {
-  "version": "0.2.6",
-  "notes": "Исправлено перетаскивание ресурсов из библиотеки на холст, вкладка «Библиотека» больше не открывается при старте, добавлен пакет Arch Linux для pacman/yay.",
-  "page": "https://github.com/pavelvay/vectora/releases/tag/v0.2.6",
+  "version": "0.3.0",
+  "notes": "Текст по кривой с управлением сдвигом и направлением, картинка в центре QR-кода, ускорена работа со сложными документами и уменьшены маркеры выделения.",
+  "page": "https://github.com/pavelvay/vectora/releases/tag/v0.3.0",
   "assets": [
     {
-      "name": "Vectora-0.2.6-x86_64.AppImage",
-      "url": "https://github.com/pavelvay/vectora/releases/download/v0.2.6/Vectora-0.2.6-x86_64.AppImage"
+      "name": "Vectora-0.3.0-x86_64.AppImage",
+      "url": "https://github.com/pavelvay/vectora/releases/download/v0.3.0/Vectora-0.3.0-x86_64.AppImage"
     },
     {
-      "name": "Vectora-0.2.6-amd64.deb",
-      "url": "https://github.com/pavelvay/vectora/releases/download/v0.2.6/Vectora-0.2.6-amd64.deb"
+      "name": "Vectora-0.3.0-amd64.deb",
+      "url": "https://github.com/pavelvay/vectora/releases/download/v0.3.0/Vectora-0.3.0-amd64.deb"
     },
     {
-      "name": "Vectora-0.2.6-Setup.exe",
-      "url": "https://github.com/pavelvay/vectora/releases/download/v0.2.6/Vectora-0.2.6-Setup.exe"
+      "name": "Vectora-0.3.0-Setup.exe",
+      "url": "https://github.com/pavelvay/vectora/releases/download/v0.3.0/Vectora-0.3.0-Setup.exe"
     },
     {
-      "name": "Vectora-0.2.6-macOS.dmg",
-      "url": "https://github.com/pavelvay/vectora/releases/download/v0.2.6/Vectora-0.2.6-macOS.dmg"
+      "name": "Vectora-0.3.0-macOS.dmg",
+      "url": "https://github.com/pavelvay/vectora/releases/download/v0.3.0/Vectora-0.3.0-macOS.dmg"
     }
   ]
 }

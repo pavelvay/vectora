@@ -150,9 +150,14 @@ private:
     QToolButton *m_underlineButton = nullptr;
     QToolButton *m_alignButtons[3] = {nullptr, nullptr, nullptr};
     int m_textAlign = 0;
+    QToolButton *m_textPathAttach = nullptr;
+    QToolButton *m_textPathDetach = nullptr;
+    QDoubleSpinBox *m_textPathOffset = nullptr;
+    QCheckBox *m_textPathReverse = nullptr;
 
     bool m_updating = false;
     QTimer *m_colorTimer = nullptr;
+    bool m_refreshScheduled = false;
     bool m_colorEditActive = false;
     QTimer *m_opacityTimer = nullptr;
     bool m_opacityEditActive = false;

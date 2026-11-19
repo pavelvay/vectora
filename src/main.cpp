@@ -2,13 +2,19 @@
 
 #include <cstdio>
 #include <QDockWidget>
+#include <QFileInfo>
+#include <QImage>
+#include <QPainter>
+#include <QSaveFile>
 #include <QTabWidget>
 #include <QTimer>
 
 #include <cstdlib>
 
 #include "CodeGenerator.h"
+#include "Document.h"
 #include "DocumentDialogs.h"
+#include "FormatIO.h"
 #include "PageDialog.h"
 #include "UpdateChecker.h"
 #include "Effects.h"
@@ -28,13 +34,58 @@ int main(int argc, char *argv[])
     app.setApplicationName(QStringLiteral("Vectora"));
     app.setApplicationDisplayName(QStringLiteral("Vectora"));
     app.setOrganizationName(QStringLiteral("Vectora"));
-    app.setApplicationVersion(QStringLiteral("0.2.6"));
+    app.setApplicationVersion(QStringLiteral("0.3.0"));
     app.setDesktopFileName(QStringLiteral("vectora"));
     app.setWindowIcon(Icons::appIcon());
 
     Theme::apply(app);
 
     const QStringList args = app.arguments();
+
+    const int convertIndex = args.indexOf(QStringLiteral("--convert"));
+    if (convertIndex >= 0 && convertIndex + 2 < args.size()) {
+        const QString source = args.at(convertIndex + 1);
+        const QString target = args.at(convertIndex + 2);
+        Document document;
+        QString error;
+        if (!VectorFormats::importDocument(source, &document, &error)) {
+            std::fprintf(stderr, "CONVERT ERROR: %s\n", qPrintable(error));
+            return 1;
+        }
+        const QString suffix = QFileInfo(target).suffix().toLower();
+        bool ok = false;
+        if (suffix == QLatin1String("png")) {
+            constexpr qreal scale = 2.0;
+            QImage image(QSize(qRound(document.pageSize.width() * scale),
+                               qRound(document.pageSize.height() * scale)),
+                         QImage::Format_ARGB32_Premultiplied);
+            image.fill(Qt::white);
+            QPainter painter(&image);
+            painter.scale(scale, scale);
+            document.render(&painter);
+            painter.end();
+            ok = image.save(target);
+            if (!ok)
+                error = QStringLiteral("Не удалось сохранить PNG.");
+        } else if (suffix == QLatin1String("svg")) {
+            QSaveFile file(target);
+            if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                file.write(document.toSvg().toUtf8());
+                ok = file.commit();
+            }
+            if (!ok)
+                error = QStringLiteral("Не удалось сохранить SVG.");
+        } else {
+            ok = VectorFormats::exportDocument(document, target, &error);
+        }
+        if (!ok) {
+            std::fprintf(stderr, "CONVERT ERROR: %s\n", qPrintable(error));
+            return 1;
+        }
+        std::fprintf(stdout, "CONVERTED %s\n", qPrintable(target));
+        std::fflush(stdout);
+        return 0;
+    }
 
     if (args.contains(QStringLiteral("--check-updates-cli"))) {
         auto *checker = new UpdateChecker(&app);

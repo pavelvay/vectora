@@ -1,6 +1,7 @@
 #include "VectorItem.h"
 
 #include <QGraphicsScene>
+#include <QGraphicsView>
 
 #include "CanvasView.h"
 #include <QGraphicsSceneMouseEvent>
@@ -10,7 +11,6 @@
 #include <QtMath>
 
 namespace {
-constexpr qreal kHandleSize = 9.0;
 constexpr qreal kRotationOffset = 24.0;
 constexpr qreal kBoundsMargin = 30.0;
 constexpr qreal kPi = 3.14159265358979323846;
@@ -49,36 +49,90 @@ QRectF VectorItem::boundingRect() const
     return bounds.adjusted(-margin, -margin, margin, margin);
 }
 
-QPainterPath VectorItem::shape() const
+QPainterPath VectorItem::baseHitShape() const
 {
-    QPainterPath result;
     if (m_object.type == ShapeType::Dimension) {
-        result = dimensionOutline(m_object);
+        QPainterPath result = dimensionOutline(m_object);
         if (result.isEmpty())
             result.addRect(m_object.localBounds());
         return result;
     }
+
     if (!m_object.path.isEmpty()) {
-        QPainterPathStroker stroker;
-        stroker.setWidth(qMax<qreal>(m_object.strokeWidth, 8.0));
-        result = stroker.createStroke(m_object.path);
-        if (m_object.hasFill)
-            result = result.united(m_object.path);
-    } else {
-        result.addRect(m_object.textBox);
+        if (m_hitShapeDirty) {
+            QPainterPathStroker stroker;
+            stroker.setWidth(qMax<qreal>(m_object.strokeWidth, 8.0));
+            m_hitShape = stroker.createStroke(m_object.path);
+            // Adding the fill path with the winding rule gives the same hit
+            // area as united() but in linear time: united() is what used to
+            // freeze large documents on every hover.
+            m_hitShape.setFillRule(Qt::WindingFill);
+            if (m_object.hasFill)
+                m_hitShape.addPath(m_object.path);
+            m_hitShapeDirty = false;
+        }
+        return m_hitShape;
     }
 
-    // Handles live outside the geometry, so they must be clickable too.
-    if (isSelected()) {
+    QPainterPath result;
+    result.addRect(m_object.textBox);
+    return result;
+}
+
+QPainterPath VectorItem::shape() const
+{
+    if (!isSelected())
+        return baseHitShape();
+
+    // The selection handles sit outside the geometry, so they need a cached
+    // combined path as well: rebuilding it during every mouse move is what
+    // used to freeze large documents. Handles keep a constant on-screen size,
+    // so the cache is dropped when the zoom changes.
+    const qreal scale = viewScale();
+    if (!qFuzzyCompare(scale, m_cachedViewScale)) {
+        m_cachedViewScale = scale;
+        m_selectedHitShapeDirty = true;
+    }
+    if (m_selectedHitShapeDirty) {
+        const qreal handle = 8.0 / scale;
+        m_selectedHitShape = baseHitShape();
         const QVector<QPointF> points = handlePoints();
         for (int i = 0; i < 8; ++i) {
-            result.addRect(QRectF(points.at(i).x() - kHandleSize,
-                                  points.at(i).y() - kHandleSize,
-                                  kHandleSize * 2.0, kHandleSize * 2.0));
+            m_selectedHitShape.addRect(QRectF(points.at(i).x() - handle,
+                                              points.at(i).y() - handle,
+                                              handle * 2.0, handle * 2.0));
         }
-        result.addEllipse(points.at(8), 7.0, 7.0);
+        m_selectedHitShape.addEllipse(points.at(8), handle, handle);
+        m_selectedHitShapeDirty = false;
     }
-    return result;
+    return m_selectedHitShape;
+}
+
+qreal VectorItem::viewScale() const
+{
+    if (scene()) {
+        const QList<QGraphicsView *> views = scene()->views();
+        if (!views.isEmpty()) {
+            const qreal scale = views.first()->transform().m11();
+            if (scale > 0.01)
+                return scale;
+        }
+    }
+    return 1.0;
+}
+
+void VectorItem::prepareShapeChange()
+{
+    QGraphicsObject::prepareGeometryChange();
+    m_hitShapeDirty = true;
+    m_selectedHitShapeDirty = true;
+}
+
+QVariant VectorItem::itemChange(GraphicsItemChange change, const QVariant &value)
+{
+    if (change == ItemSelectedHasChanged)
+        m_selectedHitShapeDirty = true;
+    return QGraphicsObject::itemChange(change, value);
 }
 
 void VectorItem::paint(QPainter *painter, const QStyleOptionGraphicsItem *option,
@@ -93,6 +147,8 @@ void VectorItem::paint(QPainter *painter, const QStyleOptionGraphicsItem *option
 void VectorItem::drawSelection(QPainter *painter) const
 {
     const QRectF bounds = m_object.localBounds();
+    const qreal scale = viewScale();
+    const qreal inset = 1.0 / scale;
 
     painter->save();
     QPen frame(QColor(0x6f, 0x9e, 0xe8));
@@ -100,7 +156,7 @@ void VectorItem::drawSelection(QPainter *painter) const
     frame.setWidthF(0.0);
     painter->setPen(frame);
     painter->setBrush(Qt::NoBrush);
-    painter->drawRect(bounds.adjusted(-2.0, -2.0, 2.0, 2.0));
+    painter->drawRect(bounds.adjusted(-inset, -inset, inset, inset));
 
     if (m_object.type == ShapeType::Dimension) {
         painter->restore();
@@ -108,29 +164,33 @@ void VectorItem::drawSelection(QPainter *painter) const
     }
 
     QPen handlePen(QColor(0x6f, 0x9e, 0xe8));
-    handlePen.setWidthF(1.3);
+    handlePen.setWidth(0); // cosmetic 1 px regardless of zoom
     const QVector<QPointF> points = handlePoints();
+    const qreal half = 3.5 / scale;
+    painter->setPen(handlePen);
+    painter->setBrush(QColor(0xffffff));
     for (int i = 0; i < 8; ++i) {
-        painter->setPen(handlePen);
-        painter->setBrush(QColor(0xffffff));
-        painter->drawRect(QRectF(points.at(i) - QPointF(kHandleSize / 2.0, kHandleSize / 2.0),
-                                 QSizeF(kHandleSize, kHandleSize)));
+        painter->drawRect(QRectF(points.at(i) - QPointF(half, half),
+                                 QSizeF(half * 2.0, half * 2.0)));
     }
 
     painter->setPen(handlePen);
     painter->drawLine(QPointF(bounds.center().x(), bounds.top()),
                       points.at(8));
     painter->setBrush(QColor(0x4f, 0x7c, 0xc0));
-    painter->drawEllipse(points.at(8), 5.0, 5.0);
+    const qreal rotationRadius = 4.0 / scale;
+    painter->drawEllipse(points.at(8), rotationRadius, rotationRadius);
 
     if (points.size() > 9) {
-        painter->setPen(QPen(QColor(0xff, 0xb3, 0x47), 1.2));
+        painter->setPen(QPen(QColor(0xff, 0xb3, 0x47), 0));
         painter->setBrush(QColor(0x1b, 0x1d, 0x21));
-        painter->drawEllipse(points.at(9), 4.5, 4.5);
-        painter->drawLine(points.at(9) + QPointF(-7, 0),
-                          points.at(9) + QPointF(7, 0));
-        painter->drawLine(points.at(9) + QPointF(0, -7),
-                          points.at(9) + QPointF(0, 7));
+        const qreal pivotRadius = 3.0 / scale;
+        const qreal cross = 5.0 / scale;
+        painter->drawEllipse(points.at(9), pivotRadius, pivotRadius);
+        painter->drawLine(points.at(9) + QPointF(-cross, 0),
+                          points.at(9) + QPointF(cross, 0));
+        painter->drawLine(points.at(9) + QPointF(0, -cross),
+                          points.at(9) + QPointF(0, cross));
     }
     painter->restore();
 }
@@ -138,6 +198,7 @@ void VectorItem::drawSelection(QPainter *painter) const
 QVector<QPointF> VectorItem::handlePoints() const
 {
     const QRectF b = m_object.localBounds();
+    const qreal rotationOffset = kRotationOffset / viewScale();
     return {
         b.topLeft(),
         b.topRight(),
@@ -147,7 +208,7 @@ QVector<QPointF> VectorItem::handlePoints() const
         QPointF(b.right(), b.center().y()),
         QPointF(b.center().x(), b.bottom()),
         QPointF(b.left(), b.center().y()),
-        QPointF(b.center().x(), b.top() - kRotationOffset),
+        QPointF(b.center().x(), b.top() - rotationOffset),
         pivotPoint(),
     };
 }
@@ -155,7 +216,7 @@ QVector<QPointF> VectorItem::handlePoints() const
 int VectorItem::handleAt(const QPointF &pos) const
 {
     const QVector<QPointF> points = handlePoints();
-    const qreal threshold = kHandleSize;
+    const qreal threshold = 7.0 / viewScale();
     for (int i = 0; i < points.size(); ++i) {
         if (QLineF(pos, points.at(i)).length() <= threshold)
             return i;
@@ -173,14 +234,14 @@ VectorObject VectorItem::object() const
 
 void VectorItem::setEffects(const QVector<Effect> &effects)
 {
-    prepareGeometryChange();
+    prepareShapeChange();
     m_object.effects = effects;
     update();
 }
 
 void VectorItem::setObject(const VectorObject &object)
 {
-    prepareGeometryChange();
+    prepareShapeChange();
     m_object = object;
     setPos(object.pos);
     setRotation(object.rotation);
@@ -206,7 +267,7 @@ void VectorItem::updateTextBoxHeight()
     const QRectF needed = metrics.boundingRect(QRectF(0, 0, width, 10000),
                                                Qt::TextWordWrap | Qt::AlignLeft,
                                                m_object.text);
-    prepareGeometryChange();
+    prepareShapeChange();
     m_object.textBox.setHeight(
         qMax(metrics.height(), needed.height() + 4.0)
         * qMax<qreal>(0.5, m_object.lineSpacing));
@@ -231,6 +292,8 @@ void VectorItem::setFillColor(const QColor &color)
     m_object.fill = color;
     m_object.fillStyle = 0;
     m_object.hasFill = color.alpha() > 0;
+    m_hitShapeDirty = true;
+    m_selectedHitShapeDirty = true;
     update();
 }
 
@@ -240,6 +303,8 @@ void VectorItem::setGradientFill(int style, const QColor &second, qreal angle)
     m_object.fill2 = second;
     m_object.gradientAngle = angle;
     m_object.hasFill = true;
+    m_hitShapeDirty = true;
+    m_selectedHitShapeDirty = true;
     update();
 }
 
@@ -258,6 +323,8 @@ void VectorItem::setGradientDefinition(int style, const QVector<GradientStop> &s
         m_object.fill2 = stops.last().color;
     }
     m_object.hasFill = true;
+    m_hitShapeDirty = true;
+    m_selectedHitShapeDirty = true;
     update();
 }
 
@@ -279,7 +346,7 @@ void VectorItem::setStrokeColor(const QColor &color)
 
 void VectorItem::setStrokeWidth(qreal width)
 {
-    prepareGeometryChange();
+    prepareShapeChange();
     m_object.strokeWidth = qMax<qreal>(0.0, width);
     m_object.hasStroke = m_object.strokeWidth > 0.0;
     update();
@@ -353,7 +420,7 @@ void VectorItem::setFrameSize(const QSizeF &size)
     if (bounds.width() < 0.01 || bounds.height() < 0.01)
         return;
 
-    prepareGeometryChange();
+    prepareShapeChange();
     if (m_object.type == ShapeType::Text) {
         const qreal factor = size.height() / bounds.height();
         QFont font = m_object.font;
@@ -398,7 +465,7 @@ void VectorItem::setCornerRadius(qreal radius)
     QPainterPath path = buildRectanglePath(QRectF(0, 0, bounds.width(), bounds.height()),
                                            m_object.cornerRadius);
     path = fitToBounds(path, bounds);
-    prepareGeometryChange();
+    prepareShapeChange();
     m_object.path = path;
     updateOrigin();
     update();
@@ -415,7 +482,7 @@ void VectorItem::setSides(int sides)
     QPainterPath path = buildPolygonPath(QRectF(0, 0, bounds.width(), bounds.height()),
                                          m_object.sides);
     path = fitToBounds(path, bounds);
-    prepareGeometryChange();
+    prepareShapeChange();
     m_object.path = path;
     updateOrigin();
     update();
@@ -432,7 +499,7 @@ void VectorItem::setStarPoints(int points)
     QPainterPath path = buildStarPath(QRectF(0, 0, bounds.width(), bounds.height()),
                                       m_object.starPoints, m_object.starRatio);
     path = fitToBounds(path, bounds);
-    prepareGeometryChange();
+    prepareShapeChange();
     m_object.path = path;
     updateOrigin();
     update();
@@ -449,7 +516,7 @@ void VectorItem::setStarRatio(qreal ratio)
     QPainterPath path = buildStarPath(QRectF(0, 0, bounds.width(), bounds.height()),
                                       m_object.starPoints, m_object.starRatio);
     path = fitToBounds(path, bounds);
-    prepareGeometryChange();
+    prepareShapeChange();
     m_object.path = path;
     updateOrigin();
     update();
@@ -466,7 +533,7 @@ void VectorItem::setSpiralTurns(qreal turns)
     QPainterPath path = buildSpiralPath(QRectF(0, 0, bounds.width(), bounds.height()),
                                         m_object.spiralTurns);
     path = fitToBounds(path, bounds);
-    prepareGeometryChange();
+    prepareShapeChange();
     m_object.path = path;
     updateOrigin();
     update();
@@ -487,7 +554,7 @@ bool VectorItem::applySkew(qreal angleX, qreal angleY)
     transform.shear(std::tan(ax), std::tan(ay));
     transform.translate(-bounds.center().x(), -bounds.center().y());
 
-    prepareGeometryChange();
+    prepareShapeChange();
     m_object.path = transform.map(m_object.path);
     updateOrigin();
     update();
@@ -514,7 +581,7 @@ bool VectorItem::flip(bool horizontal)
     transform.scale(horizontal ? -1.0 : 1.0, horizontal ? 1.0 : -1.0);
     transform.translate(-bounds.center().x(), -bounds.center().y());
 
-    prepareGeometryChange();
+    prepareShapeChange();
     m_object.path = transform.map(m_object.path);
     updateOrigin();
     update();
@@ -529,7 +596,7 @@ void VectorItem::setRotationAngle(qreal degrees)
 
 void VectorItem::setPath(const QPainterPath &path)
 {
-    prepareGeometryChange();
+    prepareShapeChange();
     m_object.path = path;
     updateOrigin();
     update();
@@ -567,7 +634,7 @@ void VectorItem::setPathElements(const QVector<QPainterPath::Element> &elements)
         }
     }
 
-    prepareGeometryChange();
+    prepareShapeChange();
     m_object.path = path;
     updateOrigin();
     update();
@@ -584,6 +651,7 @@ void VectorItem::setPivot(const QPointF &normalised)
 {
     m_object.pivot = QPointF(qBound(0.0, normalised.x(), 1.0),
                              qBound(0.0, normalised.y(), 1.0));
+    m_selectedHitShapeDirty = true;
     updateOrigin();
     update();
 }
@@ -920,7 +988,7 @@ void VectorItem::applyResize(const QPointF &pos, bool keepAspect)
         target = adjusted.normalized();
     }
 
-    prepareGeometryChange();
+    prepareShapeChange();
 
     if (m_object.type == ShapeType::Text) {
         const qreal factor = target.height() / m_startBounds.height();

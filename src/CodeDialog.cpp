@@ -5,8 +5,11 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QLabel>
 #include <QPainter>
 #include <QPlainTextEdit>
@@ -103,7 +106,7 @@ CodeDialog::CodeDialog(CanvasView *view, VectorItem *item, QWidget *parent)
 {
     setWindowTitle(item ? QStringLiteral("Редактировать код")
                         : QStringLiteral("Новый код"));
-    resize(760, 520);
+    resize(780, 640);
     buildUi();
     loadItem();
     regenerate();
@@ -164,6 +167,31 @@ void CodeDialog::buildUi()
     m_background->setText(QStringLiteral("Нет фона"));
     form->addRow(dialogLabel(QStringLiteral("Фон")), m_background);
 
+    auto *logoRow = new QWidget(this);
+    auto *logoLayout = new QHBoxLayout(logoRow);
+    logoLayout->setContentsMargins(0, 0, 0, 0);
+    logoLayout->setSpacing(4);
+    m_logoButton = new QToolButton(logoRow);
+    m_logoButton->setText(QStringLiteral("Добавить картинку…"));
+    m_logoButton->setToolTip(
+        QStringLiteral("Встроить изображение в центр QR-кода"));
+    m_logoClear = new QToolButton(logoRow);
+    m_logoClear->setText(QStringLiteral("Убрать"));
+    m_logoClear->setEnabled(false);
+    logoLayout->addWidget(m_logoButton, 1);
+    logoLayout->addWidget(m_logoClear);
+    form->addRow(dialogLabel(QStringLiteral("Логотип в центре")), logoRow);
+
+    m_logoScale = new QDoubleSpinBox(this);
+    m_logoScale->setRange(8.0, 30.0);
+    m_logoScale->setDecimals(0);
+    m_logoScale->setValue(22.0);
+    m_logoScale->setSuffix(QStringLiteral(" %"));
+    m_logoScale->setToolTip(
+        QStringLiteral("Размер логотипа относительно стороны QR-кода"));
+    m_logoScale->setEnabled(false);
+    form->addRow(dialogLabel(QStringLiteral("Размер логотипа")), m_logoScale);
+
     m_showText = new QCheckBox(QStringLiteral("Показывать цифры под штрихкодом"),
                                this);
     m_showText->setChecked(true);
@@ -188,6 +216,9 @@ void CodeDialog::buildUi()
         const CodeKind kind = codeKindFromIndex(m_kind->currentIndex());
         m_ecc->setEnabled(kind == CodeKind::Qr);
         m_showText->setEnabled(codeShowsHumanText(kind));
+        m_logoButton->setEnabled(kind == CodeKind::Qr);
+        m_logoClear->setEnabled(kind == CodeKind::Qr && !m_logo.isNull());
+        m_logoScale->setEnabled(kind == CodeKind::Qr && !m_logo.isNull());
         if (!m_item) {
             const bool twoDimensional = kind == CodeKind::Qr
                                         || kind == CodeKind::DataMatrix;
@@ -209,6 +240,44 @@ void CodeDialog::buildUi()
         regenerate();
     });
     connect(m_showText, &QCheckBox::toggled, this, [this](bool) { regenerate(); });
+    connect(m_logoScale, &QDoubleSpinBox::valueChanged, this, [this](double) {
+        regenerate();
+    });
+    connect(m_logoButton, &QToolButton::clicked, this, [this]() {
+        const QString file = QFileDialog::getOpenFileName(
+            this, QStringLiteral("Картинка для центра QR"), QString(),
+            QStringLiteral("Изображения (*.png *.jpg *.jpeg *.bmp *.webp)"));
+        if (file.isEmpty())
+            return;
+        QImage image(file);
+        if (image.isNull()) {
+            m_status->setText(QStringLiteral("Не удалось прочитать изображение."));
+            m_status->setStyleSheet(
+                QStringLiteral("color:#ff6b8a; font-size:11px;"));
+            return;
+        }
+        if (image.width() > 1024 || image.height() > 1024)
+            image = image.scaled(1024, 1024, Qt::KeepAspectRatio,
+                                 Qt::SmoothTransformation);
+        m_logo = image;
+        m_logoButton->setText(
+            QStringLiteral("Логотип: %1").arg(QFileInfo(file).fileName()));
+        m_logoClear->setEnabled(true);
+        m_logoScale->setEnabled(true);
+        if (codeKindFromIndex(m_kind->currentIndex()) == CodeKind::Qr) {
+            m_updating = true;
+            m_ecc->setCurrentIndex(3);
+            m_updating = false;
+        }
+        regenerate();
+    });
+    connect(m_logoClear, &QToolButton::clicked, this, [this]() {
+        m_logo = QImage();
+        m_logoButton->setText(QStringLiteral("Добавить картинку…"));
+        m_logoClear->setEnabled(false);
+        m_logoScale->setEnabled(false);
+        regenerate();
+    });
 
     connect(m_foreground, &QToolButton::clicked, this, [this]() {
         const QColor picked = QColorDialog::getColor(
@@ -242,6 +311,9 @@ void CodeDialog::loadItem()
         m_data->setPlainText(QStringLiteral("https://"));
         m_width->setValue(220.0);
         m_height->setValue(220.0);
+        m_logoButton->setEnabled(true);
+        m_logoClear->setEnabled(false);
+        m_logoScale->setEnabled(false);
         return;
     }
     const VectorObject object = m_item->object();
@@ -261,6 +333,15 @@ void CodeDialog::loadItem()
     m_ecc->setEnabled(object.codeKind == 0);
     const CodeKind kind = codeKindFromIndex(object.codeKind);
     m_showText->setEnabled(codeShowsHumanText(kind));
+    m_logo = object.codeLogo;
+    m_logoScale->setValue(
+        qBound(8.0, object.codeLogoScale * 100.0, 30.0));
+    m_logoButton->setText(m_logo.isNull()
+                              ? QStringLiteral("Добавить картинку…")
+                              : QStringLiteral("Логотип: встроен"));
+    m_logoButton->setEnabled(kind == CodeKind::Qr);
+    m_logoClear->setEnabled(kind == CodeKind::Qr && !m_logo.isNull());
+    m_logoScale->setEnabled(kind == CodeKind::Qr && !m_logo.isNull());
 }
 
 void CodeDialog::setKind(CodeKind kind)
@@ -276,6 +357,9 @@ void CodeDialog::setKind(CodeKind kind)
     }
     m_ecc->setEnabled(kind == CodeKind::Qr);
     m_showText->setEnabled(codeShowsHumanText(kind));
+    m_logoButton->setEnabled(kind == CodeKind::Qr);
+    m_logoClear->setEnabled(kind == CodeKind::Qr && !m_logo.isNull());
+    m_logoScale->setEnabled(kind == CodeKind::Qr && !m_logo.isNull());
     regenerate();
 }
 
@@ -289,7 +373,15 @@ void CodeDialog::regenerate()
         data = data.trimmed();
     else
         data.chop(0);
-    m_symbol = generateCode(kind, data, m_ecc->currentIndex());
+    int ecc = m_ecc->currentIndex();
+    const bool hasLogo = kind == CodeKind::Qr && !m_logo.isNull();
+    if (hasLogo && ecc != 3) {
+        m_updating = true;
+        m_ecc->setCurrentIndex(3);
+        m_updating = false;
+        ecc = 3;
+    }
+    m_symbol = generateCode(kind, data, ecc);
     if (!m_symbol.valid) {
         m_status->setText(m_symbol.error);
         m_status->setStyleSheet(QStringLiteral("color:#ffb547; font-size:11px;"));
@@ -301,6 +393,8 @@ void CodeDialog::regenerate()
                        .arg(version)
                        .arg(m_symbol.modulesX)
                        .arg(m_ecc->currentText().left(1));
+            if (hasLogo)
+                info += QStringLiteral(" · логотип в центре");
         } else if (kind == CodeKind::DataMatrix) {
             info = QStringLiteral("Data Matrix %1×%1 модулей")
                        .arg(m_symbol.modulesX);
@@ -336,6 +430,9 @@ void CodeDialog::updatePreview()
     object.codeModulesY = m_symbol.modulesY;
     object.codeCells = m_symbol.cells;
     object.textBox = QRectF(0.0, 0.0, m_width->value(), m_height->value());
+    object.codeLogo =
+        object.codeKind == 0 ? m_logo : QImage();
+    object.codeLogoScale = m_logoScale->value() / 100.0;
     m_preview->setObject(object);
 }
 
@@ -366,6 +463,8 @@ void CodeDialog::apply()
     object.codeModulesY = m_symbol.modulesY;
     object.codeCells = m_symbol.cells;
     object.codeHumanText = m_symbol.humanText;
+    object.codeLogo = object.codeKind == 0 ? m_logo : QImage();
+    object.codeLogoScale = m_logoScale->value() / 100.0;
     object.textBox.setSize(QSizeF(m_width->value(), m_height->value()));
     object.hasFill = false;
     object.hasStroke = false;

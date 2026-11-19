@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
@@ -24,6 +25,9 @@
 #include <QStandardPaths>
 #include <QPainter>
 #include <QPdfWriter>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QSaveFile>
 #include <QTextStream>
 #include <QWidget>
@@ -43,6 +47,9 @@
 #include "PatternStore.h"
 #include "Patterns.h"
 #include "Effects.h"
+#include "CdrIO.h"
+#include "FormatIO.h"
+#include "VectorCraftIO.h"
 #include "Icons.h"
 #include "MainWindow.h"
 #include "PageDialog.h"
@@ -250,6 +257,363 @@ int SelfTest::run(const QString &directory)
         document.render(&painter);
     }
     check(QFileInfo(pdfPath).size() > 1000, QStringLiteral("export PDF"));
+
+    // --- Interchange formats -------------------------------------------------
+    out << "\nInterchange formats\n";
+    {
+        check(VectorFormats::formatForPath(QStringLiteral("a.esp"))
+                  == VectorFormats::Format::Eps,
+              QStringLiteral(".esp maps to EPS"));
+        check(VectorFormats::formatForPath(QStringLiteral("a.vectorcraft"))
+                  == VectorFormats::Format::Vectorcraft,
+              QStringLiteral(".vectorcraft maps to the native document"));
+
+        check(VectorFormats::formatForPath(QStringLiteral("a.cdr"))
+                  == VectorFormats::Format::Cdr,
+              QStringLiteral(".cdr maps to CorelDRAW"));
+        check(VectorFormats::formatForPath(QStringLiteral("a.cmx"))
+                  == VectorFormats::Format::Cmx,
+              QStringLiteral(".cmx maps to Corel CMX"));
+        check(!VectorFormats::canExport(VectorFormats::Format::Cmx)
+                  && VectorFormats::canImport(VectorFormats::Format::Cmx),
+              QStringLiteral("CMX is import-only while export is in development"));
+        check(!VectorFormats::canExport(VectorFormats::Format::Cdr),
+              QStringLiteral("CDR is import-only"));
+        const QString fakeCdr = dir.filePath(QStringLiteral("fake.cdr"));
+        QFile fakeFile(fakeCdr);
+        fakeFile.open(QIODevice::WriteOnly);
+        QByteArray cdrMagic("RIFF");
+        cdrMagic.append(char(0x10));
+        cdrMagic.append(3, '\0');
+        cdrMagic.append("CDR9");
+        fakeFile.write(cdrMagic);
+        fakeFile.close();
+        check(CdrIO::isCdrFile(fakeCdr),
+              QStringLiteral("CDR magic is recognised"));
+
+        // Optional real-world sample: VECTORA_CDR_SAMPLE=/path/file.cdr
+        const QString cdrSample = qEnvironmentVariable("VECTORA_CDR_SAMPLE");
+        if (!cdrSample.isEmpty() && QFileInfo::exists(cdrSample)) {
+            Document cdrDocument;
+            check(VectorFormats::importDocument(cdrSample, &cdrDocument, &error),
+                  QStringLiteral("open real CDR sample"));
+            check(!cdrDocument.pages.isEmpty() && !cdrDocument.objects.isEmpty(),
+                  QStringLiteral("CDR sample has editable objects"));
+        }
+
+        const QString vectorcraftPath =
+            dir.filePath(QStringLiteral("sample.vectorcraft"));
+        check(VectorFormats::exportDocument(document, vectorcraftPath, &error),
+              QStringLiteral("export Vectorcraft"));
+        check(VectorCraftIO::isVectorCraftFile(vectorcraftPath),
+              QStringLiteral("Vectorcraft file uses the VectorCraft schema"));
+        Document vectorcraftRead;
+        check(VectorFormats::importDocument(vectorcraftPath, &vectorcraftRead, &error),
+              QStringLiteral("open Vectorcraft"));
+        check(vectorcraftRead.objects.size() == document.objects.size(),
+              QStringLiteral("Vectorcraft keeps every object"));
+
+        // Minimal VectorCraft document with two artboards, a red rectangle on
+        // the first and point text on the second.
+        QJsonObject firstArtboard;
+        firstArtboard.insert(QStringLiteral("id"), 1);
+        firstArtboard.insert(QStringLiteral("name"), QStringLiteral("Left"));
+        QJsonObject firstRect;
+        firstRect.insert(QStringLiteral("x0"), 0.0);
+        firstRect.insert(QStringLiteral("y0"), 0.0);
+        firstRect.insert(QStringLiteral("x1"), 200.0);
+        firstRect.insert(QStringLiteral("y1"), 100.0);
+        firstArtboard.insert(QStringLiteral("rect"), firstRect);
+        QJsonObject secondArtboard;
+        secondArtboard.insert(QStringLiteral("id"), 2);
+        secondArtboard.insert(QStringLiteral("name"), QStringLiteral("Right"));
+        QJsonObject secondRect;
+        secondRect.insert(QStringLiteral("x0"), 220.0);
+        secondRect.insert(QStringLiteral("y0"), 0.0);
+        secondRect.insert(QStringLiteral("x1"), 320.0);
+        secondRect.insert(QStringLiteral("y1"), 100.0);
+        secondArtboard.insert(QStringLiteral("rect"), secondRect);
+        QJsonArray artboards;
+        artboards.append(firstArtboard);
+        artboards.append(secondArtboard);
+
+        QJsonArray anchors;
+        const QVector<QPair<double, double>> corners = {
+            {10.0, 10.0}, {60.0, 10.0}, {60.0, 50.0}, {10.0, 50.0}};
+        for (const auto &corner : corners) {
+            QJsonArray point;
+            point.append(corner.first);
+            point.append(corner.second);
+            QJsonObject anchor;
+            anchor.insert(QStringLiteral("p"), point);
+            anchors.append(anchor);
+        }
+        QJsonObject subpath;
+        subpath.insert(QStringLiteral("anchors"), anchors);
+        subpath.insert(QStringLiteral("closed"), true);
+        QJsonArray subpaths;
+        subpaths.append(subpath);
+        QJsonObject pathObject;
+        pathObject.insert(QStringLiteral("subpaths"), subpaths);
+        QJsonObject pathKind;
+        pathKind.insert(QStringLiteral("type"), QStringLiteral("path"));
+        pathKind.insert(QStringLiteral("path"), pathObject);
+        QJsonObject redColor;
+        redColor.insert(QStringLiteral("model"), QStringLiteral("rgb"));
+        redColor.insert(QStringLiteral("r"), 1.0);
+        redColor.insert(QStringLiteral("g"), 0.0);
+        redColor.insert(QStringLiteral("b"), 0.0);
+        QJsonObject redPaint;
+        redPaint.insert(QStringLiteral("type"), QStringLiteral("solid"));
+        redPaint.insert(QStringLiteral("color"), redColor);
+        QJsonObject fillItem;
+        fillItem.insert(QStringLiteral("kind"), QStringLiteral("fill"));
+        fillItem.insert(QStringLiteral("paint"), redPaint);
+        QJsonArray appearanceItems;
+        appearanceItems.append(fillItem);
+        QJsonObject appearance;
+        appearance.insert(QStringLiteral("items"), appearanceItems);
+        QJsonObject pathNode;
+        pathNode.insert(QStringLiteral("id"), 2);
+        pathNode.insert(QStringLiteral("appearance"), appearance);
+        pathNode.insert(QStringLiteral("kind"), pathKind);
+
+        QJsonObject textKindInner;
+        textKindInner.insert(QStringLiteral("kind"), QStringLiteral("point"));
+        QJsonArray textTransform;
+        for (double value : {1.0, 0.0, 0.0, 1.0, 240.0, 40.0})
+            textTransform.append(value);
+        QJsonObject textStyle;
+        textStyle.insert(QStringLiteral("font_family"), QStringLiteral("Sans"));
+        textStyle.insert(QStringLiteral("font_style"), QStringLiteral("Regular"));
+        textStyle.insert(QStringLiteral("size"), 12.0);
+        QJsonObject blackPaint = redPaint;
+        blackPaint.insert(QStringLiteral("color"), QJsonObject{
+            {QStringLiteral("model"), QStringLiteral("rgb")},
+            {QStringLiteral("r"), 0.0},
+            {QStringLiteral("g"), 0.0},
+            {QStringLiteral("b"), 0.0}});
+        textStyle.insert(QStringLiteral("fill"), blackPaint);
+        QJsonObject nonePaint;
+        nonePaint.insert(QStringLiteral("type"), QStringLiteral("none"));
+        textStyle.insert(QStringLiteral("stroke"), nonePaint);
+        textStyle.insert(QStringLiteral("stroke_width"), 0.0);
+        QJsonObject run;
+        run.insert(QStringLiteral("text"), QStringLiteral("Hi"));
+        run.insert(QStringLiteral("style"), textStyle);
+        QJsonArray runs;
+        runs.append(run);
+        QJsonObject para;
+        para.insert(QStringLiteral("justify"), QStringLiteral("Left"));
+        QJsonObject textKind;
+        textKind.insert(QStringLiteral("type"), QStringLiteral("text"));
+        textKind.insert(QStringLiteral("kind"), textKindInner);
+        textKind.insert(QStringLiteral("xf"), textTransform);
+        textKind.insert(QStringLiteral("runs"), runs);
+        textKind.insert(QStringLiteral("para"), para);
+        QJsonObject textNode;
+        textNode.insert(QStringLiteral("id"), 3);
+        textNode.insert(QStringLiteral("kind"), textKind);
+
+        QJsonArray children;
+        children.append(pathNode);
+        children.append(textNode);
+        QJsonObject layerKind;
+        layerKind.insert(QStringLiteral("type"), QStringLiteral("layer"));
+        layerKind.insert(QStringLiteral("color"), QJsonObject{
+            {QStringLiteral("Preset"), 0}});
+        layerKind.insert(QStringLiteral("template"), false);
+        layerKind.insert(QStringLiteral("printable"), true);
+        layerKind.insert(QStringLiteral("children"), children);
+        QJsonObject layer;
+        layer.insert(QStringLiteral("id"), 1);
+        layer.insert(QStringLiteral("name"), QStringLiteral("Layer 1"));
+        layer.insert(QStringLiteral("kind"), layerKind);
+        QJsonArray layers;
+        layers.append(layer);
+
+        QJsonObject documentBody;
+        documentBody.insert(QStringLiteral("version"), 1);
+        documentBody.insert(QStringLiteral("title"), QStringLiteral("Fixture"));
+        documentBody.insert(QStringLiteral("units"), QStringLiteral("Points"));
+        documentBody.insert(QStringLiteral("artboards"), artboards);
+        documentBody.insert(QStringLiteral("layers"), layers);
+        QJsonObject root;
+        root.insert(QStringLiteral("format"), QStringLiteral("vectorcraft"));
+        root.insert(QStringLiteral("version"), 4);
+        root.insert(QStringLiteral("generator"), QStringLiteral("self-test"));
+        root.insert(QStringLiteral("document"), documentBody);
+        root.insert(QStringLiteral("images"), QJsonObject());
+
+        const QString fixturePath = dir.filePath(QStringLiteral("fixture.vectorcraft"));
+        QSaveFile fixture(fixturePath);
+        check(fixture.open(QIODevice::WriteOnly), QStringLiteral("write VectorCraft fixture"));
+        fixture.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+        check(fixture.commit(), QStringLiteral("commit VectorCraft fixture"));
+        Document fixtureRead;
+        check(VectorFormats::importDocument(fixturePath, &fixtureRead, &error),
+              QStringLiteral("open VectorCraft fixture"));
+        check(fixtureRead.pages.size() == 2
+                  && qAbs(fixtureRead.pages.at(0).size.width() - 266.67) < 0.5
+                  && qAbs(fixtureRead.pages.at(1).size.width() - 133.33) < 0.5,
+              QStringLiteral("VectorCraft artboards become pages"));
+        check(fixtureRead.objects.size() == 2,
+              QStringLiteral("VectorCraft nodes become objects"));
+        bool redRectangle = false;
+        bool pointText = false;
+        for (const VectorObject &object : fixtureRead.objects) {
+            if (object.page == 0 && object.type == ShapeType::Freehand
+                && object.fill == QColor(255, 0, 0)
+                && qAbs(object.path.boundingRect().left() - 13.33) < 0.5) {
+                redRectangle = true;
+            }
+            if (object.page == 1 && object.type == ShapeType::Text
+                && object.text == QLatin1String("Hi")) {
+                pointText = true;
+            }
+        }
+        check(redRectangle, QStringLiteral("VectorCraft path keeps its shape and colour"));
+        check(pointText, QStringLiteral("VectorCraft text lands on its artboard"));
+
+        const QString cmxPath = dir.filePath(QStringLiteral("sample.cmx"));
+        error.clear();
+        check(!VectorFormats::exportDocument(document, cmxPath, &error),
+              QStringLiteral("CMX export is disabled"));
+        check(error.contains(QStringLiteral("разработке")),
+              QStringLiteral("CMX export reports work in progress"));
+
+        // Optional real-world sample: VECTORA_CMX_SAMPLE=/path/file.cmx
+        const QString cmxSample = qEnvironmentVariable("VECTORA_CMX_SAMPLE");
+        if (!cmxSample.isEmpty() && QFileInfo::exists(cmxSample)) {
+            Document cmxRead;
+            check(VectorFormats::importDocument(cmxSample, &cmxRead, &error),
+                  QStringLiteral("open real CMX sample"));
+            check(!cmxRead.pages.isEmpty() && !cmxRead.objects.isEmpty(),
+                  QStringLiteral("CMX sample has editable objects"));
+        }
+
+        const QString epsPath = dir.filePath(QStringLiteral("sample.eps"));
+        check(VectorFormats::exportDocument(document, epsPath, &error),
+              QStringLiteral("export EPS"));
+        QFile epsFile(epsPath);
+        epsFile.open(QIODevice::ReadOnly);
+        const QByteArray epsBytes = epsFile.readAll();
+        check(epsBytes.startsWith("%!PS-Adobe-3.0 EPSF-3.0"),
+              QStringLiteral("EPS has a PostScript header"));
+        check(epsBytes.contains("%%BoundingBox:")
+                  && epsBytes.contains(" setrgbcolor")
+                  && epsBytes.contains("fill\n")
+                  && epsBytes.contains("stroke\n"),
+              QStringLiteral("EPS contains vector paint commands"));
+
+        Document epsRead;
+        check(VectorFormats::importDocument(epsPath, &epsRead, &error),
+              QStringLiteral("open EPS"));
+        check(!epsRead.objects.isEmpty(),
+              QStringLiteral("EPS import returns editable paths"));
+        check(epsRead.pages.size() == 1
+                  && epsRead.pageSize.width() > 100.0
+                  && epsRead.pageSize.height() > 100.0,
+              QStringLiteral("EPS page size comes from the bounding box"));
+        Document shapesDocument;
+        shapesDocument.pageSize = QSizeF(600.0, 800.0);
+        VectorObject boxShape;
+        boxShape.type = ShapeType::Rectangle;
+        boxShape.path.addRect(QRectF(0, 0, 200, 120));
+        boxShape.pos = QPointF(40, 50);
+        boxShape.page = -9999;
+        boxShape.layer = -1;
+        boxShape.hasStroke = false;
+        VectorObject roundShape;
+        roundShape.type = ShapeType::Ellipse;
+        roundShape.path.addEllipse(QRectF(0, 0, 120, 120));
+        roundShape.pos = QPointF(400, 300);
+        roundShape.page = -9999;
+        roundShape.layer = -1;
+        roundShape.hasStroke = false;
+        shapesDocument.objects = {boxShape, roundShape};
+        const QString shapesEps = dir.filePath(QStringLiteral("shapes.eps"));
+        check(VectorFormats::exportDocument(shapesDocument, shapesEps, &error),
+              QStringLiteral("export EPS shapes"));
+        Document shapesRead;
+        check(VectorFormats::importDocument(shapesEps, &shapesRead, &error),
+              QStringLiteral("open EPS shapes"));
+        QRectF sourceBox = boxShape.localBounds().translated(boxShape.pos)
+                               .united(roundShape.localBounds().translated(roundShape.pos));
+        QRectF importedBox;
+        for (const VectorObject &object : shapesRead.objects) {
+            const QRectF bounds = object.localBounds().translated(object.pos);
+            importedBox = importedBox.isNull() ? bounds : importedBox.united(bounds);
+        }
+        check(qAbs(sourceBox.width() - importedBox.width()) < 1.5
+                  && qAbs(sourceBox.height() - importedBox.height()) < 1.5
+                  && qAbs(sourceBox.left() - importedBox.left()) < 1.5
+                  && qAbs(sourceBox.top() - importedBox.top()) < 1.5,
+              QStringLiteral("EPS keeps the artwork geometry"));
+
+        const QString aiPath = dir.filePath(QStringLiteral("sample.ai"));
+        check(VectorFormats::exportDocument(document, aiPath, &error),
+              QStringLiteral("export AI"));
+        QFile aiFile(aiPath);
+        aiFile.open(QIODevice::ReadOnly);
+        const QByteArray aiBytes = aiFile.readAll();
+        check(aiBytes.startsWith("%PDF-"),
+              QStringLiteral("AI is a PDF-compatible Illustrator file"));
+
+#if defined(VECTORA_HAVE_QT_PDF)
+        Document aiRead;
+        check(VectorFormats::importDocument(aiPath, &aiRead, &error),
+              QStringLiteral("open AI"));
+        check(aiRead.pages.size() == 1 && !aiRead.objects.isEmpty(),
+              QStringLiteral("AI import returns objects"));
+
+        Document pdfRead;
+        check(VectorFormats::importDocument(pdfPath, &pdfRead, &error),
+              QStringLiteral("open PDF"));
+        check(pdfRead.pages.size() == 1 && !pdfRead.objects.isEmpty(),
+              QStringLiteral("PDF import returns objects"));
+        check(qAbs(pdfRead.pageSize.width() - document.pageSize.width()) < 4.0
+                  && qAbs(pdfRead.pageSize.height() - document.pageSize.height()) < 4.0,
+              QStringLiteral("PDF import keeps the page size"));
+
+        Document multipage;
+        PageInfo first;
+        first.name = QStringLiteral("Первая");
+        first.size = QSizeF(300.0, 400.0);
+        PageInfo second;
+        second.name = QStringLiteral("Вторая");
+        second.size = QSizeF(420.0, 260.0);
+        multipage.pages = {first, second};
+        multipage.pageSize = first.size;
+        VectorObject rectangle;
+        rectangle.type = ShapeType::Rectangle;
+        rectangle.path.addRect(QRectF(0, 0, 100, 80));
+        rectangle.pos = QPointF(30, 40);
+        rectangle.page = 0;
+        rectangle.layer = 0;
+        rectangle.hasStroke = false;
+        VectorObject ellipse;
+        ellipse.type = ShapeType::Ellipse;
+        ellipse.path.addEllipse(QRectF(0, 0, 120, 120));
+        ellipse.pos = QPointF(50, 60);
+        ellipse.page = 1;
+        ellipse.layer = 0;
+        ellipse.hasStroke = false;
+        multipage.objects = {rectangle, ellipse};
+
+        const QString multiPath = dir.filePath(QStringLiteral("multi.pdf"));
+        check(VectorFormats::exportDocument(multipage, multiPath, &error),
+              QStringLiteral("export multipage PDF"));
+        Document multiRead;
+        check(VectorFormats::importDocument(multiPath, &multiRead, &error),
+              QStringLiteral("open multipage PDF"));
+        check(multiRead.pages.size() == 2,
+              QStringLiteral("PDF import keeps every page"));
+        check(multiRead.pages.size() == 2
+                  && multiRead.pages.at(1).size.width() > multiRead.pages.at(1).size.height(),
+              QStringLiteral("PDF import keeps portrait and landscape pages"));
+#endif
+    }
 
     // --- Drawing tools -------------------------------------------------------
     out << "\nDrawing tools\n";
@@ -713,6 +1077,74 @@ int SelfTest::run(const QString &directory)
         check(hasExtrude, QStringLiteral("extrude tool registered"));
         check(hasPerspective, QStringLiteral("perspective tool registered"));
         check(!Icons::appIcon().isNull(), QStringLiteral("application icon available"));
+    }
+
+    // QR code with an embedded centre logo.
+    {
+        const CodeSymbol symbol =
+            generateCode(CodeKind::Qr, QStringLiteral("https://vectora.example"), 3);
+        check(symbol.valid, QStringLiteral("QR payload generated"));
+        VectorObject code;
+        code.type = ShapeType::Code;
+        code.codeKind = int(CodeKind::Qr);
+        code.codeEcc = 3;
+        code.codeMargin = 4;
+        code.codeModulesX = symbol.modulesX;
+        code.codeModulesY = symbol.modulesY;
+        code.codeCells = symbol.cells;
+        code.codeHumanText = symbol.humanText;
+        code.textBox = QRectF(0, 0, 240, 240);
+        code.codeBackground = Qt::white;
+        code.codeColor = Qt::black;
+        QImage logo(48, 48, QImage::Format_ARGB32_Premultiplied);
+        logo.fill(Qt::red);
+        code.codeLogo = logo;
+        code.codeLogoScale = 0.2;
+
+        QImage render(260, 260, QImage::Format_ARGB32_Premultiplied);
+        render.fill(Qt::white);
+        {
+            QPainter painter(&render);
+            painter.translate(10, 10);
+            Document::paintObject(&painter, code);
+        }
+        const QColor center = render.pixelColor(130, 130);
+        check(center.red() > 180 && center.green() < 100 && center.blue() < 100,
+              QStringLiteral("QR centre logo is painted"));
+        const QColor corner = render.pixelColor(12, 12);
+        check(corner == QColor(Qt::black) || corner == QColor(Qt::white),
+              QStringLiteral("QR modules remain around the logo"));
+
+        const VectorObject restored =
+            vectorObjectFromJson(vectorObjectToJson(code));
+        check(!restored.codeLogo.isNull()
+                  && restored.codeModulesX == code.codeModulesX
+                  && qAbs(restored.codeLogoScale - 0.2) < 0.001,
+              QStringLiteral("QR centre logo serializes"));
+    }
+
+    // Hit testing must not rebuild stroke/union for large paths on every
+    // hover: the old code froze documents with hundreds of curves.
+    {
+        VectorObject complex;
+        complex.type = ShapeType::Bezier;
+        complex.fill = QColor("#4f7cc0");
+        complex.hasFill = true;
+        QPainterPath path;
+        path.moveTo(0, 0);
+        for (int i = 0; i < 1200; ++i) {
+            const qreal x = i * 2.0;
+            const qreal y = qreal(i % 30) * 3.0;
+            path.cubicTo(x, y, x + 5.0, y + 10.0, x + 10.0, y);
+        }
+        complex.path = path;
+        VectorItem item(complex);
+        QElapsedTimer timer;
+        timer.start();
+        for (int i = 0; i < 20; ++i)
+            (void)item.shape();
+        check(timer.elapsed() < 500,
+              QStringLiteral("complex hit shape is cached"));
     }
 
     // --- Symbols, instances and the asset library ---------------------------
@@ -2869,6 +3301,37 @@ int SelfTest::run(const QString &directory)
                       && !textItem->object().textPathCurve.isEmpty()
                       && !buildTextPath(textItem->object()).isEmpty(),
                   QStringLiteral("text placed on a path"));
+
+            const QRectF beforeOffset =
+                buildTextPath(textItem->object()).boundingRect();
+            view.setTextPathOffset(0.5);
+            const QRectF afterOffset =
+                buildTextPath(textItem->object()).boundingRect();
+            check(afterOffset != beforeOffset
+                      && qAbs(textItem->object().textPathOffset - 0.5) < 0.001,
+                  QStringLiteral("text path offset moves the text"));
+            view.setTextPathReverse(true);
+            check(textItem->object().textPathReverse
+                      && buildTextPath(textItem->object()).boundingRect()
+                             != afterOffset,
+                  QStringLiteral("text path direction can be reversed"));
+            view.setTextPathReverse(false);
+            view.setTextPathOffset(0.0);
+
+            VectorObject straight;
+            straight.type = ShapeType::Text;
+            straight.text = QStringLiteral("ABC");
+            straight.font = QFont(QStringLiteral("DejaVu Sans"), 24);
+            straight.textBox = QRectF(0, 0, 300, 60);
+            straight.textOnPath = true;
+            straight.hasFill = true;
+            straight.textPathCurve.moveTo(0, 100);
+            straight.textPathCurve.lineTo(300, 100);
+            const QRectF straightBox = buildTextPath(straight).boundingRect();
+            check(!straightBox.isEmpty() && straightBox.bottom() > 95.0
+                      && straightBox.bottom() < 105.0
+                      && straightBox.top() < 90.0,
+                  QStringLiteral("text sits on the curve, not upside down"));
 
             const QString svg = view.objects().isEmpty()
                                     ? QString()

@@ -29,6 +29,7 @@
 #include <algorithm>
 
 #include "Patterns.h"
+#include "FormatIO.h"
 #include "SvgImporter.h"
 #include "VectorItem.h"
 
@@ -116,6 +117,8 @@ CanvasView::CanvasView(QWidget *parent)
     connect(this, &CanvasView::endEdit, this, [this]() { updateAllDimensions(); });
 
     connect(graphicsScene, &QGraphicsScene::selectionChanged, this, [this]() {
+        if (m_syncingSelection)
+            return;
         if (selectedVectorItems().isEmpty()) {
             m_insideGroup = false;
             m_selectedNodeElements.clear();
@@ -439,25 +442,31 @@ void CanvasView::drawBackground(QPainter *painter, const QRectF &rect)
         }
     }
 
-    if (m_currentPage >= 0 && m_currentPage < m_pages.size()
-        && (m_pages.at(m_currentPage).bleed > 0.0
-            || m_pages.at(m_currentPage).margin > 0.0)) {
-        const PageInfo &info = m_pages.at(m_currentPage);
-        if (info.bleed > 0.0) {
-            QPen bleedPen(QColor(0xff, 0x66, 0x99, 90), 1.0);
-            bleedPen.setStyle(Qt::DashLine);
-            painter->setPen(bleedPen);
-            painter->setBrush(Qt::NoBrush);
-            painter->drawRect(page.adjusted(-info.bleed, -info.bleed,
-                                            info.bleed, info.bleed));
+    if (m_showPrintableArea) {
+        if (m_currentPage >= 0 && m_currentPage < m_pages.size()) {
+            const PageInfo &info = m_pages.at(m_currentPage);
+            if (info.bleed > 0.0) {
+                QPen bleedPen(QColor(0xff, 0x66, 0x99, 90), 1.0);
+                bleedPen.setStyle(Qt::DashLine);
+                painter->setPen(bleedPen);
+                painter->setBrush(Qt::NoBrush);
+                painter->drawRect(page.adjusted(-info.bleed, -info.bleed,
+                                                info.bleed, info.bleed));
+            }
+            if (info.margin > 0.0) {
+                QPen marginPen(QColor(0x4f, 0x7c, 0xc0, 90), 1.0);
+                marginPen.setStyle(Qt::DotLine);
+                painter->setPen(marginPen);
+                painter->drawRect(page.adjusted(info.margin, info.margin,
+                                                -info.margin, -info.margin));
+            }
         }
-        if (info.margin > 0.0) {
-            QPen marginPen(QColor(0x4f, 0x7c, 0xc0, 90), 1.0);
-            marginPen.setStyle(Qt::DotLine);
-            painter->setPen(marginPen);
-            painter->drawRect(page.adjusted(info.margin, info.margin,
-                                            -info.margin, -info.margin));
-        }
+        constexpr qreal margin = kPxPerMm * 10.0;
+        QPen marginPen(QColor(0x4f, 0x7c, 0xc0, 70), 1.0);
+        marginPen.setStyle(Qt::DashLine);
+        painter->setPen(marginPen);
+        painter->setBrush(Qt::NoBrush);
+        painter->drawRect(page.adjusted(margin, margin, -margin, -margin));
     }
 
     if (m_grid) {
@@ -505,15 +514,6 @@ void CanvasView::drawBackground(QPainter *painter, const QRectF &rect)
                 painter->drawLine(QPointF(page.left(), y), QPointF(page.right(), y));
         }
         painter->restore();
-    }
-
-    if (m_showPrintableArea) {
-        constexpr qreal margin = kPxPerMm * 10.0;
-        QPen marginPen(QColor(0x4f, 0x7c, 0xc0, 70), 1.0);
-        marginPen.setStyle(Qt::DashLine);
-        painter->setPen(marginPen);
-        painter->setBrush(Qt::NoBrush);
-        painter->drawRect(page.adjusted(margin, margin, -margin, -margin));
     }
 
     painter->setPen(QPen(QColor(0xc8, 0xce, 0xd8), 1.0));
@@ -915,14 +915,17 @@ VectorItem *CanvasView::addVectorObject(const VectorObject &object, bool record,
         item->setSelected(true);
     }
 
-    normalizeZOrder();
-    applyLayerState(copy.layer);
-    updateSnapSettings();
+    if (!m_bulkLoading) {
+        normalizeZOrder();
+        applyLayerState(copy.layer);
+        updateSnapSettings();
+    }
 
     if (record)
         emit endEdit();
 
-    emit selectionChanged(selectedVectorItems().size());
+    if (!m_bulkLoading)
+        emit selectionChanged(selectedVectorItems().size());
     return item;
 }
 
@@ -1352,12 +1355,14 @@ void CanvasView::setDocument(const Document &document)
     m_nextPatternId = 1;
     for (const PatternDefinition &pattern : m_patterns)
         m_nextPatternId = qMax(m_nextPatternId, pattern.id + 1);
+    m_bulkLoading = true;
     for (const VectorObject &object : document.objects) {
         VectorObject copy = object;
         if (copy.page == -9999)
             copy.page = 0;
         addVectorObject(copy, false, false);
     }
+    m_bulkLoading = false;
     updateAllBlends();
     normalizeZOrder();
     for (int i = 0; i < m_layers.size(); ++i)
@@ -4011,8 +4016,52 @@ void CanvasView::applyTextOnPath()
     emit statusHint(QStringLiteral("Текст размещён по контуру."));
 }
 
-void CanvasView::applyTextInShape()
+void CanvasView::setTextPathOffset(qreal offset)
 {
+    offset = qBound(0.0, offset, 1.0);
+    bool changed = false;
+    for (VectorItem *item : selectedVectorItems()) {
+        VectorObject object = item->object();
+        if (object.type != ShapeType::Text || !object.textOnPath)
+            continue;
+        if (qFuzzyCompare(object.textPathOffset, offset))
+            continue;
+        if (!changed)
+            emit beginEdit();
+        object.textPathOffset = offset;
+        item->setObject(object);
+        changed = true;
+    }
+    if (changed) {
+        emit endEdit();
+        emit statusHint(QStringLiteral("Начало текста на контуре: %1 %")
+                            .arg(qRound(offset * 100.0)));
+    }
+}
+
+void CanvasView::setTextPathReverse(bool reverse)
+{
+    bool changed = false;
+    for (VectorItem *item : selectedVectorItems()) {
+        VectorObject object = item->object();
+        if (object.type != ShapeType::Text || !object.textOnPath)
+            continue;
+        if (object.textPathReverse == reverse)
+            continue;
+        if (!changed)
+            emit beginEdit();
+        object.textPathReverse = reverse;
+        item->setObject(object);
+        changed = true;
+    }
+    if (changed) {
+        emit endEdit();
+        emit statusHint(reverse ? QStringLiteral("Текст идёт в обратном направлении.")
+                                : QStringLiteral("Текст идёт по направлению кривой."));
+    }
+}
+
+void CanvasView::applyTextInShape(){
     VectorItem *textItem = nullptr;
     VectorItem *shapeItem = nullptr;
     for (VectorItem *item : selectedVectorItems()) {
@@ -6282,6 +6331,7 @@ int CanvasView::insertImportedObjects(const QVector<VectorObject> &objects,
     emit beginEdit();
     scene()->clearSelection();
     int added = 0;
+    VectorItem *onlyItem = nullptr;
     for (VectorObject object : objects) {
         object.pos += offset;
         object.page = m_currentPage;
@@ -6293,12 +6343,16 @@ int CanvasView::insertImportedObjects(const QVector<VectorObject> &objects,
         object.blendId = 0;
         object.id = 0;
         if (VectorItem *item = addVectorObject(object, false, false)) {
-            item->setSelected(true);
+            onlyItem = item;
             ++added;
         }
     }
+    // A single asset is convenient to keep selected; a whole imported page
+    // should not be covered by selection frames.
+    if (added == 1 && onlyItem)
+        onlyItem->setSelected(true);
     emit endEdit();
-    emit selectionChanged(added);
+    emit selectionChanged(added == 1 ? 1 : 0);
     emit statusHint(QStringLiteral("Вставлено объектов из библиотеки: %1.").arg(added));
     viewport()->update();
     return added;
@@ -6466,6 +6520,40 @@ void CanvasView::handleDrop(QDropEvent *event)
                 if (file.open(QIODevice::ReadOnly))
                     inserted = insertSvgAsset(QString::fromUtf8(file.readAll()), scenePos) > 0
                                || inserted;
+            } else if (VectorFormats::formatForPath(path) == VectorFormats::Format::Pdf
+                       || VectorFormats::formatForPath(path) == VectorFormats::Format::Ai
+                       || VectorFormats::formatForPath(path) == VectorFormats::Format::Eps
+                       || VectorFormats::formatForPath(path) == VectorFormats::Format::Cdr
+                       || VectorFormats::formatForPath(path) == VectorFormats::Format::Cmx
+                       || VectorFormats::formatForPath(path)
+                              == VectorFormats::Format::Vectorcraft) {
+                Document imported;
+                QString error;
+                if (!VectorFormats::importDocument(path, &imported, &error))
+                    continue;
+                QVector<VectorObject> objects;
+                QRectF box;
+                for (const VectorObject &object : imported.objects) {
+                    if (object.page != 0)
+                        continue;
+                    objects.append(object);
+                    const QRectF bounds = object.localBounds().translated(object.pos);
+                    box = box.isNull() ? bounds : box.united(bounds);
+                }
+                if (objects.isEmpty() || box.width() < 0.5 || box.height() < 0.5)
+                    continue;
+                const QSizeF page = pageSize();
+                const qreal fitScale = qMin<qreal>(
+                    1.0, qMin(page.width() * 0.9 / box.width(),
+                              page.height() * 0.9 / box.height()));
+                QTransform fit;
+                fit.scale(fitScale, fitScale);
+                for (VectorObject &object : objects) {
+                    object.path = fit.map(object.path);
+                    object.pos = fit.map(object.pos);
+                    object.textBox = fit.mapRect(object.textBox);
+                }
+                inserted = insertImportedObjects(objects, scenePos) > 0 || inserted;
             } else {
                 QImageReader reader(path);
                 const QImage image = reader.read();

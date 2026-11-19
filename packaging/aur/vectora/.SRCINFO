@@ -1,6 +1,6 @@
 pkgbase = vectora
 	pkgdesc = Cross-platform vector graphics editor
-	pkgver = 0.2.6
+	pkgver = 0.3.0
 	pkgrel = 1
 	url = https://github.com/pavelvay/vectora
 	arch = x86_64
@@ -9,7 +9,9 @@ pkgbase = vectora
 	depends = qt6-base
 	depends = qt6-svg
 	depends = hicolor-icon-theme
-	source = vectora-0.2.6.tar.gz::https://github.com/pavelvay/vectora/archive/refs/tags/v0.2.6.tar.gz
-	sha256sums = 6f0c3f750c9736f8a5ebe9f54006eb349cea63243655f07eabcb50375bd21ab3
+	depends = qt6-webengine
+	depends = libcdr
+	source = vectora-0.3.0.tar.gz::https://github.com/pavelvay/vectora/archive/refs/tags/v0.3.0.tar.gz
+	sha256sums = SKIP
 
 pkgname = vectora

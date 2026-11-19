@@ -878,6 +878,21 @@ struct CodeLayout {
     bool linear = false;
 };
 
+// Square in the centre of a QR code reserved for an embedded logo. The dialog
+// keeps the fraction below 30% and raises the error correction to H.
+QRectF codeLogoRect(const VectorObject &object, const CodeLayout &layout)
+{
+    if (layout.linear || object.codeLogo.isNull())
+        return QRectF();
+    const qreal side = qMin(layout.moduleArea.width(), layout.moduleArea.height());
+    const qreal logoSize = side * qBound<qreal>(0.08, object.codeLogoScale, 0.30);
+    if (logoSize < 4.0)
+        return QRectF();
+    return QRectF(layout.moduleArea.center().x() - logoSize / 2.0,
+                  layout.moduleArea.center().y() - logoSize / 2.0,
+                  logoSize, logoSize);
+}
+
 CodeLayout codeLayout(const VectorObject &object)
 {
     CodeLayout layout;
@@ -943,6 +958,37 @@ void paintCodeObject(QPainter *painter, const VectorObject &object)
                                          layout.moduleArea.top() + y * layout.unit,
                                          layout.unit + 0.15,
                                          layout.unit + 0.15));
+            }
+        }
+
+        const QRectF logoRect = codeLogoRect(object, layout);
+        if (!logoRect.isNull()) {
+            const qreal pad = qMax(layout.unit * 0.75, logoRect.width() * 0.08);
+            const QRectF plate = logoRect.adjusted(-pad, -pad, pad, pad);
+            const qreal radius = qMin(plate.width(), plate.height()) * 0.12;
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(object.codeBackground.alpha() > 0
+                                  ? object.codeBackground
+                                  : QColor(Qt::white));
+            painter->drawRoundedRect(plate, radius, radius);
+
+            const QSizeF imageSize(object.codeLogo.width(),
+                                   object.codeLogo.height());
+            if (imageSize.width() > 0.0 && imageSize.height() > 0.0) {
+                const qreal scale =
+                    qMin(logoRect.width() / imageSize.width(),
+                         logoRect.height() / imageSize.height());
+                const QSizeF targetSize(imageSize.width() * scale,
+                                        imageSize.height() * scale);
+                const QRectF target(logoRect.center().x() - targetSize.width() / 2.0,
+                                    logoRect.center().y() - targetSize.height() / 2.0,
+                                    targetSize.width(), targetSize.height());
+                QPainterPath clip;
+                clip.addRoundedRect(logoRect, radius * 0.6, radius * 0.6);
+                painter->save();
+                painter->setClipPath(clip);
+                painter->drawImage(target, object.codeLogo);
+                painter->restore();
             }
         }
     }
@@ -1507,6 +1553,10 @@ QJsonObject objectToJson(const VectorObject &object)
             rows.append(row);
         }
         entry.insert(QStringLiteral("codeCells"), rows);
+        entry.insert(QStringLiteral("codeLogoScale"), object.codeLogoScale);
+        const QString logo = imageToJson(object.codeLogo);
+        if (!logo.isEmpty())
+            entry.insert(QStringLiteral("codeLogo"), logo);
     }
     entry.insert(QStringLiteral("cornerRadius"), object.cornerRadius);
     entry.insert(QStringLiteral("sides"), object.sides);
@@ -1724,6 +1774,9 @@ VectorObject objectFromJson(const QJsonObject &entry)
             for (const QChar c : row)
                 object.codeCells.append(c == QLatin1Char('1'));
         }
+        object.codeLogoScale =
+            entry.value(QStringLiteral("codeLogoScale")).toDouble(0.22);
+        object.codeLogo = imageFromJson(entry.value(QStringLiteral("codeLogo")));
     }
     object.cornerRadius = entry.value(QStringLiteral("cornerRadius")).toDouble(0.0);
     object.sides = entry.value(QStringLiteral("sides")).toInt(6);
@@ -2336,6 +2389,30 @@ QString Document::toSvg(bool withBackground) const
                                         color.name(QColor::HexRgb),
                                         num(color.alphaF()));
                     }
+                }
+                const QRectF logoRect = codeLogoRect(object, layout);
+                if (!logoRect.isNull()) {
+                    const qreal pad = qMax(layout.unit * 0.75,
+                                           logoRect.width() * 0.08);
+                    const QRectF plate = logoRect.adjusted(-pad, -pad, pad, pad);
+                    const QColor plateColor = object.codeBackground.alpha() > 0
+                                                  ? object.codeBackground
+                                                  : QColor(Qt::white);
+                    svg += QStringLiteral(
+                               "    <rect x=\"%1\" y=\"%2\" width=\"%3\" height=\"%4\" "
+                               "rx=\"%5\" fill=\"%6\" fill-opacity=\"%7\"/>\n")
+                               .arg(num(plate.x()), num(plate.y()),
+                                    num(plate.width()), num(plate.height()),
+                                    num(plate.width() * 0.12),
+                                    plateColor.name(QColor::HexRgb),
+                                    num(plateColor.alphaF()));
+                    svg += QStringLiteral(
+                               "    <image x=\"%1\" y=\"%2\" width=\"%3\" height=\"%4\" "
+                               "preserveAspectRatio=\"xMidYMid meet\" "
+                               "xlink:href=\"data:image/png;base64,%5\"/>\n")
+                               .arg(num(logoRect.x()), num(logoRect.y()),
+                                    num(logoRect.width()), num(logoRect.height()),
+                                    imageToJson(object.codeLogo));
                 }
             }
             svg += QStringLiteral("  </g>\n");

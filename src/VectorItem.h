@@ -19,7 +19,6 @@ public:
     QPainterPath shape() const override;
     void paint(QPainter *painter, const QStyleOptionGraphicsItem *option,
                QWidget *widget) override;
-
     VectorObject object() const;
     void setObject(const VectorObject &object);
     QVector<Effect> effects() const { return m_object.effects; }
@@ -85,6 +84,7 @@ protected:
     void mouseMoveEvent(QGraphicsSceneMouseEvent *event) override;
     void mouseReleaseEvent(QGraphicsSceneMouseEvent *event) override;
     void mouseDoubleClickEvent(QGraphicsSceneMouseEvent *event) override;
+    QVariant itemChange(GraphicsItemChange change, const QVariant &value) override;
 
 private:
     enum class Interaction { None, Move, Resize, Rotate, Pivot };
@@ -96,8 +96,16 @@ private:
     void drawSelection(QPainter *painter) const;
     void applySnapping();
     void updateTextBoxHeight();
+    void prepareShapeChange();
+    QPainterPath baseHitShape() const;
+    qreal viewScale() const;
 
     VectorObject m_object;
+    mutable QPainterPath m_hitShape;
+    mutable bool m_hitShapeDirty = true;
+    mutable QPainterPath m_selectedHitShape;
+    mutable bool m_selectedHitShapeDirty = true;
+    mutable qreal m_cachedViewScale = 1.0;
     bool m_snapEnabled = false;
     qreal m_snapStep = 20.0;
     qreal m_snapThreshold = 6.0;

@@ -85,6 +85,7 @@
 #include "CodeDialog.h"
 #include "DocumentDialogs.h"
 #include "DocumentTools.h"
+#include "FormatIO.h"
 #include "TemplateStore.h"
 #include "DockPanels.h"
 #include "Icons.h"
@@ -352,12 +353,12 @@ void MainWindow::createActions()
 
     act = makeAction(QStringLiteral("import"), QStringLiteral("Импорт…"),
                      QKeySequence(QStringLiteral("Ctrl+I")),
-                     QStringLiteral("Импортировать SVG или изображение"), false);
+                     QStringLiteral("Импортировать SVG, изображение, PDF, AI или EPS"), false);
     connect(act, &QAction::triggered, this, &MainWindow::importFile);
 
     act = makeAction(QStringLiteral("export"), QStringLiteral("Экспорт…"),
                      QKeySequence(QStringLiteral("Ctrl+E")),
-                     QStringLiteral("Экспортировать в PNG или SVG"), false);
+                     QStringLiteral("Экспортировать в PDF, AI, EPS, SVG, PNG или Vectorcraft"), false);
     connect(act, &QAction::triggered, this, &MainWindow::exportFile);
 
     act = makeAction(QStringLiteral("pdf"), QStringLiteral("Экспорт в PDF…"),
@@ -3977,7 +3978,7 @@ void MainWindow::openDocument()
                                              : QFileInfo(m_filePath).absolutePath();
     const QString path = QFileDialog::getOpenFileName(
         this, QStringLiteral("Открыть документ"), directory,
-        QStringLiteral("Документы Vectora (*.vct);;Все файлы (*)"));
+        VectorFormats::openFilter());
     if (path.isEmpty())
         return;
 
@@ -3991,15 +3992,23 @@ bool MainWindow::openPath(const QString &path)
 {
     Document document;
     QString error;
-    if (!document.load(path, &error)) {
+    const VectorFormats::Format format = VectorFormats::formatForPath(path);
+    if (!VectorFormats::importDocument(path, &document, &error)) {
         QMessageBox::critical(this, QStringLiteral("Ошибка открытия"), error);
         return false;
     }
 
     applyDocument(document);
-    m_filePath = path;
+    // Only native JSON documents keep their path; imported PDF/AI/EPS files
+    // open as a new unsaved document so "Save" never overwrites the source.
+    if (VectorFormats::isDocumentFormat(format)) {
+        m_filePath = path;
+        m_versions = loadVersions(path);
+    } else {
+        m_filePath.clear();
+        m_versions.clear();
+    }
     m_modified = false;
-    m_versions = loadVersions(path);
     resetHistory();
     loadHistorySidecar();
     clearAutosave();
@@ -4012,6 +4021,11 @@ bool MainWindow::openPath(const QString &path)
         statusBar()->showMessage(
             QStringLiteral("Отсутствуют шрифты: %1").arg(absent.join(QStringLiteral(", "))),
             8000);
+    } else if (!VectorFormats::isDocumentFormat(format)) {
+        statusBar()->showMessage(
+            QStringLiteral("Импортирован %1: %2")
+                .arg(VectorFormats::formatName(format), QFileInfo(path).fileName()),
+            6000);
     }
     return true;
 }
@@ -4024,15 +4038,19 @@ void MainWindow::saveDocument()
     }
 
     QString error;
-    if (!currentDocument().save(m_filePath, &error)) {
+    if (!VectorFormats::exportDocument(currentDocument(), m_filePath, &error)) {
         QMessageBox::critical(this, QStringLiteral("Ошибка сохранения"), error);
         return;
     }
+    const bool native = VectorFormats::formatForPath(m_filePath)
+                        == VectorFormats::Format::Vectora;
 
     m_modified = false;
     clearAutosave();
-    saveHistorySidecar();
-    saveVersions(m_filePath, m_versions, nullptr);
+    if (native) {
+        saveHistorySidecar();
+        saveVersions(m_filePath, m_versions, nullptr);
+    }
     updateTitle();
     addRecentFile(m_filePath);
     statusBar()->showMessage(
@@ -4045,16 +4063,21 @@ void MainWindow::saveDocumentAs()
     if (suggested.isEmpty())
         suggested = QDir::homePath() + QStringLiteral("/без имени.vct");
 
+    QString selectedFilter;
     QString path = QFileDialog::getSaveFileName(
         this, QStringLiteral("Сохранить как"), suggested,
-        QStringLiteral("Документы Vectora (*.vct)"));
+        VectorFormats::saveFilter(), &selectedFilter);
     if (path.isEmpty())
         return;
-    if (!path.endsWith(QLatin1String(".vct"), Qt::CaseInsensitive))
-        path += QStringLiteral(".vct");
+    if (!path.endsWith(QLatin1String(".vct"), Qt::CaseInsensitive)
+        && !path.endsWith(QLatin1String(".vectorcraft"), Qt::CaseInsensitive)) {
+        path += selectedFilter.contains(QLatin1String("Vectorcraft"))
+                    ? QStringLiteral(".vectorcraft")
+                    : QStringLiteral(".vct");
+    }
 
     QString error;
-    if (!currentDocument().save(path, &error)) {
+    if (!VectorFormats::exportDocument(currentDocument(), path, &error)) {
         QMessageBox::critical(this, QStringLiteral("Ошибка сохранения"), error);
         return;
     }
@@ -4062,8 +4085,10 @@ void MainWindow::saveDocumentAs()
     m_filePath = path;
     m_modified = false;
     clearAutosave();
-    saveHistorySidecar();
-    saveVersions(m_filePath, m_versions, nullptr);
+    if (VectorFormats::formatForPath(m_filePath) == VectorFormats::Format::Vectora) {
+        saveHistorySidecar();
+        saveVersions(m_filePath, m_versions, nullptr);
+    }
     updateTitle();
     addRecentFile(path);
     statusBar()->showMessage(
@@ -4074,10 +4099,78 @@ void MainWindow::importFile()
 {
     const QString path = QFileDialog::getOpenFileName(
         this, QStringLiteral("Импорт"), QDir::homePath(),
-        QStringLiteral("Изображения и SVG (*.png *.jpg *.jpeg *.bmp *.svg);;"
-                       "Все файлы (*)"));
+        VectorFormats::importFilter());
     if (path.isEmpty())
         return;
+
+    const VectorFormats::Format vectorFormat = VectorFormats::formatForPath(path);
+    if (vectorFormat == VectorFormats::Format::Pdf
+        || vectorFormat == VectorFormats::Format::Ai
+        || vectorFormat == VectorFormats::Format::Eps
+        || vectorFormat == VectorFormats::Format::Cdr
+        || vectorFormat == VectorFormats::Format::Cmx) {
+        Document imported;
+        QString error;
+        if (!VectorFormats::importDocument(path, &imported, &error)) {
+            QMessageBox::critical(this, QStringLiteral("Импорт"), error);
+            return;
+        }
+
+        QRectF box;
+        for (const VectorObject &object : imported.objects) {
+            if (object.page != 0)
+                continue;
+            const QRectF current = object.localBounds().translated(object.pos);
+            box = box.isNull() ? current : box.united(current);
+        }
+        if (box.width() < 0.5 || box.height() < 0.5) {
+            QMessageBox::information(
+                this, QStringLiteral("Импорт"),
+                QStringLiteral("В файле нет объектов для импорта."));
+            return;
+        }
+
+        const QSizeF page = m_view->pageSize();
+        const qreal scale = qMin<qreal>(
+            1.0, qMin(page.width() * 0.8 / box.width(),
+                      page.height() * 0.8 / box.height()));
+        QTransform fit;
+        fit.translate((page.width() - box.width() * scale) / 2.0
+                          - box.left() * scale,
+                      (page.height() - box.height() * scale) / 2.0
+                          - box.top() * scale);
+        fit.scale(scale, scale);
+
+        const int layer = m_view->addLayer(
+            QFileInfo(path).completeBaseName().left(32));
+        beginEdit();
+        m_view->scene()->clearSelection();
+        int importedCount = 0;
+        for (VectorObject object : imported.objects) {
+            if (object.page != 0)
+                continue;
+            object.pos = fit.map(object.pos);
+            object.path = fit.map(object.path);
+            object.textBox = fit.mapRect(object.textBox);
+            object.page = -9999;
+            object.layer = layer;
+            object.group = 0;
+            object.id = 0;
+            object.masterId = 0;
+            object.symbolId = 0;
+            object.instanceId = 0;
+            object.blendId = 0;
+            if (m_view->addVectorObject(object, false, false))
+                ++importedCount;
+        }
+        endEdit();
+        statusBar()->showMessage(
+            QStringLiteral("Импортировано объектов %1: %2")
+                .arg(VectorFormats::formatName(vectorFormat))
+                .arg(importedCount),
+            5000);
+        return;
+    }
 
     if (path.endsWith(QLatin1String(".svg"), Qt::CaseInsensitive)) {
         Document imported;
@@ -4104,11 +4197,8 @@ void MainWindow::importFile()
             object.group = groupMap.value(object.group, 0);
             object.id = 0;
             object.masterId = 0;
-            VectorItem *item = m_view->addVectorObject(object, false, false);
-            if (item) {
-                item->setSelected(true);
+            if (m_view->addVectorObject(object, false, false))
                 ++importedCount;
-            }
         }
         endEdit();
         statusBar()->showMessage(
@@ -4161,17 +4251,71 @@ void MainWindow::exportFile()
     QString selectedFilter;
     QString path = QFileDialog::getSaveFileName(
         this, QStringLiteral("Экспорт"), suggested,
-        QStringLiteral("PNG-изображение (*.png);;SVG-вектор (*.svg)"), &selectedFilter);
+        VectorFormats::exportFilter(), &selectedFilter);
     if (path.isEmpty())
         return;
-    if (!path.contains(QLatin1Char('.'))) {
-        if (selectedFilter.contains(QLatin1String("SVG")))
-            path += QStringLiteral(".svg");
-        else
-            path += QStringLiteral(".png");
+
+    // The chosen file type wins over a stale extension in the suggested name,
+    // so picking "PDF" never writes a PNG just because the name ended in .png.
+    QString expectedExtension;
+    if (selectedFilter.contains(QLatin1String("PDF")))
+        expectedExtension = QStringLiteral("pdf");
+    else if (selectedFilter.contains(QLatin1String("Illustrator")))
+        expectedExtension = QStringLiteral("ai");
+    else if (selectedFilter.contains(QLatin1String("EPS")))
+        expectedExtension = QStringLiteral("eps");
+    else if (selectedFilter.contains(QLatin1String("CMX")))
+        expectedExtension = QStringLiteral("cmx");
+    else if (selectedFilter.contains(QLatin1String("Vectorcraft")))
+        expectedExtension = QStringLiteral("vectorcraft");
+    else if (selectedFilter.contains(QLatin1String("SVG")))
+        expectedExtension = QStringLiteral("svg");
+    else if (selectedFilter.contains(QLatin1String("PNG")))
+        expectedExtension = QStringLiteral("png");
+
+    const QString suffix = QFileInfo(path).suffix().toLower();
+    const bool matches = expectedExtension == QLatin1String("eps")
+                             ? (suffix == QLatin1String("eps")
+                                || suffix == QLatin1String("esp"))
+                             : suffix == expectedExtension;
+    if (!expectedExtension.isEmpty() && !matches) {
+        if (suffix.isEmpty()) {
+            path += QLatin1Char('.') + expectedExtension;
+        } else {
+            path = path.left(path.size() - suffix.size() - 1)
+                   + QLatin1Char('.') + expectedExtension;
+        }
+    } else if (suffix.isEmpty()) {
+        path += QStringLiteral(".png");
     }
 
     const Document document = currentDocument();
+
+    const VectorFormats::Format format = VectorFormats::formatForPath(path);
+    if (format == VectorFormats::Format::Cmx) {
+        QMessageBox::information(
+            this, QStringLiteral("Экспорт CMX"),
+            QStringLiteral(
+                "Экспорт CMX пока находится в разработке: файл не создаётся.\n"
+                "Для обмена с CorelDRAW используйте PDF, AI, EPS или SVG."));
+        return;
+    }
+    if (format == VectorFormats::Format::Pdf
+        || format == VectorFormats::Format::Ai
+        || format == VectorFormats::Format::Eps
+        || format == VectorFormats::Format::Vectorcraft) {
+        QString error;
+        if (!VectorFormats::exportDocument(document, path, &error)) {
+            QMessageBox::critical(this, QStringLiteral("Экспорт"), error);
+            return;
+        }
+        statusBar()->showMessage(
+            QStringLiteral("%1 сохранён: %2")
+                .arg(VectorFormats::formatName(format),
+                     QFileInfo(path).fileName()),
+            5000);
+        return;
+    }
 
     if (path.endsWith(QLatin1String(".svg"), Qt::CaseInsensitive)) {
         QSaveFile file(path);
@@ -4227,42 +4371,11 @@ void MainWindow::exportPdf()
         path += QStringLiteral(".pdf");
 
     const Document source = currentDocument();
-    const QVector<PageInfo> pages = source.pages;
-    QPdfWriter writer(path);
-    writer.setResolution(96);
-    writer.setPageMargins(QMarginsF(0, 0, 0, 0));
-
-    QPainter painter;
-    bool started = false;
-    const int count = qMax(1, pages.size());
-    for (int index = 0; index < count; ++index) {
-        Document pageDocument = source;
-        pageDocument.currentPage = index < pages.size() ? index : 0;
-        if (index < pages.size())
-            pageDocument.pageSize = pages.at(index).size;
-        const QSizeF millimeters(pageDocument.pageSize.width() * 25.4 / 96.0,
-                                 pageDocument.pageSize.height() * 25.4 / 96.0);
-        writer.setPageSize(QPageSize(millimeters, QPageSize::Millimeter,
-                                     QStringLiteral("Vectora")));
-        if (!started) {
-            if (!painter.begin(&writer)) {
-                QMessageBox::critical(this, QStringLiteral("Экспорт"),
-                                      QStringLiteral("Не удалось создать PDF."));
-                return;
-            }
-            started = true;
-        } else {
-            writer.newPage();
-        }
-        painter.save();
-        const qreal scaleX = writer.width() / pageDocument.pageSize.width();
-        const qreal scaleY = writer.height() / pageDocument.pageSize.height();
-        painter.scale(scaleX, scaleY);
-        pageDocument.render(&painter);
-        painter.restore();
+    QString error;
+    if (!VectorFormats::writePdf(source, path, &error)) {
+        QMessageBox::critical(this, QStringLiteral("Экспорт"), error);
+        return;
     }
-    if (started)
-        painter.end();
 
     statusBar()->showMessage(
         QStringLiteral("PDF сохранён: %1").arg(QFileInfo(path).fileName()), 5000);
@@ -4891,8 +5004,14 @@ void MainWindow::onSelectionChanged(int count)
 {
     if (m_selectionLabel)
         m_selectionLabel->setText(QStringLiteral("Выделено: %1").arg(count));
-    refreshQuickTransform();
-    syncShapeOptions();
+    if (m_selectionUpdateScheduled)
+        return;
+    m_selectionUpdateScheduled = true;
+    QTimer::singleShot(0, this, [this]() {
+        m_selectionUpdateScheduled = false;
+        refreshQuickTransform();
+        syncShapeOptions();
+    });
 }
 
 void MainWindow::syncShapeOptions()
@@ -5187,7 +5306,7 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("О программе"),
         QStringLiteral(
-            "<h3>Vectora 0.2.6</h3>"
+            "<h3>Vectora 0.3.0</h3>"
             "<p>Кроссплатформенный векторный редактор на C++ и Qt 6.</p>"
             "<p>Логические операции, нож, ластик, Shape Builder, контур и "
             "конверт; градиенты всех типов, цветовые пространства и палитры; "

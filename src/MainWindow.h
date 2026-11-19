@@ -211,6 +211,7 @@ private:
     QVector<DocumentVersion> m_versions;
     QString m_autosaveSession;
     class QTimer *m_autosaveTimer = nullptr;
+    bool m_selectionUpdateScheduled = false;
     QJsonObject m_pendingSnapshot;
     QVector<VectorObject> m_clipboard;
 };

@@ -228,7 +228,15 @@ DockPanels::DockPanels(QMainWindow *host, CanvasView *view, QObject *parent)
         finishOpacityEdit();
     });
 
-    connect(m_view, &CanvasView::selectionChanged, this, [this](int) { refresh(); });
+    connect(m_view, &CanvasView::selectionChanged, this, [this](int) {
+        if (m_refreshScheduled)
+            return;
+        m_refreshScheduled = true;
+        QTimer::singleShot(0, this, [this]() {
+            m_refreshScheduled = false;
+            refresh();
+        });
+    });
 }
 
 QDockWidget *DockPanels::createDock(const QString &title, QWidget *content)
@@ -1991,7 +1999,10 @@ void DockPanels::rebuildEffectEditor()
 {
     if (!m_effectForm || !m_effectEditor)
         return;
-    while (QLayoutItem *layoutItem = m_effectForm->takeAt(0)) {
+    while (m_effectForm->count() > 0) {
+        QLayoutItem *layoutItem = m_effectForm->takeAt(0);
+        if (!layoutItem)
+            break;
         if (QWidget *widget = layoutItem->widget())
             widget->deleteLater();
         delete layoutItem;
@@ -2441,6 +2452,37 @@ void DockPanels::buildTextDocker()
     alignRow->addStretch(1);
     layout->addLayout(alignRow);
     m_alignButtons[0]->setChecked(true);
+
+    auto *pathLabel = new QLabel(QStringLiteral("Текст по кривой"), m_textContent);
+    pathLabel->setStyleSheet(QStringLiteral("color:#8b929d; font-size:11px;"));
+    layout->addWidget(pathLabel);
+
+    auto *pathRow = new QHBoxLayout;
+    m_textPathAttach = new QToolButton(m_textContent);
+    m_textPathAttach->setText(QStringLiteral("Прикрепить"));
+    m_textPathAttach->setToolTip(
+        QStringLiteral("Разместить выделенный текст вдоль выделенной кривой"));
+    m_textPathDetach = new QToolButton(m_textContent);
+    m_textPathDetach->setText(QStringLiteral("Отсоединить"));
+    m_textPathDetach->setToolTip(
+        QStringLiteral("Вернуть текст в обычную текстовую рамку"));
+    pathRow->addWidget(m_textPathAttach);
+    pathRow->addWidget(m_textPathDetach);
+    pathRow->addStretch(1);
+    layout->addLayout(pathRow);
+
+    auto *pathOptions = new QHBoxLayout;
+    pathOptions->addWidget(fieldLabel(QStringLiteral("Начало"), m_textContent));
+    m_textPathOffset = spinField(m_textContent, 0, 100, 0,
+                                 QStringLiteral(" %"), 0, 64);
+    m_textPathOffset->setToolTip(
+        QStringLiteral("Сдвиг текста вдоль кривой"));
+    pathOptions->addWidget(m_textPathOffset);
+    m_textPathReverse = new QCheckBox(QStringLiteral("В обратную сторону"),
+                                      m_textContent);
+    pathOptions->addWidget(m_textPathReverse);
+    pathOptions->addStretch(1);
+    layout->addLayout(pathOptions);
     layout->addStretch(1);
 
     connect(alignGroup, &QButtonGroup::idClicked, this, [this](int id) {
@@ -2477,6 +2519,20 @@ void DockPanels::buildTextDocker()
         if (!m_updating)
             applyText();
     });
+    connect(m_textPathAttach, &QToolButton::clicked, this, [this]() {
+        m_view->applyTextOnPath();
+    });
+    connect(m_textPathDetach, &QToolButton::clicked, this, [this]() {
+        m_view->detachTextSpecial();
+    });
+    connect(m_textPathOffset, &QDoubleSpinBox::valueChanged, this, [this](double value) {
+        if (!m_updating)
+            m_view->setTextPathOffset(value / 100.0);
+    });
+    connect(m_textPathReverse, &QCheckBox::toggled, this, [this](bool on) {
+        if (!m_updating)
+            m_view->setTextPathReverse(on);
+    });
 
     createDock(QStringLiteral("Текст"), m_textContent);
 }
@@ -2505,6 +2561,18 @@ void DockPanels::refreshText()
         m_underlineButton->setChecked(object.font.underline());
         m_textAlign = qBound(0, object.textAlign, 2);
         m_alignButtons[m_textAlign]->setChecked(true);
+        const bool onPath = object.textOnPath && !object.textPathCurve.isEmpty();
+        m_textPathAttach->setEnabled(true);
+        m_textPathDetach->setEnabled(onPath);
+        m_textPathOffset->setEnabled(onPath);
+        m_textPathReverse->setEnabled(onPath);
+        m_textPathOffset->setValue(qRound(object.textPathOffset * 100.0));
+        m_textPathReverse->setChecked(object.textPathReverse);
+    } else {
+        m_textPathAttach->setEnabled(false);
+        m_textPathDetach->setEnabled(false);
+        m_textPathOffset->setEnabled(false);
+        m_textPathReverse->setEnabled(false);
     }
     m_updating = false;
 }

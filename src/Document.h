@@ -210,6 +210,8 @@ struct VectorObject {
     int codeModulesY = 0;
     QVector<bool> codeCells;
     QString codeHumanText;
+    QImage codeLogo;              // optional image in the centre of a QR code
+    qreal codeLogoScale = 0.22;   // logo side as a fraction of the QR side
 
     QRectF localBounds() const;
 };

@@ -4,6 +4,10 @@
 #include <QColor>
 #include <QFile>
 #include <QFontMetricsF>
+#include <QImage>
+#include <QPainter>
+#include <QSvgRenderer>
+#include <QUrl>
 #include <QMap>
 #include <QRegularExpression>
 #include <QStack>
@@ -36,6 +40,7 @@ struct SvgStyle {
     QString fontFamily = QStringLiteral("Adwaita Sans");
     qreal fontSize = 16.0;
     bool bold = false;
+    bool italic = false;
     int textAnchor = 0; // 0 left, 1 middle, 2 end
 };
 
@@ -46,7 +51,21 @@ qreal lengthValue(const QString &text, qreal fallback = 0.0)
     const auto match = number.match(text);
     if (!match.hasMatch())
         return fallback;
-    return match.captured(1).toDouble();
+    qreal value = match.captured(1).toDouble();
+    // SVG lengths such as "595pt" or "10mm" are absolute; convert them to
+    // the 96 dpi pixel space used by the document.
+    const QString unit = text.mid(match.capturedEnd(0)).trimmed().left(2).toLower();
+    if (unit.startsWith(QLatin1String("pt")))
+        value *= 96.0 / 72.0;
+    else if (unit.startsWith(QLatin1String("pc")))
+        value *= 16.0;
+    else if (unit.startsWith(QLatin1String("mm")))
+        value *= 96.0 / 25.4;
+    else if (unit.startsWith(QLatin1String("cm")))
+        value *= 96.0 / 2.54;
+    else if (unit.startsWith(QLatin1String("in")))
+        value *= 96.0;
+    return value;
 }
 
 QColor parseColor(const QString &value, const QColor &fallback)
@@ -63,6 +82,32 @@ QColor parseColor(const QString &value, const QColor &fallback)
         QColor color(hex);
         if (color.isValid())
             return color;
+    }
+    if (text.startsWith(QLatin1String("rgb"), Qt::CaseInsensitive)) {
+        const int open = text.indexOf(QLatin1Char('('));
+        const int close = text.lastIndexOf(QLatin1Char(')'));
+        if (open >= 0 && close > open) {
+            const QStringList parts =
+                text.mid(open + 1, close - open - 1)
+                    .split(QRegularExpression(QStringLiteral("[,\\s]+")),
+                           Qt::SkipEmptyParts);
+            if (parts.size() >= 3) {
+                auto channel = [](QString part) {
+                    const bool percent = part.endsWith(QLatin1Char('%'));
+                    if (percent)
+                        part.chop(1);
+                    bool ok = false;
+                    qreal value = part.toDouble(&ok);
+                    if (!ok)
+                        return 0;
+                    if (percent)
+                        value *= 2.55;
+                    return qBound(0, qRound(value), 255);
+                };
+                return QColor(channel(parts.at(0)), channel(parts.at(1)),
+                              channel(parts.at(2)));
+            }
+        }
     }
     const QColor named(text);
     return named.isValid() ? named : fallback;
@@ -114,6 +159,9 @@ void applyStyleString(SvgStyle &style, const QString &css)
         } else if (key == QLatin1String("font-weight")) {
             style.bold = value == QLatin1String("bold")
                          || value.toInt() >= 600;
+        } else if (key == QLatin1String("font-style")) {
+            style.italic = value == QLatin1String("italic")
+                           || value == QLatin1String("oblique");
         } else if (key == QLatin1String("text-anchor")) {
             style.textAnchor = value == QLatin1String("middle")
                                    ? 1
@@ -337,18 +385,199 @@ void applyShapeStyle(VectorObject &object, const SvgStyle &style,
 
 namespace {
 
-bool importSvgDevice(QIODevice *device, Document *document, QString *error)
+QPainterPath definitionPath(QXmlStreamReader &xml, const QString &name,
+                            const QXmlStreamAttributes &attributes)
 {
-    QXmlStreamReader xml(device);
+    QPainterPath result;
+    if (name == QLatin1String("path")) {
+        return parsePathData(attributes.value(QStringLiteral("d")).toString());
+    }
+    if (name == QLatin1String("rect")) {
+        const QRectF rect(lengthValue(attributes.value(QStringLiteral("x")).toString()),
+                          lengthValue(attributes.value(QStringLiteral("y")).toString()),
+                          lengthValue(attributes.value(QStringLiteral("width")).toString()),
+                          lengthValue(attributes.value(QStringLiteral("height")).toString()));
+        if (rect.width() > 0.0 && rect.height() > 0.0) {
+            result.addPath(buildRectanglePath(
+                rect, lengthValue(attributes.value(QStringLiteral("rx")).toString(), 0.0)));
+        }
+        return result;
+    }
+    if (name == QLatin1String("circle") || name == QLatin1String("ellipse")) {
+        const qreal cx = lengthValue(attributes.value(QStringLiteral("cx")).toString());
+        const qreal cy = lengthValue(attributes.value(QStringLiteral("cy")).toString());
+        const qreal rx = lengthValue(attributes.value(QStringLiteral("r")).toString(),
+                                     lengthValue(attributes.value(QStringLiteral("rx")).toString(), 0.0));
+        const qreal ry = lengthValue(attributes.value(QStringLiteral("r")).toString(),
+                                     lengthValue(attributes.value(QStringLiteral("ry")).toString(), 0.0));
+        if (rx > 0.0 && ry > 0.0)
+            result.addEllipse(QPointF(cx, cy), rx, ry);
+        return result;
+    }
+    if (name == QLatin1String("polyline") || name == QLatin1String("polygon")) {
+        return polygonPath(attributes.value(QStringLiteral("points")).toString(),
+                           name == QLatin1String("polygon"));
+    }
+    if (name == QLatin1String("line")) {
+        result.moveTo(lengthValue(attributes.value(QStringLiteral("x1")).toString()),
+                      lengthValue(attributes.value(QStringLiteral("y1")).toString()));
+        result.lineTo(lengthValue(attributes.value(QStringLiteral("x2")).toString()),
+                      lengthValue(attributes.value(QStringLiteral("y2")).toString()));
+        return result;
+    }
+    if (name == QLatin1String("g") || name == QLatin1String("symbol")
+        || name == QLatin1String("a")) {
+        int depth = 1;
+        while (!xml.atEnd() && depth > 0) {
+            xml.readNext();
+            if (xml.isStartElement()) {
+                ++depth;
+                const QString child = xml.name().toString();
+                const QXmlStreamAttributes childAttributes = xml.attributes();
+                if (child == QLatin1String("path")) {
+                    result.addPath(parsePathData(
+                        childAttributes.value(QStringLiteral("d")).toString()));
+                } else if (child == QLatin1String("rect")) {
+                    const QRectF rect(
+                        lengthValue(childAttributes.value(QStringLiteral("x")).toString()),
+                        lengthValue(childAttributes.value(QStringLiteral("y")).toString()),
+                        lengthValue(childAttributes.value(QStringLiteral("width")).toString()),
+                        lengthValue(childAttributes.value(QStringLiteral("height")).toString()));
+                    if (rect.width() > 0.0 && rect.height() > 0.0)
+                        result.addRect(rect);
+                } else if (child == QLatin1String("circle")
+                           || child == QLatin1String("ellipse")) {
+                    const qreal cx = lengthValue(
+                        childAttributes.value(QStringLiteral("cx")).toString());
+                    const qreal cy = lengthValue(
+                        childAttributes.value(QStringLiteral("cy")).toString());
+                    const qreal r = lengthValue(
+                        childAttributes.value(QStringLiteral("r")).toString());
+                    const qreal rx = lengthValue(
+                        childAttributes.value(QStringLiteral("rx")).toString(), r);
+                    const qreal ry = lengthValue(
+                        childAttributes.value(QStringLiteral("ry")).toString(), r);
+                    if (rx > 0.0 && ry > 0.0)
+                        result.addEllipse(QPointF(cx, cy), rx, ry);
+                } else if (child == QLatin1String("polygon")
+                           || child == QLatin1String("polyline")) {
+                    result.addPath(polygonPath(
+                        childAttributes.value(QStringLiteral("points")).toString(),
+                        child == QLatin1String("polygon")));
+                }
+            } else if (xml.isEndElement()) {
+                --depth;
+            }
+        }
+    }
+    return result;
+}
+
+QImage imageFromHref(const QString &href)
+{
+    QImage image;
+    if (href.startsWith(QLatin1String("data:"))) {
+        const int comma = href.indexOf(QLatin1Char(','));
+        if (comma <= 0)
+            return image;
+        QByteArray payload = href.mid(comma + 1).toLatin1();
+        if (href.left(comma).contains(QLatin1String(";base64")))
+            payload = QByteArray::fromBase64(payload);
+        image.loadFromData(payload);
+    } else if (!href.isEmpty()) {
+        image.load(QUrl::fromPercentEncoding(href.toUtf8()));
+    }
+    return image;
+}
+
+QMap<QString, QString> parseCssClasses(const QByteArray &data)
+{
+    QMap<QString, QString> classes;
+    const QString text = QString::fromUtf8(data);
+    QRegularExpression styleTag(QStringLiteral("<style[^>]*>([\\s\\S]*?)</style>"));
+    auto styleIt = styleTag.globalMatch(text);
+    while (styleIt.hasNext()) {
+        const QString css = styleIt.next().captured(1);
+        QRegularExpression rule(
+            QStringLiteral("\\.([A-Za-z_][A-Za-z0-9_-]*)\\s*\\{([^}]*)\\}"));
+        auto ruleIt = rule.globalMatch(css);
+        while (ruleIt.hasNext()) {
+            const auto match = ruleIt.next();
+            classes.insert(match.captured(1).trimmed(), match.captured(2).trimmed());
+        }
+    }
+    return classes;
+}
+
+bool importSvgDevice(QIODevice *device, Document *document, QString *error,
+                     bool allowEmpty)
+{
+    const QByteArray data = device->readAll();
+    const QMap<QString, QString> cssClasses = parseCssClasses(data);
+
+    // Masks, filters and clip paths are not modelled by the vector importer.
+    // QtSvg renders them correctly, so such files become a single high-quality
+    // page image instead of showing black boxes or clipped-away artwork.
+    if (data.contains("<mask") || data.contains("<filter")
+        || data.contains("clip-path=")) {
+        QSvgRenderer renderer(data);
+        if (renderer.isValid()) {
+            QSize size = renderer.defaultSize();
+            if (size.width() < 1 || size.height() < 1)
+                size = QSize(794, 1123);
+            qreal scale = 2.0;
+            const qreal maxSide = qMax(size.width(), size.height());
+            if (maxSide * scale > 4000.0)
+                scale = 4000.0 / maxSide;
+            const QSize target(qMax(1, qRound(size.width() * scale)),
+                               qMax(1, qRound(size.height() * scale)));
+            QImage image(target, QImage::Format_ARGB32_Premultiplied);
+            image.fill(Qt::white);
+            {
+                QPainter painter(&image);
+                renderer.render(&painter,
+                                QRectF(0, 0, target.width(), target.height()));
+            }
+            Document result;
+            result.pageSize = QSizeF(size);
+            result.layers = {QStringLiteral("Импорт SVG")};
+            result.layerVisible = {true};
+            result.layerLocked = {false};
+            PageInfo page;
+            page.name = QStringLiteral("Страница 1");
+            page.size = QSizeF(size);
+            page.background = QColor(Qt::white);
+            result.pages.append(page);
+            VectorObject object;
+            object.type = ShapeType::Image;
+            object.image = image;
+            object.textBox = QRectF(0, 0, size.width(), size.height());
+            object.pos = QPointF(0, 0);
+            object.page = 0;
+            object.layer = 0;
+            object.hasFill = false;
+            object.hasStroke = false;
+            result.objects.append(object);
+            *document = result;
+            if (error)
+                error->clear();
+            return true;
+        }
+    }
+
+    QXmlStreamReader xml(data);
     Document result;
     result.layers = {QStringLiteral("Импорт SVG")};
     result.layerVisible = {true};
     result.layerLocked = {false};
 
     QMap<QString, GradientDef> gradients;
+    QMap<QString, QPainterPath> definitions;
+    QMap<QString, QImage> definitionImages;
     QStack<QTransform> transforms;
     QStack<SvgStyle> styles;
     QStack<int> groupStack;
+    QStack<bool> groupPushed;
     transforms.push(QTransform());
     styles.push(SvgStyle());
     groupStack.push(0);
@@ -364,23 +593,33 @@ bool importSvgDevice(QIODevice *device, Document *document, QString *error)
             const QXmlStreamAttributes attributes = xml.attributes();
 
             if (name == QLatin1String("svg")) {
-                const qreal width = lengthValue(attributes.value(QStringLiteral("width")).toString(), 794.0);
-                const qreal height = lengthValue(attributes.value(QStringLiteral("height")).toString(), 1123.0);
-                if (width > 1.0 && height > 1.0)
-                    result.pageSize = QSizeF(width, height);
+                qreal width = lengthValue(attributes.value(QStringLiteral("width")).toString(), 0.0);
+                qreal height = lengthValue(attributes.value(QStringLiteral("height")).toString(), 0.0);
                 const QStringList viewBox = attributes.value(QStringLiteral("viewBox"))
                                                 .toString().split(
                                                     QRegularExpression(QStringLiteral("[\\s,]+")),
                                                     Qt::SkipEmptyParts);
+                qreal vbWidth = 0.0;
+                qreal vbHeight = 0.0;
                 if (viewBox.size() == 4) {
-                    const qreal vbWidth = viewBox.at(2).toDouble();
-                    const qreal vbHeight = viewBox.at(3).toDouble();
+                    vbWidth = viewBox.at(2).toDouble();
+                    vbHeight = viewBox.at(3).toDouble();
+                }
+                if (width <= 1.0 || height <= 1.0) {
                     if (vbWidth > 0.0 && vbHeight > 0.0) {
-                        rootTransform.translate(
-                            -viewBox.at(0).toDouble() * width / vbWidth,
-                            -viewBox.at(1).toDouble() * height / vbHeight);
-                        rootTransform.scale(width / vbWidth, height / vbHeight);
+                        width = vbWidth;
+                        height = vbHeight;
+                    } else {
+                        width = 794.0;
+                        height = 1123.0;
                     }
+                }
+                result.pageSize = QSizeF(width, height);
+                if (vbWidth > 0.0 && vbHeight > 0.0) {
+                    rootTransform.translate(
+                        -viewBox.at(0).toDouble() * width / vbWidth,
+                        -viewBox.at(1).toDouble() * height / vbHeight);
+                    rootTransform.scale(width / vbWidth, height / vbHeight);
                 }
                 continue;
             }
@@ -422,7 +661,52 @@ bool importSvgDevice(QIODevice *device, Document *document, QString *error)
                 continue;
             }
 
+            if (inDefs) {
+                const QString id = attributes.value(QStringLiteral("id")).toString();
+                QPainterPath definition;
+                const bool container = name == QLatin1String("g")
+                                       || name == QLatin1String("symbol")
+                                       || name == QLatin1String("a");
+                if (name == QLatin1String("image")) {
+                    if (!id.isEmpty()) {
+                        QString href = attributes.value(QStringLiteral("xlink:href")).toString();
+                        if (href.isEmpty())
+                            href = attributes.value(QStringLiteral("href")).toString();
+                        const QImage image = imageFromHref(href);
+                        if (!image.isNull())
+                            definitionImages.insert(id, image);
+                    }
+                    continue;
+                }
+                const bool shape = name == QLatin1String("path")
+                                   || name == QLatin1String("rect")
+                                   || name == QLatin1String("circle")
+                                   || name == QLatin1String("ellipse")
+                                   || name == QLatin1String("polygon")
+                                   || name == QLatin1String("polyline")
+                                   || name == QLatin1String("line");
+                if (container && id.isEmpty()) {
+                    // Definitions are often wrapped in an unnamed <g>; walk
+                    // into it without creating a visible group.
+                    groupPushed.push(false);
+                    continue;
+                }
+                if (!id.isEmpty() && (container || shape))
+                    definition = definitionPath(xml, name, attributes);
+                else
+                    xml.skipCurrentElement();
+                if (!id.isEmpty() && !definition.isEmpty())
+                    definitions.insert(id, definition);
+                continue;
+            }
+
             SvgStyle style = styles.top();
+            const QString classAttribute = attributes.value(QStringLiteral("class")).toString();
+            for (const QString &className :
+                 classAttribute.split(QLatin1Char(' '), Qt::SkipEmptyParts)) {
+                if (cssClasses.contains(className))
+                    applyStyleString(style, cssClasses.value(className));
+            }
             applyStyleString(style, attributes.value(QStringLiteral("style")).toString());
             if (attributes.hasAttribute(QStringLiteral("fill")))
                 applyStyleString(style,
@@ -470,12 +754,54 @@ bool importSvgDevice(QIODevice *device, Document *document, QString *error)
                 transforms.push(transform);
                 styles.push(style);
                 groupStack.push(groupId);
+                groupPushed.push(true);
                 continue;
             }
 
             if (name == QLatin1String("text")) {
-                const QString text = xml.readElementText(QXmlStreamReader::IncludeChildElements)
-                                         .simplified();
+                // Text is usually wrapped in <tspan> elements that carry the
+                // font and colour (libcdr and Inkscape both do this).
+                QString text;
+                SvgStyle textStyle = style;
+                int depth = 1;
+                while (!xml.atEnd() && depth > 0) {
+                    xml.readNext();
+                    if (xml.isStartElement()) {
+                        ++depth;
+                        if (xml.name() == QLatin1String("tspan")) {
+                            const QXmlStreamAttributes span = xml.attributes();
+                            if (span.hasAttribute(QStringLiteral("font-family")))
+                                applyStyleString(textStyle,
+                                                 QStringLiteral("font-family:%1")
+                                                     .arg(span.value(QStringLiteral("font-family")).toString()));
+                            if (span.hasAttribute(QStringLiteral("font-size")))
+                                applyStyleString(textStyle,
+                                                 QStringLiteral("font-size:%1")
+                                                     .arg(span.value(QStringLiteral("font-size")).toString()));
+                            if (span.hasAttribute(QStringLiteral("font-weight")))
+                                applyStyleString(textStyle,
+                                                 QStringLiteral("font-weight:%1")
+                                                     .arg(span.value(QStringLiteral("font-weight")).toString()));
+                            if (span.hasAttribute(QStringLiteral("font-style")))
+                                applyStyleString(textStyle,
+                                                 QStringLiteral("font-style:%1")
+                                                     .arg(span.value(QStringLiteral("font-style")).toString()));
+                            if (span.hasAttribute(QStringLiteral("fill")))
+                                applyStyleString(textStyle,
+                                                 QStringLiteral("fill:%1")
+                                                     .arg(span.value(QStringLiteral("fill")).toString()));
+                            if (span.hasAttribute(QStringLiteral("text-anchor")))
+                                applyStyleString(textStyle,
+                                                 QStringLiteral("text-anchor:%1")
+                                                     .arg(span.value(QStringLiteral("text-anchor")).toString()));
+                        }
+                    } else if (xml.isCharacters()) {
+                        text += xml.text();
+                    } else if (xml.isEndElement()) {
+                        --depth;
+                    }
+                }
+                text = text.simplified();
                 if (text.isEmpty())
                     continue;
                 const qreal x = lengthValue(attributes.value(QStringLiteral("x")).toString(), 0.0);
@@ -485,9 +811,10 @@ bool importSvgDevice(QIODevice *device, Document *document, QString *error)
                 const qreal rotation = qRadiansToDegrees(
                     std::atan2(transform.m12(), transform.m11()));
 
-                QFont font(style.fontFamily);
-                font.setPixelSize(qMax(4, qRound(style.fontSize * scale)));
-                font.setBold(style.bold);
+                QFont font(textStyle.fontFamily);
+                font.setPixelSize(qMax(4, qRound(textStyle.fontSize * scale)));
+                font.setBold(textStyle.bold);
+                font.setItalic(textStyle.italic);
                 QFontMetricsF metrics(font);
                 const qreal width = metrics.horizontalAdvance(text) + 8.0;
 
@@ -495,25 +822,104 @@ bool importSvgDevice(QIODevice *device, Document *document, QString *error)
                 object.type = ShapeType::Text;
                 object.text = text;
                 object.font = font;
-                object.fill = style.fill;
+                object.fill = textStyle.fill;
                 object.hasFill = true;
-                object.stroke = style.stroke;
-                object.hasStroke = style.hasStroke;
-                object.strokeWidth = style.strokeWidth;
-                object.opacity = style.opacity;
-                object.textAlign = style.textAnchor;
+                object.stroke = textStyle.stroke;
+                object.hasStroke = textStyle.hasStroke;
+                object.strokeWidth = textStyle.strokeWidth;
+                object.opacity = textStyle.opacity;
+                object.textAlign = textStyle.textAnchor;
                 object.textBox = QRectF(0, 0, width, metrics.height() + 4);
                 qreal offsetX = 0.0;
-                if (style.textAnchor == 1)
+                if (textStyle.textAnchor == 1)
                     offsetX = -width / 2.0;
-                else if (style.textAnchor == 2)
+                else if (textStyle.textAnchor == 2)
                     offsetX = -width;
                 object.pos = position - QPointF(offsetX * std::cos(qDegreesToRadians(rotation)),
                                                 metrics.ascent());
                 object.rotation = rotation;
                 object.layer = 0;
                 object.group = groupStack.top();
-                applyShapeStyle(object, style, transform, gradients);
+                applyShapeStyle(object, textStyle, transform, gradients);
+                result.objects.append(object);
+                continue;
+            }
+
+            if (name == QLatin1String("use")) {
+                QString href = attributes.value(QStringLiteral("xlink:href")).toString();
+                if (href.isEmpty())
+                    href = attributes.value(QStringLiteral("href")).toString();
+                if (href.startsWith(QLatin1Char('#')))
+                    href = href.mid(1);
+                if (definitions.contains(href)) {
+                    QTransform local = transform;
+                    local.translate(lengthValue(attributes.value(QStringLiteral("x")).toString(), 0.0),
+                                    lengthValue(attributes.value(QStringLiteral("y")).toString(), 0.0));
+                    const QPainterPath mapped =
+                        rootTransform.map(local.map(definitions.value(href)));
+                    if (!mapped.isEmpty()) {
+                        VectorObject object;
+                        object.type = ShapeType::Bezier;
+                        object.path = mapped;
+                        object.pos = QPointF(0, 0);
+                        object.layer = 0;
+                        object.group = groupStack.top();
+                        applyShapeStyle(object, style, transform, gradients);
+                        result.objects.append(object);
+                    }
+                } else if (definitionImages.contains(href)) {
+                    const QImage image = definitionImages.value(href);
+                    const QTransform full = rootTransform * transform;
+                    const qreal x = lengthValue(attributes.value(QStringLiteral("x")).toString(), 0.0);
+                    const qreal y = lengthValue(attributes.value(QStringLiteral("y")).toString(), 0.0);
+                    const qreal width = lengthValue(
+                        attributes.value(QStringLiteral("width")).toString(), image.width());
+                    const qreal height = lengthValue(
+                        attributes.value(QStringLiteral("height")).toString(), image.height());
+                    const QRectF mapped = full.mapRect(QRectF(x, y, width, height));
+                    if (mapped.width() >= 0.5 && mapped.height() >= 0.5) {
+                        VectorObject object;
+                        object.type = ShapeType::Image;
+                        object.image = image;
+                        object.textBox = QRectF(0, 0, mapped.width(), mapped.height());
+                        object.pos = mapped.topLeft();
+                        object.rotation = qRadiansToDegrees(
+                            std::atan2(full.m12(), full.m11()));
+                        object.opacity = qBound(0.0, style.opacity, 1.0);
+                        object.layer = 0;
+                        object.group = groupStack.top();
+                        result.objects.append(object);
+                    }
+                }
+                continue;
+            }
+
+            if (name == QLatin1String("image")) {
+                QString href = attributes.value(QStringLiteral("xlink:href")).toString();
+                if (href.isEmpty())
+                    href = attributes.value(QStringLiteral("href")).toString();
+                const QImage image = imageFromHref(href);
+                if (image.isNull())
+                    continue;
+                const qreal x = lengthValue(attributes.value(QStringLiteral("x")).toString(), 0.0);
+                const qreal y = lengthValue(attributes.value(QStringLiteral("y")).toString(), 0.0);
+                const qreal width = lengthValue(
+                    attributes.value(QStringLiteral("width")).toString(), image.width());
+                const qreal height = lengthValue(
+                    attributes.value(QStringLiteral("height")).toString(), image.height());
+                const QTransform full = rootTransform * transform;
+                const QRectF mapped = full.mapRect(QRectF(x, y, width, height));
+                if (mapped.width() < 0.5 || mapped.height() < 0.5)
+                    continue;
+                VectorObject object;
+                object.type = ShapeType::Image;
+                object.image = image;
+                object.textBox = QRectF(0, 0, mapped.width(), mapped.height());
+                object.pos = mapped.topLeft();
+                object.rotation = qRadiansToDegrees(std::atan2(full.m12(), full.m11()));
+                object.opacity = qBound(0.0, style.opacity, 1.0);
+                object.layer = 0;
+                object.group = groupStack.top();
                 result.objects.append(object);
                 continue;
             }
@@ -571,10 +977,12 @@ bool importSvgDevice(QIODevice *device, Document *document, QString *error)
             const QString name = xml.name().toString();
             if (name == QLatin1String("defs"))
                 inDefs = false;
-            else if (name == QLatin1String("g") && transforms.size() > 1) {
-                transforms.pop();
-                styles.pop();
-                groupStack.pop();
+            else if (name == QLatin1String("g") && !groupPushed.isEmpty()) {
+                if (groupPushed.pop()) {
+                    transforms.pop();
+                    styles.pop();
+                    groupStack.pop();
+                }
             }
         }
     }
@@ -584,7 +992,7 @@ bool importSvgDevice(QIODevice *device, Document *document, QString *error)
             *error = QStringLiteral("Ошибка SVG: %1").arg(xml.errorString());
         return false;
     }
-    if (result.objects.isEmpty()) {
+    if (result.objects.isEmpty() && !allowEmpty) {
         if (error)
             *error = QStringLiteral("В SVG не найдено поддерживаемых объектов.");
         return false;
@@ -604,10 +1012,11 @@ bool importSvgFile(const QString &path, Document *document, QString *error)
             *error = QStringLiteral("Не удалось открыть SVG: %1").arg(file.errorString());
         return false;
     }
-    return importSvgDevice(&file, document, error);
+    return importSvgDevice(&file, document, error, false);
 }
 
-bool importSvgData(const QByteArray &data, Document *document, QString *error)
+bool importSvgData(const QByteArray &data, Document *document, QString *error,
+                   bool allowEmpty)
 {
     QByteArray copy = data;
     QBuffer buffer(&copy);
@@ -616,5 +1025,5 @@ bool importSvgData(const QByteArray &data, Document *document, QString *error)
             *error = QStringLiteral("Не удалось прочитать SVG из памяти.");
         return false;
     }
-    return importSvgDevice(&buffer, document, error);
+    return importSvgDevice(&buffer, document, error, allowEmpty);
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDialog>
+#include <QImage>
 #include <QVector>
 
 #include "CodeGenerator.h"
@@ -48,10 +49,14 @@ private:
     QDoubleSpinBox *m_height = nullptr;
     QToolButton *m_foreground = nullptr;
     QToolButton *m_background = nullptr;
+    QToolButton *m_logoButton = nullptr;
+    QToolButton *m_logoClear = nullptr;
+    QDoubleSpinBox *m_logoScale = nullptr;
     QCheckBox *m_showText = nullptr;
     QLabel *m_status = nullptr;
     CodePreview *m_preview = nullptr;
     QColor m_color = QColor(0, 0, 0);
     QColor m_backgroundColor = QColor(255, 255, 255);
+    QImage m_logo;
     bool m_updating = false;
 };
